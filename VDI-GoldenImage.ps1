@@ -48,6 +48,13 @@
 .PARAMETER ConfigFile
    Specifies a configuration file to load and override script variables (useful for easy updating of this script)
    If not specified the script tries to find and import a file named as script + '.config' e.g. 'VDI-GoldenImage.ps1.config'
+.PARAMETER Unattended
+   Runs without any interactive prompt (for automation). Download prompts are answered from $VAR.UnattendedDownload,
+   "Continue the installation?" prompts are answered Yes, Horizon Recording registration (needs a password) is skipped with a warning.
+   Requires -Action (exit code 2 otherwise). Exit code: 0 = success, 1 = at least one error was reported.
+.PARAMETER ResultFile
+   Path of a JSON result file written at the end of the script: action, success, errors, finishedAt and versions (installed version of each SW from $SwSet).
+   When specified, the script ends with exit code 0 (success) or 1 (errors).
 .INPUTS
    System.String or Empty
 .OUTPUTS
@@ -55,6 +62,9 @@
 .EXAMPLE
   # Run script and display menu list of all script actions
      powershell C:\ProgramData\VDI\VDI-GoldenImage.ps1
+.EXAMPLE
+  # Unattended run (no prompts) of one action with JSON result file
+     PS> VDI-GoldenImage.ps1 -Action AppVolumes -Unattended -ResultFile C:\ProgramData\VDI\result.json
 .EXAMPLE
   # Enable and run OS/Office/SW updates in Golden Image
      PS> VDI-GoldenImage.ps1 -Action Update
@@ -78,8 +88,15 @@ param (
         [ValidateSet("Update", "Finalize", "FinalizeFast", "SDelete", "Defrag", "VmTools", "Horizon", "DEM", "AppVolumes", "HorizonRec", "FSLogix", "MsTeams", "OneDrive", "GoogleDrive", "CfgInfo", "Exit")]
         [string] $Action,
     [Parameter(Mandatory=$false)]
-            [string] $ConfigFile
+            [string] $ConfigFile,
+    [Parameter(Mandatory=$false)]
+        [switch] $Unattended,
+    [Parameter(Mandatory=$false)]
+        [string] $ResultFile
 )
+
+# Errors reported via 'MsgFce -Output error' (used for exit code and result file)
+$script:ScriptErrors = New-Object 'System.Collections.Generic.List[string]'
 
 #----------------[ Settings ]----------------
 $VAR = @{
@@ -172,6 +189,8 @@ $VAR = @{
    InstallSrcDir = "Install"  # relative path to $_.ScriptPath
   # Ask user before installing a newer version of any agent software
    InstallerAskIfNewer = $true  
+  # Unattended mode (-Unattended): answer to "Download the latest installer from the web?" prompts ($true = download, $false = use installer files already in InstallSrcDir)
+   UnattendedDownload = $true
 
  # --- Other Settings ---
   # Enable SDelete Action (Zero Free Space). Recommended for Thin Provisioned disks on VMFS/NFS.
@@ -345,6 +364,7 @@ Function MsgFce{
     # Msg
     $Msg = if($StripHtml){ $Msg -replace "<[^>]*?>" } else{ $Msg }
     if($Output -eq "return"){ return "`r`n$($Msg)" }
+    if($Output -eq "error"){ $script:ScriptErrors.Add($Msg) }
 
     # Write-Host Msg
     $WriteHostArgs = @{ Object = $Msg }
@@ -360,6 +380,17 @@ Function MsgFce{
     }
     # Padding: Empty Lines After
     if($LinesAfter){ 1..$LinesAfter | ForEach-Object { Write-Host ""; AddEmailBody "<br />" } }
+}
+
+# Prompt helper: returns $Default without prompting in -Unattended mode, otherwise shows MenuSimple
+function Get-PromptAnswer{
+    Param(
+        [Parameter(Mandatory=$True)] [ValidateSet("Yes","No")] [string] $Default,
+        [string[]] $MenuItems = @("Yes","No"),
+        [string] $Title
+    )
+    if($script:Unattended){ return $Default }
+    return (MenuSimple -MenuItems $MenuItems -Title $Title)
 }
 
 # Simple choice menu FCE (Writes an output of array items to select)
@@ -751,7 +782,7 @@ function Invoke-VdiSoftwareInstall{
             } else{
                 MsgFce "INFO: Installer for '$($SwSettings.Name)' is ready (version: $($sourceVersion))"
             }
-            $continue = if($script:VAR.InstallerAskIfNewer){ MenuSimple -MenuItems "Yes","No" -Title "Continue the installation?" } else{ "Yes" }
+            $continue = if($script:VAR.InstallerAskIfNewer){ Get-PromptAnswer -Default "Yes" -Title "Continue the installation?" } else{ "Yes" }
             if($continue -eq "Yes"){
                 if($PreInstallAction){
                     MsgFce "INFO: Running pre-installation tasks..."
@@ -905,7 +936,7 @@ function Invoke-SDelete{
         # Check if SDelete utility exists in the OSOT directory
         if(!(Test-Path -Path $SDeletePath)){
             MsgFce "WARN: SDelete utility ('$($SDeleteFileName)') was not found in OSOT path ('$($OsotPath)')" -Output warn
-            $sel = MenuSimple -MenuItems "Yes", "No" -Title "Download SDelete from the web and save it to the OSOT directory?"
+            $sel = Get-PromptAnswer -Default $(if($VAR.UnattendedDownload){ "Yes" } else{ "No" }) -Title "Download SDelete from the web and save it to the OSOT directory?"
             if($sel -eq "Yes"){
                 try{
                     $DownloadUrl = "https://download.sysinternals.com/files/SDelete.zip"
@@ -1070,6 +1101,11 @@ $MenuAdd = { param($Label, $Condition=$true) if($Condition){ $script:MENU += $La
 
 # Display menu if no Action specified ---
 if($Action -eq ""){
+    if($Unattended){
+        MsgFce "ERROR: -Unattended requires the -Action parameter (no menu in unattended mode)" -Output error
+        if($Host.Name -match "ConsoleHost"){ Stop-Transcript | out-null }
+        exit 2
+    }
     $menuSel = MenuSimple -MenuItems $MENU -Title $VAR.ScriptMenuTitle
     $Action = GetMenuAction $menuSel
 }
@@ -1270,7 +1306,9 @@ elseif($Action -like "AppVolumes"){
 # --- Horizon Recording Agent ---
 elseif($Action -like "HorizonRec"){
     MsgFce "INFO: Action: Install/Update $($SwSet.$Action.Name)" -Output verbose
-    if($script:VAR.HorizonRecServerAdressProp -match "^https:\/\/[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}:\d+$"){
+    if($Unattended){
+        MsgFce "WARN: Unattended mode - Horizon Recording Agent registration requires a password prompt => installation skipped" -Output warn
+    } elseif($script:VAR.HorizonRecServerAdressProp -match "^https:\/\/[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}:\d+$"){
         $PreInstall = {
             $Passw = Read-Host "Please enter password for recording user '$($script:VAR.HorizonRecUser)'" -AsSecureString
             $Passw = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Passw))
@@ -1290,7 +1328,7 @@ elseif($Action -like "HorizonRec"){
 elseif($Action -like "FSLogix"){
     MsgFce "INFO: Action: Install/Update $($SwSet.$Action.Name)" -Output verbose
     # Download Installer?
-    $sel = MenuSimple -MenuItems "Yes","No" -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
+    $sel = Get-PromptAnswer -Default $(if($VAR.UnattendedDownload){ "Yes" } else{ "No" }) -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
     if($sel -eq "Yes"){
         $swDownloadUrl = "https://aka.ms/fslogix_download"
         MsgFce "...downloading the latest '$($SwSet.$Action.Name)' installation package (link: $($swDownloadUrl))" -Output note        
@@ -1330,7 +1368,7 @@ elseif($Action -like "FSLogix"){
 elseif($Action -like "MsTeams"){
     MsgFce "INFO: Action: Install/Update $($SwSet.$Action.Name)" -Output verbose
     # Download Installer?
-    $sel = MenuSimple -MenuItems "Yes","No" -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer/bootstrapper from the web?"
+    $sel = Get-PromptAnswer -Default $(if($VAR.UnattendedDownload){ "Yes" } else{ "No" }) -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer/bootstrapper from the web?"
     if($sel -eq "Yes"){
         $swDownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2243204&clcid=0x409"
         MsgFce "...downloading the latest '$($SwSet.$Action.Name)' installation Bootstrapper (link: $($swDownloadUrl))" -Output note                
@@ -1362,7 +1400,7 @@ elseif($Action -like "MsTeams"){
 elseif($Action -like "OneDrive"){
     MsgFce "INFO: Install/Update $($SwSet.$Action.Name) (All Users)" -Output verbose
     # Download Installer?
-    $sel = MenuSimple -MenuItems "Yes","No" -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
+    $sel = Get-PromptAnswer -Default $(if($VAR.UnattendedDownload){ "Yes" } else{ "No" }) -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
     if($sel -eq "Yes"){
         $swDownloadUrl = "https://go.microsoft.com/fwlink/?linkid=844652"
         MsgFce "...downloading the latest '$($SwSet.$Action.Name)' installation package (link: $($swDownloadUrl))" -Output note
@@ -1388,7 +1426,7 @@ elseif($Action -like "OneDrive"){
 elseif($Action -like "GoogleDrive"){
     MsgFce "INFO: Install/Update $($SwSet.$Action.Name)" -Output verbose
     # Download Installer?
-    $sel = MenuSimple -MenuItems "Yes","No" -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
+    $sel = Get-PromptAnswer -Default $(if($VAR.UnattendedDownload){ "Yes" } else{ "No" }) -Title "Download the latest version of the '$($SwSet.$Action.Name)' installer from the web?"
     if($sel -eq "Yes"){
         $swDownloadUrl = "https://dl.google.com/drive-file-stream/GoogleDriveSetup.exe"
         MsgFce "...downloading the latest '$($SwSet.$Action.Name)' installation package (link: $($swDownloadUrl))" -Output verbose
@@ -1429,3 +1467,33 @@ MsgFce $msg -Output note -LinesBefore 1
 
 # Transcript Log - Stop
 if($Host.Name -match "ConsoleHost"){ Stop-Transcript | out-null }
+
+# --- Result file / exit code (only for -Unattended or -ResultFile; interactive behavior unchanged) ---
+if($ResultFile){
+    try{
+        $versions = [ordered] @{}
+        foreach($key in $SwSet.Keys){
+            $ver = $null
+            try{
+                $swReg = Get-SwRegDetail -DisplayName "*$($SwSet[$key].Name)*"
+                if($swReg){ $ver = [string] (@($swReg)[0].DisplayVersion) }
+            } catch{ $ver = $null }
+            $versions[$key] = $ver
+        }
+        $result = [ordered] @{
+            action     = [string] $Action
+            success    = ($script:ScriptErrors.Count -eq 0)
+            errors     = @($script:ScriptErrors)
+            finishedAt = (Get-Date).ToString("o")
+            versions   = $versions
+        }
+        $resultDir = Split-Path -Path $ResultFile -Parent
+        if($resultDir -and !(Test-Path $resultDir -PathType Container)){ New-Item -Path $resultDir -ItemType Directory -Force | out-null }
+        $result | ConvertTo-Json -Depth 4 | Set-Content -Path $ResultFile -Encoding UTF8
+    } catch{
+        Write-Host "WARN: Unable to write result file '$($ResultFile)': $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+if($Unattended -or $ResultFile){
+    if($script:ScriptErrors.Count -gt 0){ exit 1 } else{ exit 0 }
+}
