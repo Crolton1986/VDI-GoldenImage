@@ -13,7 +13,7 @@
   AppVolumes = @{ Server = 'avm01.domain.local';  CredentialSecret = 'GI-AppVol'; SkipCertificateCheck = $false
                   TestPackages = @('Notepad++')            # packages assigned to the test pool's computer OU
                   # API paths differ between App Volumes releases: confirm against your AVM's API docs
-                  Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities'; Attachments = '/app_volumes/app_attachments' } }
+                  Endpoints = @{ Session = '/cv_api/sessions'; OnlineEntities = '/cv_api/online_entities'; Attachments = '/app_volumes/app_attachments' } }
 
   # The golden image VM and what runs inside it
   GoldenImage = @{

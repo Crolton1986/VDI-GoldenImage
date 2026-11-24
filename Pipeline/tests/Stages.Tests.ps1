@@ -275,6 +275,10 @@ Describe 'Test-GIPoolHealth -IncludeAppVolumes' {
             if ($global:GITestCtx.AvThrow) { throw 'AVM unreachable' }
             if ($Path -like '*online_entities*') { $global:GITestCtx.OnlineResp } else { $global:GITestCtx.AttachResp }
         }
+        Mock -ModuleName VDI-GIPipeline Get-GIAppVolOnlineEntities {
+            if ($global:GITestCtx.AvThrow) { throw 'AVM unreachable' }
+            @{ Entities = @(Get-GIAppVolCollection $global:GITestCtx.OnlineResp); Path = '/cv_api/online_entities'; Trail = @() }
+        }
         Set-ModVar AvThrow $false
     }
     AfterEach {

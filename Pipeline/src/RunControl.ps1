@@ -275,9 +275,25 @@ function Test-GIConnection {
                 return @{ ok = $true; detail = "Logged in to $($Config.Horizon.Server); $n desktop pool(s) visible." }
             }
             'AppVolumes' {
-                Connect-GIAppVol -Config $Config
-                $online = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)))
-                return @{ ok = $true; detail = "Logged in to $($Config.AppVolumes.Server); $($online.Count) online entities." }
+                $trail = [System.Collections.Generic.List[string]]::new()
+                $hints = [System.Collections.Generic.List[string]]::new()
+                try {
+                    Connect-GIAppVol -Config $Config
+                    $trail.AddRange([string[]]$script:GIAppVol.Trail)
+                    if ($script:GIAppVol.SessionPath -ne (Get-GIAppVolEndpoint -Config $Config -Name Session)) {
+                        $hints.Add("Login worked at $($script:GIAppVol.SessionPath); set Session endpoint to that.")
+                    }
+                    $on = Get-GIAppVolOnlineEntities -Config $Config
+                    $trail.AddRange([string[]]$on.Trail)
+                    if ($on.Path -ne (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)) {
+                        $hints.Add("Online entities worked at $($on.Path); set Online entities endpoint to that.")
+                    }
+                } catch {
+                    if ($_.Exception.Data.Contains('Trail')) { $trail.AddRange([string[]]$_.Exception.Data['Trail']) } else { $trail.Add($_.Exception.Message) }
+                    return @{ ok = $false; detail = (@("App Volumes test failed on $($Config.AppVolumes.Server).") + $trail) -join "`n" }
+                }
+                $head = "Logged in to $($Config.AppVolumes.Server); $($on.Entities.Count) online entities."
+                return @{ ok = $true; detail = (@($head) + $hints + $trail) -join "`n" }
             }
             'GoldenImage' {
                 Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop | Out-Null

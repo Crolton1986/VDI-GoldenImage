@@ -477,7 +477,7 @@ function Test-GIPoolHealth {
         # AVM response shapes vary by release; match each record's JSON text against the machine name
         # so the check doesn't depend on exact field names. Endpoints are set in config.
         try {
-            $online = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)))
+            $online = @((Get-GIAppVolOnlineEntities -Config $Config).Entities)
             $attach = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name Attachments)))
             $onlineText = @($online | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 })
             $attachText = @($attach | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 })

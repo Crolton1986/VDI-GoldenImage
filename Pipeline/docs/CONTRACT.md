@@ -121,7 +121,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
   Horizon    = @{ Server = 'hzcs01.domain.local'; CredentialSecret = 'GI-Horizon'; Domain = 'DOMAIN'; SkipCertificateCheck = $false }
   AppVolumes = @{ Server = 'avm01.domain.local';  CredentialSecret = 'GI-AppVol'; SkipCertificateCheck = $false
                   TestPackages = @('Notepad++')            # packages assigned to the test pool's computer OU
-                  Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities'; Attachments = '/app_volumes/app_attachments' } }
+                  Endpoints = @{ Session = '/cv_api/sessions'; OnlineEntities = '/cv_api/online_entities'; Attachments = '/app_volumes/app_attachments' } }
   GoldenImage = @{
     VmName            = 'W11-GI-01'
     GuestCredentialSecret = 'GI-GuestAdmin'
