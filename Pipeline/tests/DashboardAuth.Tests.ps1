@@ -54,3 +54,50 @@ Describe 'Approval form' {
         New-GIRunDetailPage -Run $run -ApprovalFormHtml '<form id="x"></form>' | Should -Match '<form id="x">'
     }
 }
+
+Describe 'Roles and POST checks' {
+    BeforeAll {
+        $script:base = @{ NoAuth = $false; LocalAdmin = $false; ApproverShort = 'VDI-Pipeline-Approvers'; AdminShort = 'VDI-Pipeline-Admins'; FormSecret = $secret }
+        function New-Post($Groups, $FormId, [switch]$BadToken) {
+            $ev = New-Event $Groups
+            $tok = if ($BadToken) { 'x' } else { Get-GIFormToken -Secret $secret -User 'DOMAIN\jdoe' -RunId $FormId }
+            $ev | Add-Member -NotePropertyName Data -NotePropertyValue @{ token = $tok }
+            $ev
+        }
+    }
+    It 'separates admin from approver' {
+        Test-GIDashboardAdmin -Context $base -WebEvent (New-Event @('VDI-Pipeline-Admins')) | Should -BeTrue
+        Test-GIDashboardAdmin -Context $base -WebEvent (New-Event @('VDI-Pipeline-Approvers')) | Should -BeFalse
+        Test-GIDashboardApprover -Context $base -WebEvent (New-Event @('VDI-Pipeline-Admins')) | Should -BeFalse
+    }
+    It 'treats the LocalAdmin caller as admin and approver' {
+        $lc = $base.Clone(); $lc.NoAuth = $true; $lc.LocalAdmin = $true
+        Test-GIDashboardAdmin -Context $lc -WebEvent $null | Should -BeTrue
+        Test-GIDashboardApprover -Context $lc -WebEvent $null | Should -BeTrue
+        Get-GIDashboardUser -Context $lc -WebEvent $null | Should -Be 'local-admin'
+    }
+    It 'allows an admin with a valid token and same origin' {
+        $r = Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Admins') 'run') -Role Admin -FormId 'run' -Headers @{ Origin = 'https://mgmt01:8443'; Host = 'mgmt01:8443' }
+        $r | Should -BeNullOrEmpty
+    }
+    It 'refuses viewers and approvers on admin forms' {
+        (Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Viewers') 'run') -Role Admin -FormId 'run').Code | Should -Be 403
+        (Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Approvers') 'run') -Role Admin -FormId 'run').Code | Should -Be 403
+    }
+    It 'refuses a bad token, a token for another form, and a cross-origin post' {
+        (Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Admins') 'run' -BadToken) -Role Admin -FormId 'run').Code | Should -Be 403
+        (Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Admins') 'settings:vCenter') -Role Admin -FormId 'run').Code | Should -Be 403
+        $r = Get-GIPostRejection -Context $base -WebEvent (New-Post @('VDI-Pipeline-Admins') 'run') -Role Admin -FormId 'run' -Headers @{ Origin = 'https://evil.example'; Host = 'mgmt01:8443' }
+        $r.Message | Should -Match 'Cross-origin'
+    }
+    It 'refuses every POST in plain NoAuth mode' {
+        $na = $base.Clone(); $na.NoAuth = $true
+        (Get-GIPostRejection -Context $na -WebEvent (New-Post @('VDI-Pipeline-Admins') 'run') -Role Admin -FormId 'run').Message | Should -Match 'read-only'
+    }
+    It 'adds admin nav links once' {
+        $html = '<nav><a href="/">Runs</a></nav>'
+        $once = Add-GIAdminNav -Html $html
+        $once | Should -Match 'href="/settings"'
+        Add-GIAdminNav -Html $once | Should -Be $once
+    }
+}

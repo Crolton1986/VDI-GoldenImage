@@ -3,7 +3,7 @@
 .SYNOPSIS
   Registers (or removes) the Windows scheduled tasks that run the golden image pipeline.
 .DESCRIPTION
-  Creates three tasks on the management server. All run pwsh.exe under the service account
+  Creates four tasks on the management server. All run pwsh.exe under the service account
   passed in -Credential, whether or not the user is logged on, with highest privileges.
 
     VDI-GI-Pipeline   Invoke-GIPipeline.ps1 -Stage All, weekly (-PipelineDay / -PipelineTime)
@@ -11,6 +11,11 @@
                       "not finished yet", which is expected until the push completes.
     VDI-GI-Dashboard  Web\Start-GIDashboard.ps1 at system startup, restarted on failure
                       (3 times, 1 minute apart), no execution time limit.
+    VDI-GI-Runner     Invoke-GIPipeline.ps1 -FromRequest, no trigger. The dashboard queues a
+                      request and starts this task (Go, retry, single stage, PostCheck, rollback).
+
+  The dashboard runs as the same account, so it can start VDI-GI-Runner and update the weekly
+  trigger of VDI-GI-Pipeline from the Schedule settings page.
 
   Re-running the script updates existing tasks. Needs Windows, PowerShell 7 and an elevated session.
 .PARAMETER Credential
@@ -56,7 +61,7 @@ if (-not $principalCheck.IsInRole([Security.Principal.WindowsBuiltInRole]::Admin
     throw 'Run this script from an elevated (Run as administrator) PowerShell session.'
 }
 
-$taskNames = 'VDI-GI-Pipeline', 'VDI-GI-PostCheck', 'VDI-GI-Dashboard'
+$taskNames = 'VDI-GI-Pipeline', 'VDI-GI-PostCheck', 'VDI-GI-Dashboard', 'VDI-GI-Runner'
 
 if ($Unregister) {
     foreach ($name in $taskNames) {
@@ -125,11 +130,20 @@ $definitions = @(
         Trigger     = New-ScheduledTaskTrigger -AtStartup
         Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     }
+    @{
+        Name        = 'VDI-GI-Runner'
+        Description = 'Golden image pipeline: runs the request queued from the dashboard. Started on demand.'
+        Action      = New-GITaskAction -ScriptPath $pipelineScript -ScriptArgs '-FromRequest'
+        Trigger     = $null
+        Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
+    }
 )
 
 foreach ($d in $definitions) {
     if ($PSCmdlet.ShouldProcess($d.Name, "Register scheduled task as $userName")) {
-        $task = New-ScheduledTask -Action $d.Action -Trigger $d.Trigger -Settings $d.Settings -Principal $principal -Description $d.Description
+        $taskArgs = @{ Action = $d.Action; Settings = $d.Settings; Principal = $principal; Description = $d.Description }
+        if ($d.Trigger) { $taskArgs.Trigger = $d.Trigger }
+        $task = New-ScheduledTask @taskArgs
         Register-ScheduledTask -TaskName $d.Name -InputObject $task -User $userName -Password $password -Force | Out-Null
         Write-Host "Registered task $($d.Name)."
     }

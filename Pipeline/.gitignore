@@ -3,3 +3,5 @@ state/*
 reports/*
 !reports/.gitkeep
 logs/
+config/settings.json
+config/settings.json.bak

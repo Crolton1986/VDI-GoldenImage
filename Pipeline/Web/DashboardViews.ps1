@@ -148,6 +148,26 @@ tr.cat td{background:#eef2f6;font-weight:600}
 .kv dt{color:var(--mut)}.kv dd{margin:0}
 .links a{margin-right:14px}
 code,pre{font-family:ui-monospace,Consolas,monospace}
+.ferr{border:0;background:none;padding:0;color:#c0392b;white-space:normal;display:block;font-size:13px}
+.settings-wrap{display:grid;grid-template-columns:200px 1fr;gap:16px;align-items:start}
+.sidemenu{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 0}
+.sidemenu a{display:block;padding:7px 14px;text-decoration:none;color:var(--fg);border-left:4px solid transparent}
+.sidemenu a.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
+.field{margin:12px 0}.field>label,.field>.lbl{display:block;font-weight:600;margin-bottom:3px}
+.field .help{color:var(--mut);font-size:12px;margin-top:2px}
+.field .warn{color:#8a5a00;font-size:12px;margin-top:2px}
+input[type=text],input[type=number],input[type=password],input[type=time],select,textarea{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:4px;max-width:100%}
+input[type=text],textarea{width:100%;max-width:560px}
+.days label{margin-right:10px;white-space:nowrap}
+button{font:inherit;padding:5px 14px;border:1px solid #0b5cad;background:#0b5cad;color:#fff;border-radius:4px;cursor:pointer}
+button.sec{background:#fff;color:#0b5cad}button.danger{background:#c0392b;border-color:#c0392b}
+button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
+.formbox{border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin:10px 0;background:#fafbfc}
+.notice{border-left:5px solid #1e8a44;background:#eef8f1;padding:8px 12px;margin:10px 0}
+.testres{padding:6px 10px;border-radius:4px;margin:8px 0}.testres.ok{background:#e3f4e8;color:#14643a}.testres.fail{background:#fdf0ee;color:#9b2c1f}
+.errsum{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;margin:10px 0}
+table.edit input[type=text],table.edit select,table.edit input[type=number]{width:100%;min-width:90px}
+@media (max-width:600px){.settings-wrap{grid-template-columns:1fr}.sidemenu{display:flex;flex-wrap:wrap}.sidemenu a{border-left:0;border-bottom:3px solid transparent}.sidemenu a.active{border-bottom-color:var(--link)}}
 @media (max-width:600px){main{padding:8px}th,td{padding:5px 4px;font-size:13px}.kv{grid-template-columns:1fr}}
 '@
 }
@@ -158,10 +178,13 @@ function New-GIPage {
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][string]$BodyHtml,   # already-encoded HTML
-        [int]$RefreshSeconds = 0
+        [int]$RefreshSeconds = 0,
+        [switch]$ShowAdminNav
     )
     $refresh = ''
     if ($RefreshSeconds -gt 0) { $refresh = "<meta http-equiv=""refresh"" content=""$RefreshSeconds"">" }
+    $adminNav = ''
+    if ($ShowAdminNav) { $adminNav = ' &middot; <a href="/settings">Settings</a> &middot; <a href="/run">Run</a> &middot; <a href="/audit">Audit</a>' }
     @"
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -170,7 +193,7 @@ $refresh
 <title>$(ConvertTo-GIHtml $Title)</title>
 <style>$(Get-GICss)</style></head>
 <body>
-<header><h1>VDI Golden Image Pipeline</h1><nav><a href="/">Runs</a> &middot; <a href="/pools">Pools</a> &middot; <a href="/api/runs">JSON</a></nav></header>
+<header><h1>VDI Golden Image Pipeline</h1><nav><a href="/">Runs</a> &middot; <a href="/pools">Pools</a>$adminNav &middot; <a href="/api/runs">JSON</a></nav></header>
 <main>
 $BodyHtml
 </main>
@@ -466,10 +489,11 @@ function New-GIApprovalForm {
 
 
 function Get-GIDashboardUser {
-    # DOMAIN\user of the authenticated caller, or 'anonymous' with -NoAuth
+    # DOMAIN\user of the authenticated caller; 'local-admin' with -LocalAdmin; 'anonymous' with -NoAuth
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)]$Context, $WebEvent)
+    if ($Context['LocalAdmin']) { return 'local-admin' }
     if ($Context.NoAuth -or -not $WebEvent -or -not $WebEvent.Auth -or -not $WebEvent.Auth.User) { return 'anonymous' }
     $u = $WebEvent.Auth.User
     $name = if ($u.Username) { [string]$u.Username } else { [string]$u.Name }
@@ -477,11 +501,76 @@ function Get-GIDashboardUser {
     return $name
 }
 
+function Test-GIDashboardGroup {
+    param([Parameter(Mandatory)]$Context, $WebEvent, [string]$Group)
+    if ($Context['LocalAdmin']) { return $true }
+    if ($Context.NoAuth -or -not $Group) { return $false }
+    if (-not $WebEvent -or -not $WebEvent.Auth -or -not $WebEvent.Auth.User) { return $false }
+    return [bool](@($WebEvent.Auth.User.Groups) | Where-Object { $_ -eq $Group })
+}
+
 function Test-GIDashboardApprover {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)]$Context, $WebEvent)
-    if ($Context.NoAuth -or -not $Context.ApproverShort) { return $false }
-    if (-not $WebEvent -or -not $WebEvent.Auth -or -not $WebEvent.Auth.User) { return $false }
-    return [bool](@($WebEvent.Auth.User.Groups) | Where-Object { $_ -eq $Context.ApproverShort })
+    return (Test-GIDashboardGroup -Context $Context -WebEvent $WebEvent -Group $Context['ApproverShort'])
+}
+
+function Test-GIDashboardAdmin {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)]$Context, $WebEvent)
+    return (Test-GIDashboardGroup -Context $Context -WebEvent $WebEvent -Group $Context['AdminShort'])
+}
+
+function Get-GIDashboardConfig {
+    # Fresh config per request so settings saved in the UI are used right away
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Context)
+    $a = @{}
+    if ($Context['ConfigPath']) { $a.Path = $Context['ConfigPath'] }
+    return (Get-GIConfig @a)
+}
+
+function Get-GIPostRejection {
+    <#
+    .SYNOPSIS
+      Shared checks for every state-changing POST. Returns $null when allowed, else @{ Code; Message }.
+      Role: 'Admin' or 'Approver'. FormId must match the id the form's token was issued for.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        $WebEvent,
+        [Parameter(Mandatory)][ValidateSet('Admin', 'Approver')][string]$Role,
+        [Parameter(Mandatory)][string]$FormId,
+        [hashtable]$Headers
+    )
+    if ($Context.NoAuth -and -not $Context['LocalAdmin']) { return @{ Code = 403; Message = 'The dashboard is read-only when it runs without authentication.' } }
+    $ok = if ($Role -eq 'Admin') { Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent } else { Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent }
+    if (-not $ok) { return @{ Code = 403; Message = "You are not in the $($Role.ToLower()) group." } }
+    $origin = if ($Headers) { [string]$Headers['Origin'] } else { '' }
+    $hostHdr = if ($Headers) { [string]$Headers['Host'] } else { '' }
+    if ($origin -and $origin -ne 'null') {
+        try { $auth = ([uri]$origin).Authority } catch { $auth = '' }
+        if ($auth -ne $hostHdr) { return @{ Code = 403; Message = 'Cross-origin request refused.' } }
+    }
+    $user = Get-GIDashboardUser -Context $Context -WebEvent $WebEvent
+    $token = if ($WebEvent -and $WebEvent.Data) { [string]$WebEvent.Data['token'] } else { '' }
+    if (-not (Test-GIFormToken -Secret $Context.FormSecret -User $user -RunId $FormId -Token $token)) {
+        return @{ Code = 403; Message = 'Form expired or invalid. Reload the page and try again.' }
+    }
+    return $null
+}
+
+function Add-GIAdminNav {
+    # Adds Settings/Run/Audit links to a rendered page's nav for admins (pages built before the admin nav existed)
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Html)
+    if ($Html -match 'href="/settings"') { return $Html }
+    $links = ' &middot; <a href="/settings">Settings</a> &middot; <a href="/run">Run</a> &middot; <a href="/audit">Audit</a></nav>'
+    $i = $Html.IndexOf('</nav>')
+    if ($i -lt 0) { return $Html }
+    return $Html.Substring(0, $i) + $links + $Html.Substring($i + 6)
 }

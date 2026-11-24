@@ -1,3 +1,41 @@
+function Copy-GIValue {
+    # Deep copy of dictionaries/arrays so merged results never alias their inputs.
+    param($Value)
+    if ($Value -is [System.Collections.IDictionary]) {
+        $copy = @{}
+        foreach ($k in $Value.Keys) { $copy[$k] = Copy-GIValue $Value[$k] }
+        return $copy
+    }
+    if ($Value -is [System.Collections.IList] -and $Value -isnot [string]) {
+        $arr = @(foreach ($e in $Value) { Copy-GIValue $e })
+        return , $arr
+    }
+    return $Value
+}
+
+function Merge-GIHashtable {
+    <#
+    .SYNOPSIS
+        Deep-merges Overlay over Base and returns a new hashtable (inputs are not modified).
+        Dictionaries merge key by key; every other value (arrays included) replaces.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Base,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Overlay
+    )
+    $result = Copy-GIValue $Base
+    foreach ($key in $Overlay.Keys) {
+        $o = $Overlay[$key]
+        if ($result.ContainsKey($key) -and $result[$key] -is [System.Collections.IDictionary] -and $o -is [System.Collections.IDictionary]) {
+            $result[$key] = Merge-GIHashtable -Base $result[$key] -Overlay $o
+        } else {
+            $result[$key] = Copy-GIValue $o
+        }
+    }
+    return $result
+}
+
 function Get-GIConfig {
     <#
     .SYNOPSIS
@@ -15,6 +53,21 @@ function Get-GIConfig {
     }
     $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
     $config = Import-PowerShellDataFile -LiteralPath $Path
+
+    # Overlay: <Root>/config/settings.json (written by the dashboard) is deep-merged over the psd1
+    $settingsPath = Join-Path (Split-Path -Parent $Path) (Join-Path 'config' 'settings.json')
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $raw = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8
+            $overlay = if ([string]::IsNullOrWhiteSpace($raw)) { @{} } else { $raw | ConvertFrom-Json -AsHashtable -Depth 20 }
+        } catch {
+            throw "Settings overlay '$settingsPath' is not valid JSON: $($_.Exception.Message)"
+        }
+        if ($overlay -isnot [System.Collections.IDictionary]) {
+            throw "Settings overlay '$settingsPath' must contain a JSON object."
+        }
+        $config = Merge-GIHashtable -Base $config -Overlay $overlay
+    }
 
     $required = @(
         'Paths.State', 'Paths.Reports', 'Paths.Logs',
@@ -43,6 +96,7 @@ function Get-GIConfig {
     # Root = folder containing the config file (the Pipeline folder for the default config)
     $root = Split-Path -Parent $Path
     $config['Root'] = $root
+    $config['SettingsPath'] = $settingsPath
     foreach ($name in @('State', 'Reports', 'Logs')) {
         $p = [string]$config.Paths[$name]
         if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $root $p }

@@ -145,9 +145,10 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
   Promotion = @{
     AutoPromote = $false
     MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }   # next window used when no -StartTime given
+    PipelineSchedule  = @{ Day = 'Tuesday'; Time = '20:00' }               # weekly start of the pipeline scheduled task
   }
   Email = @{ Enabled = $false; SmtpServer = 'smtp.domain.local'; Port = 25; From = 'vdi-pipeline@domain.local'; To = @('vdi-team@domain.local'); UseSsl = $false }
-  Dashboard = @{ Port = 8443; CertificateThumbprint = ''; ViewerGroup = 'DOMAIN\VDI-Pipeline-Viewers'; ApproverGroup = 'DOMAIN\VDI-Pipeline-Approvers'; RefreshSeconds = 20 }
+  Dashboard = @{ Port = 8443; CertificateThumbprint = ''; ViewerGroup = 'DOMAIN\VDI-Pipeline-Viewers'; ApproverGroup = 'DOMAIN\VDI-Pipeline-Approvers'; AdminGroup = 'DOMAIN\VDI-Pipeline-Admins'; RefreshSeconds = 20 }
 }
 ```
 
@@ -165,3 +166,102 @@ Microsoft.PowerShell.SecretManagement and returns a `[pscredential]`.
 - Exit code: `0` success, `1` if any `MsgFce -Output error` was emitted, `2` invalid/missing action when unattended.
 - `-ResultFile <path>`: writes JSON
   `{ "action": "AppVolumes", "success": true, "errors": ["..."], "finishedAt": "...", "versions": { "VmTools": "...", "Horizon": "...", ... } }`
+
+---
+
+# Settings, run control, audit (dashboard v2)
+
+## Settings overlay: `config/settings.json`
+
+`pipeline.config.psd1` holds shipped defaults. Edits from the dashboard go to `config/settings.json`
+(path: `<Config.Root>/config/settings.json`, gitignored). Same nested shape as the psd1, but only
+the keys that were changed, e.g.
+
+```json
+{ "vCenter": { "Server": "vcsa02.domain.local" },
+  "Pools": { "Production": [ { "Name": "PRD-W11", "LogoffPolicy": "WAIT_FOR_LOGOFF" } ] } }
+```
+
+`Get-GIConfig` loads the psd1, then deep-merges settings.json over it before validation:
+dictionaries merge key by key (recursively), every other value (arrays included) replaces.
+JSON objects become hashtables (`ConvertFrom-Json -AsHashtable`). Adds `Config.SettingsPath`.
+Writes: `Write-GIJsonAtomic`; previous file copied to `settings.json.bak` first.
+
+## Settings schema (`$script:GISettingsSchema` in src/Settings.ps1)
+
+Ordered dictionary of sections. Each section:
+
+```powershell
+vCenter = @{
+  Title = 'vCenter'; ConfigPath = 'vCenter'; Test = 'vCenter'   # Test: system name for Test-GIConnection, or $null
+  ReadOnly = $false                                            # Dashboard section is ReadOnly
+  Description = 'One line shown under the title.'
+  Fields = @(
+    @{ Key = 'Server'; Label = 'Server (FQDN)'; Type = 'string'; Required = $true; Help = '...' }
+    @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
+  )
+}
+```
+
+- `Key` is relative to the section's `ConfigPath` and may be dotted (`WindowsUpdate.MaxPasses`).
+- Field `Type`:
+  - `string` (optional `Pattern` regex), `int` (`Min`, `Max`), `bool`,
+  - `list`: string array, edited one per line,
+  - `enum`: `Values = @(...)`,
+  - `days`: subset of Monday..Sunday,
+  - `time`: `HH:mm`,
+  - `secret`: the config value is the SecretManagement secret *name*. The form shows username +
+    password for that secret; saving calls `Set-GISecretCredential`. The secret name itself is not
+    editable in the UI. Password is never rendered back. Blank password = keep existing.
+  - `table`: array of hashtables, `Columns = @( <field defs of type string|enum|int|bool> )`, add/remove rows.
+- Optional on any field: `Help`, `Required`, `Warning` (shown next to the field, e.g. ProtectAncestors),
+  `Confirm` (bool fields: turning it on needs a confirmation checkbox, e.g. AutoPromote).
+
+Settings API:
+
+| Function | Behavior |
+|---|---|
+| `Get-GISettingsSchema` | Returns the schema |
+| `Get-GISettingsSection -Config -Section` | `@{ Section; Values = @{ <Key> = <effective value> } }` read from merged Config (secret fields: `@{ Name; IsSet; UserName }` via `Get-GISecretStatus`) |
+| `Test-GISettingsSection -Section -Values <hashtable>` | Returns `@{ <Key> = 'error text' }`, empty when valid. Values are already typed (see ConvertFrom-GISettingsForm) |
+| `ConvertFrom-GISettingsForm -Section -Form <hashtable>` | Converts raw form strings to typed values per schema (`int`, bool from checkbox presence, list split on newlines and trimmed, days from repeated checkbox values, table rows from `<Key>[<i>].<Col>` names). Secret fields are excluded. Returns `@{ Values; Errors }` |
+| `Save-GISettingsSection -Config -Section -Values -By` | Validates, writes only the section's keys into settings.json (deep set), backup + atomic write, audit entry `settings.save` with field-level diff (`old`/`new`; secrets never included). Throws with all errors if invalid |
+
+## Audit log: `state/audit.jsonl`
+
+One JSON object per line: `{ "at": "<o>", "user": "DOMAIN\\x", "action": "...", "target": "...", "detail": {...} }`.
+Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `run.request.cancel`, `approval.approve`, `approval.reject`, `rollback.request`.
+`Write-GIAudit -Config -User -Action -Target [-Detail <hashtable>]` (never throws; Write-Warning on failure),
+`Get-GIAudit -Config [-Last 200]` newest first.
+
+## Pipeline lock: `state/pipeline.lock`
+
+`{ "pid": 1234, "host": "MGMT01", "runId": "...", "stage": "All", "startedAt": "<o>", "requestedBy": "..." }`
+
+- `Enter-GIPipelineLock -Config -Stage [-RunId] [-RequestedBy]`: creates the lock with `FileMode.CreateNew`
+  (atomic). If a lock exists and its PID is alive on this host, throws `Pipeline is busy: ...`.
+  If the PID is gone it's stale: removed, then retried once.
+- `Update-GIPipelineLock -Config -RunId` (sets runId once known), `Exit-GIPipelineLock -Config` (removes only if pid matches).
+- `Get-GIPipelineLock -Config` returns the lock with an added `stale` bool, or `$null`.
+
+## Run request: `state/run-request.json`
+
+```json
+{ "id": "<guid>", "action": "All|FromStage|Stage|PostCheck|Rollback", "stage": "Validate",
+  "runId": "20261124-213005", "pool": "PRD-W11", "snapshotName": null, "forceLogoff": false,
+  "requestedBy": "DOMAIN\\x", "requestedAt": "<o>" }
+```
+
+- `New-GIRunRequest -Config -Action [-Stage] [-RunId] [-Pool] [-SnapshotName] [-ForceLogoff] -RequestedBy`
+  validates (stage in stage list minus Approval/Promote; runId pattern + file exists for FromStage/Stage;
+  pool must be the test pool or a production pool from config for Rollback) and refuses if a request is
+  already pending or the lock is held. Writes atomically, audits `run.request`/`rollback.request`.
+- `Read-GIRunRequest -Config`: reads, deletes, re-validates, returns the request or `$null`.
+- The dashboard then calls `Start-GIRunnerTask` (wraps `Start-ScheduledTask -TaskName VDI-GI-Runner`).
+- `Invoke-GIPipeline.ps1 -FromRequest` executes it. `-FromStage <name> -RunId` runs that stage through Validate.
+
+## Dashboard roles
+
+`Dashboard.AdminGroup`: settings, credentials, Test connection, run controls. `ApproverGroup`: approve/reject.
+`ViewerGroup`: read. Login accepts all three. `-NoAuth`: read-only. `-LocalAdmin`: binds 127.0.0.1, no auth,
+caller is admin + approver (lab/smoke tests only).
