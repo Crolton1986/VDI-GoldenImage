@@ -7,7 +7,7 @@ Runs the monthly golden image routine for Horizon instant-clone pools from a man
 Clone the repository and run the launcher from the Pipeline folder:
 
 ```powershell
-git clone https://github.com/<your-org>/VDI-GoldenImage.git
+git clone --branch claude/practical-brown-xnoy5x https://github.com/Crolton1986/VDI-GoldenImage.git
 cd VDI-GoldenImage\Pipeline
 
 # Production: needs administrator rights, relaunches itself elevated if you aren't
@@ -29,7 +29,7 @@ You can start it from Windows PowerShell 5.1 or PowerShell 7. If PowerShell 7.2 
 | PowerCLI | Turns off the customer experience program and sets how PowerCLI treats invalid vCenter certificates. | Yes | Yes |
 | Vault | Creates the SecretStore vault and sets it to open without a password for the Windows user running setup. | Yes | Yes |
 | Dashboard access | Sets the https port, the certificate (pick one from the machine store or create a self-signed one) and the AD groups for viewers, approvers and admins. | Skipped | Yes |
-| Tasks | Registers the four scheduled tasks (see Scheduling below). | Skipped | Yes |
+| Tasks | Asks for your Windows password and registers the four scheduled tasks (listed under Manual setup, Scheduling). A Skip button leaves Task Scheduler untouched. | Skipped | Yes |
 | Finish | Marks setup complete. | Yes | Yes |
 
 A few things to know before you start:
