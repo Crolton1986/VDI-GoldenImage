@@ -28,9 +28,20 @@ function Write-GIJsonAtomic {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]$InputObject
     )
-    $tmp = "$Path.tmp"
+    # Unique temp name: two writers (web server + setup runner) never share a temp file
+    $tmp = "$Path.$PID.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
     $InputObject | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding UTF8
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
+    # On Windows the replace fails while another process has the file open for reading (the setup page
+    # polls it every 2 s); retry briefly instead of losing the write
+    for ($i = 1; ; $i++) {
+        try {
+            Move-Item -LiteralPath $tmp -Destination $Path -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -ge 10) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
+            Start-Sleep -Milliseconds (100 * $i)
+        }
+    }
 }
 
 function Get-GIRunPath {

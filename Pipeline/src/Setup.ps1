@@ -35,7 +35,11 @@ function Get-GISetupState {
     param([Parameter(Mandatory)] [hashtable] $Config, [switch] $ModeLocked)
     $path = Get-GISetupPath $Config
     if (-not (Test-Path -LiteralPath $path)) { return New-GISetupState -ModeLocked:$ModeLocked }
-    $state = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $state = $null
+    for ($i = 1; -not $state; $i++) {
+        try { $state = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { if ($i -ge 5) { throw "Can't read $($path): $($_.Exception.Message)" }; Start-Sleep -Milliseconds (100 * $i) }
+    }
     foreach ($s in $script:GISetupSteps) {
         $st = $state.steps.$s
         if ($st.status -eq 'running' -and $st.pid -and -not (Test-GIProcessAlive -ProcessId ([int]$st.pid))) {
@@ -197,8 +201,10 @@ function Start-GISetupStep {
     $runner = Join-Path $Config.Root 'Invoke-GISetupStep.ps1'
     if (-not (Test-Path -LiteralPath $runner)) { $runner = Join-Path (Split-Path $PSScriptRoot -Parent) 'Invoke-GISetupStep.ps1' }
     $pwsh = (Get-Process -Id $PID).Path
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Step', $Step)
-    if ($ConfigPath) { $argList += @('-ConfigPath', $ConfigPath) }
+    # Start-Process joins arguments with spaces, so paths must be quoted
+    # (e.g. 'C:\Users\me\OneDrive - Contoso\...' would split at the first space)
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-GIProcessArgument $runner), '-Step', $Step)
+    if ($ConfigPath) { $argList += @('-ConfigPath', (ConvertTo-GIProcessArgument $ConfigPath)) }
     if (-not $PSCmdlet.ShouldProcess($Step, 'Start setup step')) { return }
 
     # Mark running first, so a double click can't start it twice; the runner fills in its pid
@@ -217,7 +223,31 @@ function Start-GISetupStep {
         $s2.steps.$Step.pid = $proc.Id
         Save-GISetupState -Config $Config -State $s2
     }
+
+    # A runner that dies right away (bad arguments, can't load the module) never reports back; catch it here
+    if ($proc.WaitForExit(3000)) {
+        $s3 = Get-GISetupState -Config $Config
+        if ($s3.steps.$Step.status -eq 'running') {
+            $err = ''
+            foreach ($f in "$log.err", $log) {
+                if (Test-Path -LiteralPath $f) { $err = ((Get-Content -LiteralPath $f -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim(); if ($err) { break } }
+            }
+            if (-not $err) { $err = "exit code $($proc.ExitCode)" }
+            Set-GISetupStep -Config $Config -Step $Step -Status failed -Message "The setup process stopped right away: $err (log: $log.err)"
+        }
+    }
     return $proc.Id
+}
+
+function ConvertTo-GIProcessArgument {
+    # Quotes one command-line argument for Start-Process / CreateProcess when it has spaces or quotes
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    # CreateProcess rules: double the backslashes that precede a quote, escape the quote
+    $escaped = [regex]::Replace($Value, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    return '"' + $escaped + '"'
 }
 
 function Set-GISetupMode {
