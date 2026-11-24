@@ -368,6 +368,46 @@ Describe 'Test-GIConnection' {
     }
 }
 
+Describe 'Connect-GITestVIServer' {
+    BeforeAll {
+        # PowerCLI isn't installed where the tests run; define stand-ins so they can be mocked
+        if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { function global:Connect-VIServer { param($Server, $Credential) } }
+        if (-not (Get-Command Set-PowerCLIConfiguration -ErrorAction SilentlyContinue)) { function global:Set-PowerCLIConfiguration { param($Scope, $WebOperationTimeoutSeconds, [switch]$Confirm) } }
+    }
+    BeforeEach {
+        $cfg = New-TestConfig
+        Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { [pscredential]::new('svc-vc', (ConvertTo-SecureString 'x' -AsPlainText -Force)) }
+        Mock -ModuleName VDI-GIPipeline Set-PowerCLIConfiguration {}
+    }
+
+    It 'fails fast without calling Connect-VIServer when port 443 is unreachable' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $false }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer {}
+        { Connect-GITestVIServer -Config $cfg } | Should -Throw "*Can't reach vc on port 443*"
+        Should -Invoke -ModuleName VDI-GIPipeline Connect-VIServer -Times 0 -Exactly
+    }
+
+    It 'turns a denied or unanswered MFA login into a message that names MFA' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $true }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer { throw 'Cannot complete login due to an incorrect user name or password.' }
+        { Connect-GITestVIServer -Config $cfg } | Should -Throw '*svc-vc*Duo*'
+    }
+
+    It 'Test-GIConnection returns ok = $false (not a hang or throw) when the MFA push is denied' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $true }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer { throw 'Cannot complete login due to an incorrect user name or password.' }
+        $r = Test-GIConnection -Config $cfg -System vCenter
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match 'MFA'
+    }
+}
+
+Describe 'Test-GITcpPort' {
+    It 'returns $false for a closed port instead of throwing' {
+        Test-GITcpPort -Server '127.0.0.1' -Port 1 -TimeoutMs 1000 | Should -BeFalse
+    }
+}
+
 Describe 'Set-GIPipelineScheduleTask' {
     It 'reports ok = $false off Windows' -Skip:$IsWindows {
         $cfg = New-TestConfig

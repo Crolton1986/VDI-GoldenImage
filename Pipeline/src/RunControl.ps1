@@ -251,6 +251,100 @@ function Set-GIPipelineScheduleTask {
 
 #----- Connection tests -----
 
+function Test-GITcpPort {
+    <#
+    .SYNOPSIS
+      True when a TCP connection to Server:Port opens within TimeoutMs. Never throws.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)] [string] $Server, [int] $Port = 443, [int] $TimeoutMs = 5000)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($Server, $Port)
+        return ($task.Wait($TimeoutMs) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Connect-GITestVIServer {
+    <#
+    .SYNOPSIS
+      Connect-VIServer for connection tests: fails fast when vCenter isn't reachable on 443 and caps
+      PowerCLI's web operation timeout. The cap leaves room for an MFA push (Duo times out at about
+      60 seconds); a denied or unanswered push comes back as a login error, not a hang.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $server = [string]$Config.vCenter.Server
+    if (-not $server) { throw 'vCenter.Server is empty.' }
+    $cred = Get-GISecretCredential -Name $Config.vCenter.CredentialSecret
+    if (-not (Test-GITcpPort -Server $server -Port 443 -TimeoutMs 5000)) {
+        throw "Can't reach $server on port 443 within 5 seconds (DNS, firewall or proxy)."
+    }
+    try { Set-PowerCLIConfiguration -Scope Session -WebOperationTimeoutSeconds 90 -Confirm:$false -ErrorAction Stop | Out-Null }
+    catch { Write-Verbose "Could not set the PowerCLI web operation timeout: $($_.Exception.Message)" }
+    try {
+        Connect-VIServer -Server $server -Credential $cred -ErrorAction Stop
+    } catch {
+        $m = $_.Exception.Message
+        if ($m -match '(?i)incorrect user name or password|cannot complete login|authentication|denied|timed? ?out|timeout') {
+            throw "vCenter login for $($cred.UserName) failed: $m If this account is behind Duo or another MFA push, the push was denied or not answered in time. Approve it and test again; for scheduled runs, exempt the service account from MFA."
+        }
+        throw
+    }
+}
+
+function Invoke-GIConnectionTest {
+    <#
+    .SYNOPSIS
+      Runs Test-GIConnection in a separate PowerShell process with a hard time limit, so a hung
+      Connect-VIServer, a locked SecretStore prompt or a slow PowerCLI load can't block the web
+      server. Returns @{ ok; detail; seconds }. Never throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [string] $ConfigPath,
+        [Parameter(Mandatory)] [ValidateSet('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Pools', 'Email')] [string] $System,
+        [int] $TimeoutSeconds = 120
+    )
+    $manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'VDI-GIPipeline.psd1'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $job = $null
+    try {
+        $job = Start-Job -ArgumentList $manifest, $ConfigPath, $System -ScriptBlock {
+            param($m, $cp, $sys)
+            $ProgressPreference = 'SilentlyContinue'
+            Import-Module $m -Force -ErrorAction Stop
+            $a = @{}
+            if ($cp) { $a.Path = $cp }
+            $cfg = Get-GIConfig @a
+            $r = Test-GIConnection -Config $cfg -System $sys
+            [pscustomobject]@{ ok = [bool]$r.ok; detail = [string]$r.detail }
+        }
+        $done = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        if (-not $done) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            return @{ ok = $false; seconds = [int]$sw.Elapsed.TotalSeconds
+                detail = "No answer after $TimeoutSeconds seconds; the test was stopped. Likely causes: an MFA (Duo) push that wasn't approved, the server is slow or unreachable, the SecretStore vault is locked and waiting for a password (Unlock-SecretStore / Set-SecretStoreConfiguration -Authentication None for the service account), or PowerCLI is waiting on a certificate or CEIP prompt (run the PowerCLI setup step)." }
+        }
+        $out = @(Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErr)
+        $res = $out | Where-Object { $null -ne $_.PSObject.Properties['ok'] } | Select-Object -Last 1
+        if (-not $res) {
+            $msg = if ($jobErr) { [string]$jobErr[0] } elseif ($job.ChildJobs[0].JobStateInfo.Reason) { $job.ChildJobs[0].JobStateInfo.Reason.Message } else { 'The test process ended without a result.' }
+            return @{ ok = $false; detail = $msg; seconds = [int]$sw.Elapsed.TotalSeconds }
+        }
+        return @{ ok = [bool]$res.ok; detail = [string]$res.detail; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } catch {
+        return @{ ok = $false; detail = "Could not start the test: $($_.Exception.Message)"; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } finally {
+        if ($job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Test-GIConnection {
     <#
     .SYNOPSIS
@@ -265,7 +359,7 @@ function Test-GIConnection {
     try {
         switch ($System) {
             'vCenter' {
-                $vc = Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop
+                $vc = Connect-GITestVIServer -Config $Config
                 $vcConnected = $true
                 return @{ ok = $true; detail = "Connected to $($vc.Name) (version $($vc.Version)) as $($vc.User)." }
             }
@@ -280,7 +374,7 @@ function Test-GIConnection {
                 return @{ ok = $true; detail = "Logged in to $($Config.AppVolumes.Server); $($online.Count) online entities." }
             }
             'GoldenImage' {
-                Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop | Out-Null
+                Connect-GITestVIServer -Config $Config | Out-Null
                 $vcConnected = $true
                 $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
                 $snaps = @(Get-Snapshot -VM $vm -ErrorAction SilentlyContinue).Count

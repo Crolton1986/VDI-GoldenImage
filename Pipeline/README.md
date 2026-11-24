@@ -272,6 +272,10 @@ Sections that need a login (vCenter, Horizon, App Volumes, Golden image) show a 
 
 Sections for vCenter, Horizon, App Volumes, Golden image, Pools and Email have a Test connection button. The checks are read-only. The Golden image test looks at the VM and its VMware Tools state and never powers it on.
 
+Each test runs in its own PowerShell process with a 120-second limit, so a slow or stuck login can't freeze the dashboard. If the account is behind Duo or another MFA push, approve the push on your phone while the page loads; a denied or ignored push shows up as a failed test with an MFA hint. The pipeline's scheduled runs can't answer a push, so exempt the service account from MFA.
+
+Dashboard errors and every request (including timeouts) are logged to `logs/dashboard_errors_*.log` and `logs/dashboard_requests_*.log`. Each test also writes `connection.test.start` and `connection.test` lines to the audit log.
+
 ### Run controls
 
 ![Run control page](docs/run-controls.png)
