@@ -71,7 +71,7 @@ $script:GISettingsSchema = [ordered]@{
                Help = 'Names must be unique and different from the test pool.'
                Columns = @(
                    @{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Required = $true }
-                   @{ Key = 'LogoffPolicy'; Label = 'Logoff policy'; Type = 'enum'; Values = @('FORCE_LOGOFF', 'WAIT_FOR_LOGOFF'); Required = $true; Default = 'WAIT_FOR_LOGOFF' }
+                   @{ Key = 'LogoffPolicy'; Label = 'Logoff policy'; Type = 'enum'; Values = @('WAIT_FOR_LOGOFF', 'FORCE_LOGOFF'); Required = $true; Default = 'WAIT_FOR_LOGOFF' }
                ) }
             @{ Key = 'PushTimeoutMin'; Label = 'Push timeout (min)'; Type = 'int'; Min = 10; Max = 1440; Required = $true }
         )

@@ -330,3 +330,11 @@ Describe 'Schema vs pipeline.config.psd1' {
         (Get-GISettingsSchema).Promotion.Title | Should -Be 'Schedule & promotion'
     }
 }
+
+Describe 'Production pool safety default' {
+    It 'lists WAIT_FOR_LOGOFF first so new blank rows never default to forcing logoff' {
+        Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
+        $prod = (Get-GISettingsSchema)['Pools'].Fields | Where-Object Key -eq 'Production'
+        ($prod.Columns | Where-Object Key -eq 'LogoffPolicy').Values[0] | Should -Be 'WAIT_FOR_LOGOFF'
+    }
+}

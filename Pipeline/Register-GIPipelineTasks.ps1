@@ -27,7 +27,7 @@
 .PARAMETER PipelineTime
   Time of day (HH:mm) for the full pipeline run (default 20:00).
 .PARAMETER Unregister
-  Removes the three tasks instead of registering them.
+  Removes the four tasks instead of registering them.
 .EXAMPLE
   PS> .\Register-GIPipelineTasks.ps1 -Credential (Get-Credential DOMAIN\svc-vdi-gi) -WhatIf
 .EXAMPLE
