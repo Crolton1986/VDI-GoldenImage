@@ -133,7 +133,12 @@ function Invoke-GIHorizonApi {
     for ($page = 1; ; $page++) {
         $q = @{}; if ($Query) { $q += $Query }
         $q.page = $page; $q.size = $PageSize
-        $batch = @(& $send $q)
+        # A JSON array can arrive as one array object instead of separate items; unroll it so callers
+        # filtering by name get single pools, not a whole page (which made .id an array).
+        $batch = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in @(& $send $q)) {
+            if ($item -is [System.Array]) { foreach ($x in $item) { $batch.Add($x) } } else { $batch.Add($item) }
+        }
         foreach ($item in $batch) { $results.Add($item) }
         if ($batch.Count -lt $PageSize) { break }
     }
@@ -149,9 +154,12 @@ function ConvertTo-GIHorizonFilter {
 function Get-GIHorizonPool {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Name)
-    $pool = Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All |
+    $pool = @(Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All) | ForEach-Object { $_ } |
         Where-Object { $_.name -eq $Name -or $_.display_name -eq $Name } | Select-Object -First 1
     if (-not $pool) { throw "Horizon desktop pool '$Name' not found." }
+    if (-not $pool.PSObject.Properties['id'] -or $pool.id -is [System.Array] -or [string]::IsNullOrWhiteSpace([string]$pool.id)) {
+        throw "Horizon returned desktop pool '$Name' without a single id; check the Horizon version and the account's inventory rights."
+    }
     return $pool
 }
 
