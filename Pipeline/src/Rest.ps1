@@ -36,23 +36,23 @@ function Connect-GIHorizon {
     param([Parameter(Mandatory)] [hashtable] $Config)
 
     $hz   = $Config.Horizon
-    $cred = Get-GISecretCredential -Name $hz.CredentialSecret
-    $base = "https://$($hz.Server)/rest"
+    $cred = Get-GISecretCredential -Name $hz['CredentialSecret']
+    $base = "https://$($hz['Server'])/rest"
     $body = @{
-        domain   = $hz.Domain
+        domain   = $hz['Domain']
         username = $cred.UserName
         password = $cred.GetNetworkCredential().Password
     } | ConvertTo-Json
 
     $req = @{ Uri = "$base/login"; Method = 'Post'; Body = $body; ContentType = 'application/json' }
-    if ($hz.SkipCertificateCheck) { $req.SkipCertificateCheck = $true }
+    if ($hz['SkipCertificateCheck']) { $req.SkipCertificateCheck = $true }
     $tok = Invoke-GIRestWithRetry -Request $req
 
     $script:GIHorizon = @{
         BaseUri      = $base
         AccessToken  = $tok.access_token
         RefreshToken = $tok.refresh_token
-        SkipCert     = [bool]$hz.SkipCertificateCheck
+        SkipCert     = [bool]$hz['SkipCertificateCheck']
     }
 }
 
@@ -276,17 +276,17 @@ function Connect-GIAppVol {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [hashtable] $Config)
     $av   = $Config.AppVolumes
-    $cred = Get-GISecretCredential -Name $av.CredentialSecret
-    $base = "https://$($av.Server)"
+    $cred = Get-GISecretCredential -Name $av['CredentialSecret']
+    $base = "https://$($av['Server'])"
     $sess = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     $req = @{
         Uri = $base + (Get-GIAppVolEndpoint -Config $Config -Name Session); Method = 'Post'
         ContentType = 'application/json'; WebSession = $sess
         Body = (@{ username = $cred.UserName; password = $cred.GetNetworkCredential().Password } | ConvertTo-Json)
     }
-    if ($av.SkipCertificateCheck) { $req.SkipCertificateCheck = $true }
+    if ($av['SkipCertificateCheck']) { $req.SkipCertificateCheck = $true }
     Invoke-GIRestWithRetry -Request $req | Out-Null
-    $script:GIAppVol = @{ BaseUri = $base; Session = $sess; SkipCert = [bool]$av.SkipCertificateCheck }
+    $script:GIAppVol = @{ BaseUri = $base; Session = $sess; SkipCert = [bool]$av['SkipCertificateCheck'] }
 }
 
 function Invoke-GIAppVolApi {

@@ -39,8 +39,8 @@ function Invoke-GIStage {
     Write-GILog -Config $Config -RunId $Run.runId -Message "Stage $Stage started"
     try {
         $out = & $Action
-        $msg  = if ($out -is [hashtable] -and $out.Message) { [string]$out.Message } else { '' }
-        $data = if ($out -is [hashtable] -and $out.Data) { $out.Data } else { $null }
+        $msg  = if ($out -is [hashtable] -and $out['Message']) { [string]$out.Message } else { '' }
+        $data = if ($out -is [hashtable] -and $out['Data']) { $out['Data'] } else { $null }
         $params = @{ Config = $Config; Run = $Run; Stage = $Stage; Status = 'Succeeded'; Message = $msg }
         if ($data) { $params.Data = $data }
         Set-GIStage @params

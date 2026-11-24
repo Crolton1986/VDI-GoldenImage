@@ -61,36 +61,23 @@ Describe 'Get-GIConfigValue' {
 }
 
 Describe 'Invoke-GIStage' {
-    # BUG: src/Stages.ps1:47 calls `Set-GIProgress -Message ''` but Set-GIProgress (src/State.ps1) declares
-    # [Parameter(Mandatory)][string]$Message without [AllowEmptyString()], so every successful stage throws
-    # ParameterBindingValidationException and is then marked Failed by the catch block.
-    It 'marks the stage Succeeded, merges Message and Data, and clears progress (unmocked)' -Skip:$true {
+    # Regression: Set-GIProgress must accept '' (Invoke-GIStage clears progress on success)
+    It 'marks the stage Succeeded, merges Message and Data, and clears progress' {
         $run.progress = 'old progress'
         Invoke-GIStage -Config $cfg -Run $run -Stage Snapshot -Action { @{ Message = 'all good'; Data = @{ foo = 'bar' } } }
         $r = Get-GIRun -Config $cfg -RunId $run.runId
         $r.stages.Snapshot.status | Should -Be 'Succeeded'
+        $r.stages.Snapshot.message | Should -Be 'all good'
+        $r.stages.Snapshot.data.foo | Should -Be 'bar'
+        $r.stages.Snapshot.endedAt | Should -Not -BeNullOrEmpty
         $r.progress | Should -Be ''
+        $r.status | Should -Be 'Running'
     }
 
-    It 'marks the stage Succeeded, merges Message and Data, and clears progress' {
-        # Work around the empty-Message binding bug noted above: swap Set-GIProgress for a stub that accepts ''
-        # (Mock keeps the Mandatory attribute, so a stub function is used), then reload the module afterwards.
-        try {
-            InModuleScope VDI-GIPipeline {
-                function script:Set-GIProgress { param($Config, $Run, [AllowEmptyString()] [string] $Message) $Run.progress = $Message }
-            }
-            $run.progress = 'old progress'
-            Invoke-GIStage -Config $cfg -Run $run -Stage Snapshot -Action { @{ Message = 'all good'; Data = @{ foo = 'bar' } } }
-            $r = Get-GIRun -Config $cfg -RunId $run.runId
-            $r.stages.Snapshot.status | Should -Be 'Succeeded'
-            $r.stages.Snapshot.message | Should -Be 'all good'
-            $r.stages.Snapshot.data.foo | Should -Be 'bar'
-            $r.stages.Snapshot.endedAt | Should -Not -BeNullOrEmpty
-            $run.progress | Should -Be ''
-            $r.status | Should -Be 'Running'
-        } finally {
-            Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
-        }
+    # Regression: StrictMode must not throw on a result hashtable without a Data key
+    It 'accepts an action result that has only a Message (no Data)' {
+        Invoke-GIStage -Config $cfg -Run $run -Stage Validate -Action { @{ Message = 'only message' } }
+        (Get-GIRun -Config $cfg -RunId $run.runId).stages.Validate.status | Should -Be 'Succeeded'
     }
 
     It 'marks stage and run Failed, records the stage name in the error and rethrows' {

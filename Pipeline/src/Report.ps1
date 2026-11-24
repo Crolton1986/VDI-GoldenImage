@@ -254,16 +254,16 @@ function Send-GIReport {
     $client = $null
     try {
         $email = $Config.Email
-        if (-not $email -or -not $email.Enabled) { return }
+        if (-not $email -or -not $email['Enabled']) { return }
 
         if (-not $Subject) {
             $Subject = "[VDI Pipeline] $($Run.goldenVm) $($Run.runId): $($Run.status)"
         }
-        $port = if ($email.Port) { [int]$email.Port } else { 25 }
+        $port = if ($email['Port']) { [int]$email['Port'] } else { 25 }
 
         $mail = [System.Net.Mail.MailMessage]::new()
-        $mail.From = [System.Net.Mail.MailAddress]::new([string]$email.From)
-        foreach ($to in @($email.To)) {
+        $mail.From = [System.Net.Mail.MailAddress]::new([string]$email['From'])
+        foreach ($to in @($email['To'])) {
             if ($to) { $mail.To.Add([string]$to) }
         }
         $mail.Subject = $Subject
@@ -272,10 +272,10 @@ function Send-GIReport {
         $mail.IsBodyHtml = $true
         $mail.Body = ConvertTo-GIReportHtml -Run $Run
 
-        $client = [System.Net.Mail.SmtpClient]::new([string]$email.SmtpServer, $port)
-        $client.EnableSsl = [bool]$email.UseSsl
-        if ($email.CredentialSecret) {
-            $cred = Get-GISecretCredential -Name $email.CredentialSecret
+        $client = [System.Net.Mail.SmtpClient]::new([string]$email['SmtpServer'], $port)
+        $client.EnableSsl = [bool]$email['UseSsl']
+        if ($email['CredentialSecret']) {
+            $cred = Get-GISecretCredential -Name $email['CredentialSecret']
             $client.UseDefaultCredentials = $false
             $client.Credentials = $cred.GetNetworkCredential()
         }

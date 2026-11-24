@@ -144,7 +144,7 @@ function Set-GIProgress {
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)]$Run,
-        [Parameter(Mandatory)][string]$Message
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message
     )
     $Run.progress = $Message
     Save-GIRun -Config $Config -Run $Run

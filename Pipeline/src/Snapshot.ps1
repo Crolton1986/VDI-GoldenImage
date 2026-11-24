@@ -168,9 +168,9 @@ function Invoke-GISnapshotLifecycle {
         $Run
     )
     $cfg = $Config.Snapshots
-    $keep = if ($cfg.Keep) { [int]$cfg.Keep } else { 3 }
-    $protectAncestors = if ($cfg.ContainsKey('ProtectAncestors')) { [bool]$cfg.ProtectAncestors } else { $true }
-    $prune = [bool]$cfg.Prune
+    $keep = if ($cfg['Keep']) { [int]$cfg['Keep'] } else { 3 }
+    $protectAncestors = if ($cfg.ContainsKey('ProtectAncestors')) { [bool]$cfg['ProtectAncestors'] } else { $true }
+    $prune = [bool]$cfg['Prune']
     $warnings = [System.Collections.Generic.List[string]]::new()
 
     $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
@@ -194,7 +194,7 @@ function Invoke-GISnapshotLifecycle {
         -ProtectedNames @($protectedNames) -Keep $keep -ProtectAncestors $protectAncestors)
 
     $depth = Get-GISnapshotChainDepth -Snapshots $snaps
-    $maxDepth = if ($cfg.MaxChainDepth) { [int]$cfg.MaxChainDepth } else { 10 }
+    $maxDepth = if ($cfg['MaxChainDepth']) { [int]$cfg['MaxChainDepth'] } else { 10 }
     if ($depth -gt $maxDepth) {
         $warnings.Add("Snapshot chain depth $depth exceeds $maxDepth. Plan a new golden image generation (full clone of the VM without snapshots) and repoint pools to it.")
     }

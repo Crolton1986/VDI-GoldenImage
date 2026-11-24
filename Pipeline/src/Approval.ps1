@@ -113,7 +113,7 @@ function Invoke-GIStagePromote {
     try {
         foreach ($p in @($Config.Pools.Production)) {
             $pool = Get-GIHorizonPool -Name $p.Name
-            $policy = if ($p.LogoffPolicy) { $p.LogoffPolicy } else { 'WAIT_FOR_LOGOFF' }
+            $policy = if ($p['LogoffPolicy']) { $p['LogoffPolicy'] } else { 'WAIT_FOR_LOGOFF' }
             Invoke-GIHorizonPushImage -PoolId $pool.id -ParentVmId $img.BaseVm.id -SnapshotId $img.Snapshot.id `
                 -StartTime $StartTime -LogoffPolicy $policy -StopOnFirstError $true
             $scheduled.Add([pscustomobject]@{
