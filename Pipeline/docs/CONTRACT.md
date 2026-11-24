@@ -121,7 +121,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
   Horizon    = @{ Server = 'hzcs01.domain.local'; CredentialSecret = 'GI-Horizon'; Domain = 'DOMAIN'; SkipCertificateCheck = $false }
   AppVolumes = @{ Server = 'avm01.domain.local';  CredentialSecret = 'GI-AppVol'; SkipCertificateCheck = $false
                   TestPackages = @('Notepad++')            # packages assigned to the test pool's computer OU
-                  Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities'; Attachments = '/app_volumes/app_attachments' } }
+                  Endpoints = @{ Session = '/cv_api/sessions'; OnlineEntities = '/cv_api/online_entities'; Attachments = '/app_volumes/app_attachments' } }
   GoldenImage = @{
     VmName            = 'W11-GI-01'
     GuestCredentialSecret = 'GI-GuestAdmin'
@@ -142,7 +142,8 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     RequiredServices = @('wsnm','svservice','frxsvc')
     MachineReadyTimeoutMin = 60
   }
-  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }   # Prune=$false => report only
+  Snapshots = @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true
+                ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15 }   # Prune=$false => report only
   Promotion = @{
     AutoPromote = $false
     MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }   # next window used when no -StartTime given

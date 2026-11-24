@@ -275,6 +275,10 @@ Describe 'Test-GIPoolHealth -IncludeAppVolumes' {
             if ($global:GITestCtx.AvThrow) { throw 'AVM unreachable' }
             if ($Path -like '*online_entities*') { $global:GITestCtx.OnlineResp } else { $global:GITestCtx.AttachResp }
         }
+        Mock -ModuleName VDI-GIPipeline Get-GIAppVolOnlineEntities {
+            if ($global:GITestCtx.AvThrow) { throw 'AVM unreachable' }
+            @{ Entities = @(Get-GIAppVolCollection $global:GITestCtx.OnlineResp); Path = '/cv_api/online_entities'; Trail = @() }
+        }
         Set-ModVar AvThrow $false
     }
     AfterEach {
@@ -342,6 +346,36 @@ Describe 'Invoke-GIStageValidate' {
         $saved.validation.passed | Should -BeFalse
         @($saved.validation.checks).Count | Should -Be 2
         @($saved.validation.checks | Where-Object { -not $_.passed }).name | Should -Be 'Service:svservice'
+    }
+}
+
+Describe 'Invoke-GIStageSnapshot' {
+    BeforeEach {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1' } }
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGoldenConsolidation { [pscustomobject]@{ Needed = $false; Ok = $true; Message = 'No consolidation needed' } }
+        Mock -ModuleName VDI-GIPipeline Get-GIGoldenSpace { [pscustomobject]@{ UsedGB = 100; Datastores = @([pscustomobject]@{ Name = 'ds1'; FreeGB = 50; CapacityGB = 1000; FreePercent = 5 }) } }
+        Mock -ModuleName VDI-GIPipeline New-GIGoldenSnapshot { [pscustomobject]@{ id = 'b3'; name = 'Baseline 26.11.24.0131'; createdAt = (Get-Date).ToString('o') } }
+        Mock -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle {
+            [pscustomobject]@{ Mode = 'ReportOnly'; ChainDepth = 4; Chain = 'Master > a > b'; Warnings = @()
+                Plan = @([pscustomobject]@{ Name = 'Baseline 26.11.11.1340'; Action = 'Remove' }) }
+        }
+    }
+
+    It 'only previews retention; nothing is removed before production' {
+        $r = Invoke-GIStageSnapshot -Config $cfg -Run $run
+        Should -Invoke -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle -Times 1 -Exactly -ParameterFilter { $ReportOnly }
+        $r.Message | Should -Match 'After production: 1 snapshot\(s\) to remove \(Baseline 26.11.11.1340\)'
+    }
+
+    It 'warns when datastore free space is below MinFreeSpacePercent' {
+        $r = Invoke-GIStageSnapshot -Config $cfg -Run $run
+        $r.Data.warnings -join ' ' | Should -Match 'ds1 has 5% free'
+    }
+
+    It 'refuses to stack a new snapshot when consolidation fails' {
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGoldenConsolidation { [pscustomobject]@{ Needed = $true; Ok = $false; Message = 'Disk consolidation failed: locked' } }
+        { Invoke-GIStageSnapshot -Config $cfg -Run $run } | Should -Throw '*consolidation failed*'
+        Should -Invoke -ModuleName VDI-GIPipeline New-GIGoldenSnapshot -Times 0 -Exactly
     }
 }
 

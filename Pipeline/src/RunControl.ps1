@@ -226,6 +226,59 @@ function Start-GIRunnerTask {
     }
 }
 
+function Start-GIRunnerProcess {
+    <#
+    .SYNOPSIS
+      Local (-LocalAdmin) runs: starts Invoke-GIPipeline.ps1 -FromRequest as a separate pwsh process
+      under the current user instead of the VDI-GI-Runner scheduled task. Output goes to
+      <Paths.Logs>/runner-<timestamp>.log. Returns @{ Pid; Log; Error } (Error set when it died right away).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath)
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-GIPipeline.ps1'
+    $pwsh = (Get-Process -Id $PID).Path
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-GIProcessArgument $script), '-FromRequest')
+    if ($ConfigPath) { $argList += @('-ConfigPath', (ConvertTo-GIProcessArgument $ConfigPath)) }
+    $logDir = [string]$Config.Paths.Logs
+    if (-not (Test-Path -LiteralPath $logDir)) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+    $log = Join-Path $logDir ("runner-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    if (-not $PSCmdlet.ShouldProcess($script, 'Start pipeline runner process')) { return }
+    $sp = @{ FilePath = $pwsh; ArgumentList = $argList; PassThru = $true; RedirectStandardOutput = $log; RedirectStandardError = "$log.err" }
+    if ($IsWindows) { $sp.WindowStyle = 'Hidden' }
+    $proc = Start-Process @sp
+    $result = @{ Pid = $proc.Id; Log = $log; Error = $null }
+    # Exit 0 or 3 (pipeline busy / nothing to do) right away is normal; anything else is a startup failure
+    if ($proc.WaitForExit(3000) -and $proc.ExitCode -notin 0, 3) {
+        $err = ''
+        foreach ($f in "$log.err", $log) {
+            if (Test-Path -LiteralPath $f) { $err = ((Get-Content -LiteralPath $f -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim(); if ($err) { break } }
+        }
+        $result.Error = if ($err) { $err } else { "exit code $($proc.ExitCode)" }
+    }
+    return $result
+}
+
+function Start-GIQueuedRun {
+    <#
+    .SYNOPSIS
+      Starts whatever picks up the queued request: a local process with -LocalAdmin, otherwise the
+      VDI-GI-Runner scheduled task. Returns the notice code for /run: started, queued, norunner or runfailed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath, [switch] $Local)
+    if ($Local) {
+        try {
+            $r = Start-GIRunnerProcess -Config $Config -ConfigPath $ConfigPath
+            if ($r.Error) { Write-Warning "Runner process stopped right away: $($r.Error) (log: $($r.Log).err)"; return 'runfailed' }
+            return 'started'
+        } catch {
+            Write-Warning "Could not start the runner process: $($_.Exception.Message)"
+            return 'runfailed'
+        }
+    }
+    try { Start-GIRunnerTask; return 'queued' } catch { return 'norunner' }
+}
+
 function Set-GIPipelineScheduleTask {
     <#
     .SYNOPSIS
@@ -251,6 +304,100 @@ function Set-GIPipelineScheduleTask {
 
 #----- Connection tests -----
 
+function Test-GITcpPort {
+    <#
+    .SYNOPSIS
+      True when a TCP connection to Server:Port opens within TimeoutMs. Never throws.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)] [string] $Server, [int] $Port = 443, [int] $TimeoutMs = 5000)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($Server, $Port)
+        return ($task.Wait($TimeoutMs) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Connect-GITestVIServer {
+    <#
+    .SYNOPSIS
+      Connect-VIServer for connection tests: fails fast when vCenter isn't reachable on 443 and caps
+      PowerCLI's web operation timeout. The cap leaves room for an MFA push (Duo times out at about
+      60 seconds); a denied or unanswered push comes back as a login error, not a hang.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $server = [string]$Config.vCenter.Server
+    if (-not $server) { throw 'vCenter.Server is empty.' }
+    $cred = Get-GISecretCredential -Name $Config.vCenter.CredentialSecret
+    if (-not (Test-GITcpPort -Server $server -Port 443 -TimeoutMs 5000)) {
+        throw "Can't reach $server on port 443 within 5 seconds (DNS, firewall or proxy)."
+    }
+    try { Set-PowerCLIConfiguration -Scope Session -WebOperationTimeoutSeconds 90 -Confirm:$false -ErrorAction Stop | Out-Null }
+    catch { Write-Verbose "Could not set the PowerCLI web operation timeout: $($_.Exception.Message)" }
+    try {
+        Connect-VIServer -Server $server -Credential $cred -ErrorAction Stop
+    } catch {
+        $m = $_.Exception.Message
+        if ($m -match '(?i)incorrect user name or password|cannot complete login|authentication|denied|timed? ?out|timeout') {
+            throw "vCenter login for $($cred.UserName) failed: $m If this account is behind Duo or another MFA push, the push was denied or not answered in time. Approve it and test again; for scheduled runs, exempt the service account from MFA."
+        }
+        throw
+    }
+}
+
+function Invoke-GIConnectionTest {
+    <#
+    .SYNOPSIS
+      Runs Test-GIConnection in a separate PowerShell process with a hard time limit, so a hung
+      Connect-VIServer, a locked SecretStore prompt or a slow PowerCLI load can't block the web
+      server. Returns @{ ok; detail; seconds }. Never throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [string] $ConfigPath,
+        [Parameter(Mandatory)] [ValidateSet('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Pools', 'Email')] [string] $System,
+        [int] $TimeoutSeconds = 120
+    )
+    $manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'VDI-GIPipeline.psd1'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $job = $null
+    try {
+        $job = Start-Job -ArgumentList $manifest, $ConfigPath, $System -ScriptBlock {
+            param($m, $cp, $sys)
+            $ProgressPreference = 'SilentlyContinue'
+            Import-Module $m -Force -ErrorAction Stop
+            $a = @{}
+            if ($cp) { $a.Path = $cp }
+            $cfg = Get-GIConfig @a
+            $r = Test-GIConnection -Config $cfg -System $sys
+            [pscustomobject]@{ ok = [bool]$r.ok; detail = [string]$r.detail }
+        }
+        $done = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        if (-not $done) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            return @{ ok = $false; seconds = [int]$sw.Elapsed.TotalSeconds
+                detail = "No answer after $TimeoutSeconds seconds; the test was stopped. Likely causes: an MFA (Duo) push that wasn't approved, the server is slow or unreachable, the SecretStore vault is locked and waiting for a password (Unlock-SecretStore / Set-SecretStoreConfiguration -Authentication None for the service account), or PowerCLI is waiting on a certificate or CEIP prompt (run the PowerCLI setup step)." }
+        }
+        $out = @(Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErr)
+        $res = $out | Where-Object { $null -ne $_.PSObject.Properties['ok'] } | Select-Object -Last 1
+        if (-not $res) {
+            $msg = if ($jobErr) { [string]$jobErr[0] } elseif ($job.ChildJobs[0].JobStateInfo.Reason) { $job.ChildJobs[0].JobStateInfo.Reason.Message } else { 'The test process ended without a result.' }
+            return @{ ok = $false; detail = $msg; seconds = [int]$sw.Elapsed.TotalSeconds }
+        }
+        return @{ ok = [bool]$res.ok; detail = [string]$res.detail; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } catch {
+        return @{ ok = $false; detail = "Could not start the test: $($_.Exception.Message)"; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } finally {
+        if ($job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Test-GIConnection {
     <#
     .SYNOPSIS
@@ -265,7 +412,7 @@ function Test-GIConnection {
     try {
         switch ($System) {
             'vCenter' {
-                $vc = Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop
+                $vc = Connect-GITestVIServer -Config $Config
                 $vcConnected = $true
                 return @{ ok = $true; detail = "Connected to $($vc.Name) (version $($vc.Version)) as $($vc.User)." }
             }
@@ -275,12 +422,28 @@ function Test-GIConnection {
                 return @{ ok = $true; detail = "Logged in to $($Config.Horizon.Server); $n desktop pool(s) visible." }
             }
             'AppVolumes' {
-                Connect-GIAppVol -Config $Config
-                $online = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)))
-                return @{ ok = $true; detail = "Logged in to $($Config.AppVolumes.Server); $($online.Count) online entities." }
+                $trail = [System.Collections.Generic.List[string]]::new()
+                $hints = [System.Collections.Generic.List[string]]::new()
+                try {
+                    Connect-GIAppVol -Config $Config
+                    $trail.AddRange([string[]]$script:GIAppVol.Trail)
+                    if ($script:GIAppVol.SessionPath -ne (Get-GIAppVolEndpoint -Config $Config -Name Session)) {
+                        $hints.Add("Login worked at $($script:GIAppVol.SessionPath); set Session endpoint to that.")
+                    }
+                    $on = Get-GIAppVolOnlineEntities -Config $Config
+                    $trail.AddRange([string[]]$on.Trail)
+                    if ($on.Path -ne (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)) {
+                        $hints.Add("Online entities worked at $($on.Path); set Online entities endpoint to that.")
+                    }
+                } catch {
+                    if ($_.Exception.Data.Contains('Trail')) { $trail.AddRange([string[]]$_.Exception.Data['Trail']) } else { $trail.Add($_.Exception.Message) }
+                    return @{ ok = $false; detail = (@("App Volumes test failed on $($Config.AppVolumes.Server).") + $trail) -join "`n" }
+                }
+                $head = "Logged in to $($Config.AppVolumes.Server); $($on.Entities.Count) online entities."
+                return @{ ok = $true; detail = (@($head) + $hints + $trail) -join "`n" }
             }
             'GoldenImage' {
-                Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop | Out-Null
+                Connect-GITestVIServer -Config $Config | Out-Null
                 $vcConnected = $true
                 $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
                 $snaps = @(Get-Snapshot -VM $vm -ErrorAction SilentlyContinue).Count

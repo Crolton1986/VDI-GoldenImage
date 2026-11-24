@@ -72,6 +72,7 @@ function New-GIRun {
         progress       = ''
         stages         = $stages
         safetySnapshot = $null
+        retention      = $null
         snapshot       = $null
         validation     = [ordered]@{ passed = $false; checks = @() }
         approval       = [ordered]@{ decision = $null; by = $null; at = $null; startTime = $null; comment = $null }

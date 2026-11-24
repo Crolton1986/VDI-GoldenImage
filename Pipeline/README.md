@@ -166,7 +166,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
-| Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors | Retention. See Safety behavior. |
+| Snapshots | NamePrefix, Mode, Keep, MaxChainDepth, Prune, ProtectAncestors, ConsolidateTimeoutMin, MinFreeSpacePercent | Naming and retention. See Safety behavior. |
 | Promotion | AutoPromote, MaintenanceWindow | MaintenanceWindow has Days and StartTime. The next matching window is used when you don't pass `-StartTime`. |
 | Email | Enabled, SmtpServer, Port, From, To, UseSsl | Run report by mail. |
 | Dashboard | Port, CertificateThumbprint, ViewerGroup, ApproverGroup, AdminGroup, RefreshSeconds | Web dashboard. Shown read-only in the dashboard. Edit the psd1 and restart it. |
@@ -274,6 +274,10 @@ Sections that need a login (vCenter, Horizon, App Volumes, Golden image) show a 
 
 Sections for vCenter, Horizon, App Volumes, Golden image, Pools and Email have a Test connection button. The checks are read-only. The Golden image test looks at the VM and its VMware Tools state and never powers it on.
 
+Each test runs in its own PowerShell process with a 120-second limit, so a slow or stuck login can't freeze the dashboard. If the account is behind Duo or another MFA push, approve the push on your phone while the page loads; a denied or ignored push shows up as a failed test with an MFA hint. The pipeline's scheduled runs can't answer a push, so exempt the service account from MFA.
+
+Dashboard errors and every request (including timeouts) are logged to `logs/dashboard_errors_*.log` and `logs/dashboard_requests_*.log`. Each test also writes `connection.test.start` and `connection.test` lines to the audit log.
+
 ### Run controls
 
 ![Run control page](docs/run-controls.png)
@@ -287,6 +291,8 @@ Sections for vCenter, Horizon, App Volumes, Golden image, Pools and Email have a
 * Roll back a pool pushes the last-known-good snapshot, or one you name, to a pool. You have to type the pool name to confirm. Force logoff ends user sessions on the pool's machines.
 
 How it works: the dashboard never runs a stage inside a web request. It writes `state/run-request.json` and starts the `VDI-GI-Runner` scheduled task, which runs `Invoke-GIPipeline.ps1 -FromRequest` as the service account. The runner takes `state/pipeline.lock` first. If the pipeline is busy (a scheduled run, a command-line run or another dashboard run), the request stays queued and an admin can cancel it on the Run page. Only one request can be queued at a time.
+
+With `-LocalAdmin` (lab/test runs) there are no scheduled tasks. The dashboard starts `Invoke-GIPipeline.ps1 -FromRequest` as a hidden `pwsh` process under your own account instead, and its output goes to `logs/runner-<timestamp>.log`. To stop one in an emergency, end that `pwsh` process (its id is in the run's log), then check vCenter and Horizon as below.
 
 There's no stop button. A stage can be partway through a snapshot, a guest operation or an image push, and killing the process from a web page would leave vCenter or Horizon in a state nobody has looked at. To stop in an emergency, end the `VDI-GI-Runner` task (or `VDI-GI-Pipeline` for a scheduled run) in Task Scheduler, then check vCenter and Horizon by hand: power state, snapshots, and any pending push on the pools. The stale lock clears itself on the next run once its process is gone.
 
@@ -321,8 +327,14 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 ## Safety behavior
 
 * Preflight stops the run if the golden VM is powered on or if any configured pool already has a push pending. It then takes the `pre-maint-<RunId>` safety snapshot, so a bad update pass can be reverted.
-* Retention is report-only until you set `Snapshots.Prune = $true`. When it prunes, it keeps the newest `Snapshots.Keep` snapshots of each kind (`GI-*` and `pre-maint-*`), never touches snapshots it did not create, and never deletes a snapshot that is in use by any pool (current or pending), the last-known-good, the current run's snapshots, or an ancestor of any of those (`ProtectAncestors`). Horizon tracks the base image by snapshot path, so removing a parent can break provisioning for pools on its children. Test in the lab before turning `ProtectAncestors` off. If Horizon can't be read, retention deletes nothing.
-* When the snapshot chain gets deeper than `Snapshots.MaxChainDepth`, the report warns you. Pruning can't flatten the chain. Plan a new golden image generation (a full clone of the VM) instead.
+* New snapshots are named `<Snapshots.NamePrefix> yy.MM.dd.HHmm` (default `Baseline 26.11.24.0131`).
+* Retention runs after a production push passes PostCheck, never before. It's report-only until you set `Snapshots.Prune = $true`; the Snapshot stage message and the run report list what it would remove.
+* In `Chain` mode (the default) the golden VM ends up as `Master > previous Baseline > production Baseline`. Older Baselines and the finished run's `pre-maint-*` snapshot are removed even though they sit under the production snapshot. vSphere merges a removed snapshot's changes into its child, so nothing in the image is lost. With `Keep = 2`, promoting `Baseline 26.11.24.0131` removes `Baseline 26.11.11.1340` and keeps `Baseline 26.11.20.1249` for rollback.
+* Retention never removes the root snapshot, snapshots it doesn't manage (names other than `<prefix> *`, `GI-*`, `pre-maint-*`), any snapshot a pool uses or has a push pending for, or the last-known-good. If any push is pending, or Horizon can't be read, it removes nothing.
+* Snapshots are removed one at a time, oldest first. After each one it checks `ConsolidationNeeded` and consolidates disks (timeout `Snapshots.ConsolidateTimeoutMin`), then re-reads Horizon to confirm every pool's image snapshot still resolves. If consolidation fails or a pool's snapshot stops resolving, it stops and reports an error. The report shows used space before and after, space freed, datastore free space and the remaining chain.
+* The Snapshot stage also consolidates first if vCenter flags the VM, and fails if that doesn't work, so a new Baseline never stacks on an unconsolidated disk. It warns when a datastore is below `Snapshots.MinFreeSpacePercent` free.
+* Horizon records the image by snapshot path, and removing a parent changes the path of its children. Test Chain mode in the lab first: promote, let retention remove the oldest Baseline, then confirm Resync and adding machines still work on the pool. `Tree` mode keeps the old behavior (never remove a parent of an in-use snapshot).
+* When the snapshot chain gets deeper than `Snapshots.MaxChainDepth`, the report warns you. Plan a new golden image generation (a full clone of the VM) instead.
 * Promotion schedules the pools one after another. If one fails, the pools already scheduled in that promotion are cancelled.
 * `Promotion.AutoPromote` is `$false` by default, so a person has to approve every run.
 

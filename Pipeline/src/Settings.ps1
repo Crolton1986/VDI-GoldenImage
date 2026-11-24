@@ -32,7 +32,7 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
-            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /.' }
+            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /. Test connection tries the other known path on a 404 and tells you which one worked.' }
             @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/' }
             @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/' }
         )
@@ -91,13 +91,22 @@ $script:GISettingsSchema = [ordered]@{
     }
     Snapshots = @{
         Title = 'Snapshots'; ConfigPath = 'Snapshots'; Test = $null; ReadOnly = $false
-        Description = 'Snapshot retention on the golden image VM.'
+        Description = 'Snapshot naming and retention on the golden image VM. Retention runs after a production push passes its checks.'
         Fields = @(
-            @{ Key = 'Keep'; Label = 'Snapshots to keep'; Type = 'int'; Min = 1; Max = 50; Required = $true }
+            @{ Key = 'NamePrefix'; Label = 'Snapshot name prefix'; Type = 'string'; Default = 'Baseline'; Pattern = '^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$'
+               Help = "New snapshots are named '<prefix> yy.MM.dd.HHmm', e.g. 'Baseline 26.11.24.0131'. Existing snapshots with this prefix are managed by retention." }
+            @{ Key = 'Mode'; Label = 'Retention mode'; Type = 'enum'; Values = @('Chain', 'Tree'); Default = 'Chain'
+               Help = 'Chain keeps Master > previous Baseline > production Baseline and removes older Baselines under them. Tree never removes a parent of an in-use snapshot, so a straight chain keeps growing.' }
+            @{ Key = 'Keep'; Label = 'Baselines to keep'; Type = 'int'; Min = 1; Max = 50; Required = $true
+               Help = '2 keeps production plus the previous one for rollback. The root (Master) snapshot is never removed and does not count.' }
             @{ Key = 'MaxChainDepth'; Label = 'Maximum chain depth'; Type = 'int'; Min = 2; Max = 31; Required = $true }
-            @{ Key = 'Prune'; Label = 'Delete old snapshots'; Type = 'bool'; Warning = 'When off, retention only reports what it would delete. When on, old snapshots are removed.' }
-            @{ Key = 'ProtectAncestors'; Label = 'Protect ancestors of in-use snapshots'; Type = 'bool'; Confirm = $true
-               Warning = 'Turning this off can delete a parent snapshot that pools still depend on and break them.' }
+            @{ Key = 'Prune'; Label = 'Delete old snapshots'; Type = 'bool'; Warning = 'When off, retention only reports what it would delete. When on, old snapshots are removed and disks consolidated.' }
+            @{ Key = 'ProtectAncestors'; Label = 'Protect ancestors of pending pushes'; Type = 'bool'; Confirm = $true
+               Help = 'Chain mode: keeps every parent of a snapshot a push is still pending for. Tree mode: keeps every parent of any in-use snapshot.'
+               Warning = 'Turning this off can delete a parent snapshot that a pending push depends on.' }
+            @{ Key = 'ConsolidateTimeoutMin'; Label = 'Disk consolidation timeout (min)'; Type = 'int'; Min = 5; Max = 600; Default = 60 }
+            @{ Key = 'MinFreeSpacePercent'; Label = 'Warn below datastore free space (%)'; Type = 'int'; Min = 1; Max = 90; Default = 15
+               Help = 'Checked before each new snapshot. Warning only.' }
         )
     }
     Promotion = @{
@@ -321,18 +330,29 @@ function ConvertFrom-GISettingsForm {
                     if ([string]$fk -match $rx) { $byIndex[[int]$Matches[1]] = $true }
                 }
                 $rows = [System.Collections.Generic.List[object]]::new()
+                # Dropdowns and checkboxes always post a value, so a spare row's selects don't make it a real row.
+                # A row counts only when a typed column (text, number, time) has a value. Tables with no typed
+                # column fall back to any non-bool value.
+                $typedCols = @($f.Columns | Where-Object { $_.Type -notin 'enum', 'bool' })
                 foreach ($i in ($byIndex.Keys | Sort-Object)) {
+                    $rmKey = "$key[$i]._remove"
+                    if ($Form.Contains($rmKey) -and [string]$Form[$rmKey] -in 'on', 'true', '1') { continue }
                     $row = [ordered]@{}
+                    $rowErrors = @{}
                     $nonEmpty = $false
                     foreach ($c in $f.Columns) {
                         $ck = "$key[$i].$($c.Key)"
                         $cr = if ($Form.Contains($ck)) { $Form[$ck] } else { $null }
                         $conv = Convert-GISettingsScalar $c $cr
-                        if ($conv.Error) { $errors[$ck] = $conv.Error }
+                        if ($conv.Error) { $rowErrors[$ck] = $conv.Error }
                         $row[$c.Key] = $conv.Value
-                        if ($c.Type -ne 'bool' -and $null -ne $conv.Value -and "$($conv.Value)" -ne '') { $nonEmpty = $true }
+                        $counts = if ($typedCols.Count) { $c.Type -notin 'enum', 'bool' } else { $c.Type -ne 'bool' }
+                        if ($counts -and ($conv.Error -or ($null -ne $conv.Value -and "$($conv.Value)" -ne ''))) { $nonEmpty = $true }
                     }
-                    if ($nonEmpty) { $rows.Add($row) }
+                    if ($nonEmpty) {
+                        $rows.Add($row)
+                        foreach ($ek in $rowErrors.Keys) { $errors[$ek] = $rowErrors[$ek] }
+                    }
                 }
                 $values[$key] = @($rows)
             }
