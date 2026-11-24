@@ -328,18 +328,29 @@ function ConvertFrom-GISettingsForm {
                     if ([string]$fk -match $rx) { $byIndex[[int]$Matches[1]] = $true }
                 }
                 $rows = [System.Collections.Generic.List[object]]::new()
+                # Dropdowns and checkboxes always post a value, so a spare row's selects don't make it a real row.
+                # A row counts only when a typed column (text, number, time) has a value. Tables with no typed
+                # column fall back to any non-bool value.
+                $typedCols = @($f.Columns | Where-Object { $_.Type -notin 'enum', 'bool' })
                 foreach ($i in ($byIndex.Keys | Sort-Object)) {
+                    $rmKey = "$key[$i]._remove"
+                    if ($Form.Contains($rmKey) -and [string]$Form[$rmKey] -in 'on', 'true', '1') { continue }
                     $row = [ordered]@{}
+                    $rowErrors = @{}
                     $nonEmpty = $false
                     foreach ($c in $f.Columns) {
                         $ck = "$key[$i].$($c.Key)"
                         $cr = if ($Form.Contains($ck)) { $Form[$ck] } else { $null }
                         $conv = Convert-GISettingsScalar $c $cr
-                        if ($conv.Error) { $errors[$ck] = $conv.Error }
+                        if ($conv.Error) { $rowErrors[$ck] = $conv.Error }
                         $row[$c.Key] = $conv.Value
-                        if ($c.Type -ne 'bool' -and $null -ne $conv.Value -and "$($conv.Value)" -ne '') { $nonEmpty = $true }
+                        $counts = if ($typedCols.Count) { $c.Type -notin 'enum', 'bool' } else { $c.Type -ne 'bool' }
+                        if ($counts -and ($conv.Error -or ($null -ne $conv.Value -and "$($conv.Value)" -ne ''))) { $nonEmpty = $true }
                     }
-                    if ($nonEmpty) { $rows.Add($row) }
+                    if ($nonEmpty) {
+                        $rows.Add($row)
+                        foreach ($ek in $rowErrors.Keys) { $errors[$ek] = $rowErrors[$ek] }
+                    }
                 }
                 $values[$key] = @($rows)
             }

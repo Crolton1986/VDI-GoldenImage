@@ -101,6 +101,27 @@ Describe 'ConvertFrom-GISettingsForm' {
         $rows[1].LogoffPolicy | Should -Be 'WAIT_FOR_LOGOFF'
     }
 
+    It 'drops spare rows whose only value is the dropdown default (what a browser actually posts)' {
+        $form = @{
+            'Production[0].Name' = 'JWPRDTest'; 'Production[0].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[1].Name' = '';          'Production[1].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[2].Name' = ' ';         'Production[2].LogoffPolicy' = 'FORCE_LOGOFF'
+        }
+        $r = ConvertFrom-GISettingsForm -Section Pools -Form $form
+        @($r.Values.Production).Count | Should -Be 1
+        $r.Values.Production[0].Name | Should -Be 'JWPRDTest'
+        $r.Errors.Count | Should -Be 0
+    }
+
+    It 'drops rows with remove checked' {
+        $form = @{
+            'Production[0].Name' = 'PRD-A'; 'Production[0].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[1].Name' = 'PRD-B'; 'Production[1].LogoffPolicy' = 'WAIT_FOR_LOGOFF'; 'Production[1]._remove' = 'on'
+        }
+        $r = ConvertFrom-GISettingsForm -Section Pools -Form $form
+        @($r.Values.Production).Name | Should -Be @('PRD-A')
+    }
+
     It 'excludes secret fields' {
         $r = ConvertFrom-GISettingsForm -Section vCenter -Form @{ Server = 'vc'; CredentialSecret = 'x'; Password = 'secret' }
         $r.Values.Keys | Should -Not -Contain 'CredentialSecret'
