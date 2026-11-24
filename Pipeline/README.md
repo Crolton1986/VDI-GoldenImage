@@ -104,7 +104,9 @@ The service account needs these permissions:
 * Horizon: an administrator role that can push images and read pools, machines and base images
 * App Volumes: an administrator account with read access
 
-The golden VM needs VMware Tools running and a local administrator account for the guest credential. The pipeline copies `VDI-GoldenImage.ps1` into the guest at `GoldenImage.ScriptPathInGuest` on every run, so you don't have to keep it there yourself. The guest script's own `.config` file and `Install` folder still live next to it as described in the top-level README.
+The golden VM needs VMware Tools running and a local administrator account for the guest credential. The pipeline copies `VDI-GoldenImage.ps1` into the guest at `GoldenImage.ScriptPathInGuest` on every run, so you don't have to keep it there yourself. The guest script's own `.config` file lives next to it as described in the top-level README.
+
+Installers for VMware Tools, Horizon Agent, DEM, App Volumes and Horizon Recording can't be downloaded automatically, so they have to reach the guest's `Install` folder somehow. Set `GoldenImage.InstallerSourceDir` to a folder on the pipeline host and drop the packages there; Maintain copies them into `Install` next to `ScriptPathInGuest` before the actions run. Files the guest already has with the same name and size are skipped, so a 300 MB Horizon Agent copies once, not every night. Leave it empty if you stage installers in the guest yourself. Keep only the version you want per product in the folder; the guest script picks the newest file matching each mask.
 
 The vault has to work without a prompt for the account that runs the scheduled tasks. The launcher sets this up for you. To do it by hand, sign in as that account once and run:
 
@@ -161,7 +163,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | vCenter | Server, CredentialSecret | Used for snapshots, power operations and guest operations. |
 | Horizon | Server, CredentialSecret, Domain, SkipCertificateCheck | Connection Server REST API. Leave the certificate check on in production. |
 | AppVolumes | Server, CredentialSecret, SkipCertificateCheck, TestPackages, Endpoints | TestPackages are the packages assigned to the test pool's computers. Endpoints are the REST paths and differ between releases. |
-| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
+| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
 | Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors | Retention. See Safety behavior. |

@@ -344,4 +344,43 @@ Describe 'Invoke-GIStageValidate' {
         @($saved.validation.checks | Where-Object { -not $_.passed }).name | Should -Be 'Service:svservice'
     }
 }
+
+Describe 'Sync-GIGuestInstallers' {
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Copy-VMGuestFile { param($Source, $Destination, $VM, [switch] $LocalToGuest, $GuestCredential, [switch] $Force, $ErrorAction) }
+        }
+        $script:src = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $src | Out-Null
+        Set-Content -LiteralPath (Join-Path $src 'VMware-tools-12.5.0-x86_64.exe') -Value 'abc' -NoNewline
+        Set-Content -LiteralPath (Join-Path $src 'Omnissa-Horizon-Agent-x86_64-2512.exe') -Value 'abcdef' -NoNewline
+        $script:cred = [pscredential]::new('admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+        Set-ModVar GuestList '[{"n":"VMware-tools-12.5.0-x86_64.exe","l":3}]'
+        Set-ModVar Scripts ([System.Collections.Generic.List[string]]::new())
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestScript {
+            $global:GITestCtx.Scripts.Add($ScriptText)
+            [pscustomobject]@{ ScriptOutput = $global:GITestCtx.GuestList; ExitCode = 0 }
+        }
+        Mock -ModuleName VDI-GIPipeline Copy-VMGuestFile { }
+    }
+
+    It 'copies only files the guest lacks or that differ in size' {
+        $r = Sync-GIGuestInstallers -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -SourceDir $src -GuestDir 'C:\ProgramData\VDI\Install'
+        $r.Copied | Should -Be @('Omnissa-Horizon-Agent-x86_64-2512.exe')
+        $r.Skipped | Should -Be @('VMware-tools-12.5.0-x86_64.exe')
+        Should -Invoke -ModuleName VDI-GIPipeline Copy-VMGuestFile -Times 1 -Exactly -ParameterFilter { $Source -like '*Horizon-Agent*' -and $Destination -eq 'C:\ProgramData\VDI\Install\' }
+        $global:GITestCtx.Scripts[-1] | Should -Match 'LastWriteTimeUtc'
+    }
+
+    It 'copies everything into an empty guest folder' {
+        Set-ModVar GuestList ''
+        $r = Sync-GIGuestInstallers -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -SourceDir $src -GuestDir 'C:\ProgramData\VDI\Install'
+        @($r.Copied).Count | Should -Be 2
+        Should -Invoke -ModuleName VDI-GIPipeline Copy-VMGuestFile -Times 2 -Exactly
+    }
+
+    It 'throws when the host folder is missing' {
+        { Sync-GIGuestInstallers -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -SourceDir (Join-Path $TestDrive 'nope') -GuestDir 'C:\x' } | Should -Throw '*not found*'
+    }
+}
 }

@@ -20,6 +20,7 @@
     VmName            = 'W11-GI-01'
     GuestCredentialSecret = 'GI-GuestAdmin'
     ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1'
+    InstallerSourceDir = ''   # optional host folder synced to <script dir>\Install in the guest
     Actions           = @('VmTools','Horizon','DEM','AppVolumes','FSLogix','MsTeams')   # run with -Unattended after updates
     WindowsUpdate     = @{ Enabled = $true; MaxPasses = 5 }
     FinalizeAction    = 'Finalize'

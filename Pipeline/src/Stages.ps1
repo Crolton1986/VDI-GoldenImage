@@ -87,6 +87,41 @@ function Invoke-GIGuestScript {
     return Invoke-VMScript -VM $VM -GuestCredential $Credential -ScriptType Powershell -ScriptText $ScriptText -ErrorAction Stop
 }
 
+function Sync-GIGuestInstallers {
+    # Copies installer packages from a folder on the pipeline host into the guest's Install folder.
+    # Files the guest already has with the same name and size are skipped, so large agents copy once.
+    # Timestamps are carried over because VDI-GoldenImage.ps1 picks the newest file per mask by LastWriteTime.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $VM,
+        [Parameter(Mandatory)] [pscredential] $Credential,
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $GuestDir
+    )
+    if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
+        throw "Installer source folder '$SourceDir' not found on the pipeline host."
+    }
+    $files = @(Get-ChildItem -LiteralPath $SourceDir -File)
+    if (-not $files.Count) { return [pscustomobject]@{ Copied = @(); Skipped = @() } }
+
+    $listScript = "New-Item -ItemType Directory -Path '$GuestDir' -Force | Out-Null; " +
+                  "@(Get-ChildItem -LiteralPath '$GuestDir' -File | ForEach-Object { @{ n = `$_.Name; l = `$_.Length } }) | ConvertTo-Json -Compress"
+    $out = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $listScript
+    $existing = @{}
+    $json = if ($out) { ([string]$out.ScriptOutput).Trim() } else { '' }
+    if ($json) { foreach ($e in @($json | ConvertFrom-Json)) { if ($e.n) { $existing[[string]$e.n] = [int64]$e.l } } }
+
+    $copied = @(); $skipped = @(); $stamps = @()
+    foreach ($f in $files) {
+        if ($existing.ContainsKey($f.Name) -and $existing[$f.Name] -eq $f.Length) { $skipped += $f.Name; continue }
+        Copy-VMGuestFile -Source $f.FullName -Destination "$GuestDir\" -VM $VM -LocalToGuest -GuestCredential $Credential -Force -ErrorAction Stop
+        $copied += $f.Name
+        $stamps += "(Get-Item -LiteralPath '$GuestDir\$($f.Name -replace "'", "''")').LastWriteTimeUtc = [datetime]::new($($f.LastWriteTimeUtc.Ticks), 'Utc')"
+    }
+    if ($stamps.Count) { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText ($stamps -join '; ') | Out-Null }
+    return [pscustomobject]@{ Copied = $copied; Skipped = $skipped }
+}
+
 function Wait-GIGuestReady {
     [CmdletBinding()]
     param(
@@ -255,6 +290,15 @@ function Invoke-GIStageMaintain {
     }
 
     $data = @{ actions = @() }
+    $installerSrc = Get-GIConfigValue $Config 'GoldenImage.InstallerSourceDir' ''
+    if ($installerSrc) {
+        if (-not [System.IO.Path]::IsPathRooted($installerSrc)) { $installerSrc = Join-Path $Config.Root $installerSrc }
+        $guestInstall = Join-Path (Split-Path $gi.ScriptPathInGuest -Parent) 'Install'
+        Set-GIProgress -Config $Config -Run $Run -Message "Copying installers to $guestInstall"
+        $sync = Sync-GIGuestInstallers -VM $vm -Credential $cred -SourceDir $installerSrc -GuestDir $guestInstall
+        $data.installers = [pscustomobject]@{ copied = @($sync.Copied); skipped = @($sync.Skipped) }
+        Write-GILog -Config $Config -RunId $Run.runId -Message "Installers: copied=$(@($sync.Copied).Count) unchanged=$(@($sync.Skipped).Count) -> $guestInstall" -Level Info
+    }
     Set-GIProgress -Config $Config -Run $Run -Message 'Enabling updates (-Action Update)'
     Invoke-GIGuestAction -Config $Config -VM $vm -Credential $cred -Action 'Update' | Out-Null
 

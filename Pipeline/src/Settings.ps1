@@ -46,6 +46,8 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'ScriptPathInGuest'; Label = 'Script path in guest'; Type = 'string'; Required = $true }
             @{ Key = 'GuestWorkDir'; Label = 'Guest work folder'; Type = 'string'; Default = 'C:\ProgramData\VDI\Pipeline'; Required = $true }
             @{ Key = 'CopyScript'; Label = 'Copy script into guest before each run'; Type = 'bool'; Default = $true }
+            @{ Key = 'InstallerSourceDir'; Label = 'Installer folder on pipeline host'; Type = 'string'
+               Help = 'Optional. Files here are copied into the Install folder next to the guest script before the actions run. Unchanged files are skipped. Relative paths resolve from the Pipeline folder.' }
             @{ Key = 'Actions'; Label = 'Actions'; Type = 'list'; ItemValues = $script:GIGuestActions
                Help = "One per line, run in order with -Unattended after updates. Valid: $($script:GIGuestActions -join ', ')." }
             @{ Key = 'FinalizeAction'; Label = 'Finalize action'; Type = 'enum'; Values = @('Finalize', 'FinalizeFast'); Required = $true }
