@@ -290,6 +290,8 @@ Dashboard errors and every request (including timeouts) are logged to `logs/dash
 
 How it works: the dashboard never runs a stage inside a web request. It writes `state/run-request.json` and starts the `VDI-GI-Runner` scheduled task, which runs `Invoke-GIPipeline.ps1 -FromRequest` as the service account. The runner takes `state/pipeline.lock` first. If the pipeline is busy (a scheduled run, a command-line run or another dashboard run), the request stays queued and an admin can cancel it on the Run page. Only one request can be queued at a time.
 
+With `-LocalAdmin` (lab/test runs) there are no scheduled tasks. The dashboard starts `Invoke-GIPipeline.ps1 -FromRequest` as a hidden `pwsh` process under your own account instead, and its output goes to `logs/runner-<timestamp>.log`. To stop one in an emergency, end that `pwsh` process (its id is in the run's log), then check vCenter and Horizon as below.
+
 There's no stop button. A stage can be partway through a snapshot, a guest operation or an image push, and killing the process from a web page would leave vCenter or Horizon in a state nobody has looked at. To stop in an emergency, end the `VDI-GI-Runner` task (or `VDI-GI-Pipeline` for a scheduled run) in Task Scheduler, then check vCenter and Horizon by hand: power state, snapshots, and any pending push on the pools. The stale lock clears itself on the next run once its process is gone.
 
 ### Audit

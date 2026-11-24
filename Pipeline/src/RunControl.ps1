@@ -226,6 +226,59 @@ function Start-GIRunnerTask {
     }
 }
 
+function Start-GIRunnerProcess {
+    <#
+    .SYNOPSIS
+      Local (-LocalAdmin) runs: starts Invoke-GIPipeline.ps1 -FromRequest as a separate pwsh process
+      under the current user instead of the VDI-GI-Runner scheduled task. Output goes to
+      <Paths.Logs>/runner-<timestamp>.log. Returns @{ Pid; Log; Error } (Error set when it died right away).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath)
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-GIPipeline.ps1'
+    $pwsh = (Get-Process -Id $PID).Path
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-GIProcessArgument $script), '-FromRequest')
+    if ($ConfigPath) { $argList += @('-ConfigPath', (ConvertTo-GIProcessArgument $ConfigPath)) }
+    $logDir = [string]$Config.Paths.Logs
+    if (-not (Test-Path -LiteralPath $logDir)) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+    $log = Join-Path $logDir ("runner-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    if (-not $PSCmdlet.ShouldProcess($script, 'Start pipeline runner process')) { return }
+    $sp = @{ FilePath = $pwsh; ArgumentList = $argList; PassThru = $true; RedirectStandardOutput = $log; RedirectStandardError = "$log.err" }
+    if ($IsWindows) { $sp.WindowStyle = 'Hidden' }
+    $proc = Start-Process @sp
+    $result = @{ Pid = $proc.Id; Log = $log; Error = $null }
+    # Exit 0 or 3 (pipeline busy / nothing to do) right away is normal; anything else is a startup failure
+    if ($proc.WaitForExit(3000) -and $proc.ExitCode -notin 0, 3) {
+        $err = ''
+        foreach ($f in "$log.err", $log) {
+            if (Test-Path -LiteralPath $f) { $err = ((Get-Content -LiteralPath $f -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim(); if ($err) { break } }
+        }
+        $result.Error = if ($err) { $err } else { "exit code $($proc.ExitCode)" }
+    }
+    return $result
+}
+
+function Start-GIQueuedRun {
+    <#
+    .SYNOPSIS
+      Starts whatever picks up the queued request: a local process with -LocalAdmin, otherwise the
+      VDI-GI-Runner scheduled task. Returns the notice code for /run: started, queued, norunner or runfailed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath, [switch] $Local)
+    if ($Local) {
+        try {
+            $r = Start-GIRunnerProcess -Config $Config -ConfigPath $ConfigPath
+            if ($r.Error) { Write-Warning "Runner process stopped right away: $($r.Error) (log: $($r.Log).err)"; return 'runfailed' }
+            return 'started'
+        } catch {
+            Write-Warning "Could not start the runner process: $($_.Exception.Message)"
+            return 'runfailed'
+        }
+    }
+    try { Start-GIRunnerTask; return 'queued' } catch { return 'norunner' }
+}
+
 function Set-GIPipelineScheduleTask {
     <#
     .SYNOPSIS

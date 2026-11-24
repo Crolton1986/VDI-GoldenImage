@@ -4,7 +4,8 @@
 .DESCRIPTION
     Server-rendered HTML over the pipeline module. Settings save to config/settings.json,
     credentials go to the SecretManagement vault of the account the dashboard runs as, and run
-    controls queue a request for the VDI-GI-Runner scheduled task (stages never run inside a web request).
+    controls queue a request for the VDI-GI-Runner scheduled task, or with -LocalAdmin start a separate
+    pwsh process for it (stages never run inside a web request).
 .PARAMETER ConfigPath
     Optional pipeline config file (defaults to pipeline.config.psd1 next to the module).
 .PARAMETER Port
@@ -360,6 +361,8 @@ Start-PodeServer -Quiet -Threads 4 {
         $notice = switch ($WebEvent.Query['r']) {
             'queued'    { 'Queued. The runner task picks it up within a few seconds; the run appears in the run list.' }
             'norunner'  { 'Queued, but the VDI-GI-Runner task could not be started. Check that it is registered (Register-GIPipelineTasks.ps1).' }
+            'started'   { 'Started in a local process (local mode, no scheduled task). The run appears in the run list; output is in logs/runner-*.log.' }
+            'runfailed' { 'Queued, but the local runner process stopped right away. See the newest logs/runner-*.log.err.' }
             'cancelled' { 'Queued request cancelled.' }
             default { '' }
         }
@@ -387,8 +390,7 @@ Start-PodeServer -Quiet -Threads 4 {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message "Not started: $($_.Exception.Message)") -StatusCode 409
             return
         }
-        $r = 'queued'
-        try { Start-GIRunnerTask } catch { $r = 'norunner' }
+        $r = Start-GIQueuedRun -Config $cfg -ConfigPath $c.ConfigPath -Local:([bool]$c.LocalAdmin)
         Move-PodeResponseUrl -Url "/run?r=$r"
     }
 
@@ -412,8 +414,7 @@ Start-PodeServer -Quiet -Threads 4 {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message "Rollback not started: $($_.Exception.Message)") -StatusCode 409
             return
         }
-        $r = 'queued'
-        try { Start-GIRunnerTask } catch { $r = 'norunner' }
+        $r = Start-GIQueuedRun -Config $cfg -ConfigPath $c.ConfigPath -Local:([bool]$c.LocalAdmin)
         Move-PodeResponseUrl -Url "/run?r=$r"
     }
 

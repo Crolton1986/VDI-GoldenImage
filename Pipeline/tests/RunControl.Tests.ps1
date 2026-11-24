@@ -466,3 +466,26 @@ Describe 'Set-GIPipelineScheduleTask' {
         $r.detail | Should -Match 'only available on Windows'
     }
 }
+
+Describe 'Start-GIQueuedRun' {
+    BeforeEach { $cfg = New-TestConfig }
+
+    It 'starts a local process and never touches the scheduled task with -Local' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess { @{ Pid = 1234; Log = 'x.log'; Error = $null } }
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerTask {}
+        Start-GIQueuedRun -Config $cfg -Local | Should -Be 'started'
+        Should -Invoke -ModuleName VDI-GIPipeline Start-GIRunnerTask -Times 0 -Exactly
+    }
+
+    It 'reports runfailed when the local process dies right away' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess { @{ Pid = 1234; Log = 'x.log'; Error = 'module not found' } }
+        Start-GIQueuedRun -Config $cfg -Local -WarningAction SilentlyContinue | Should -Be 'runfailed'
+    }
+
+    It 'uses the scheduled task without -Local and reports norunner when it is missing' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerTask { throw 'task not found' }
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess {}
+        Start-GIQueuedRun -Config $cfg | Should -Be 'norunner'
+        Should -Invoke -ModuleName VDI-GIPipeline Start-GIRunnerProcess -Times 0 -Exactly
+    }
+}
