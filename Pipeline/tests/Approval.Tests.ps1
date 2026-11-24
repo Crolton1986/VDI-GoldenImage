@@ -74,6 +74,11 @@ Describe 'Approval, promotion, post-check and rollback' {
         Mock -ModuleName VDI-GIPipeline Send-GIReport { }
         Mock -ModuleName VDI-GIPipeline Connect-GIServices { }
         Mock -ModuleName VDI-GIPipeline Disconnect-GIServices { }
+        Mock -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle {
+            [pscustomobject]@{ Mode = 'Prune'; Chain = 'Master > Baseline 26.11.20.1249 > GI-20261124-020202'; Removed = @('Baseline 26.11.11.1340')
+                Plan = @(); Consolidation = @('Baseline 26.11.11.1340: Disks consolidated'); Warnings = @(); Errors = @()
+                SpaceBefore = [pscustomobject]@{ UsedGB = 300; Datastores = @() }; SpaceAfter = [pscustomobject]@{ UsedGB = 240; Datastores = @() } }
+        }
         Mock -ModuleName VDI-GIPipeline Get-GIHorizonPool { $global:GIApprovalCtx.Pools | Where-Object name -eq $Name | Select-Object -First 1 }
         Mock -ModuleName VDI-GIPipeline Get-GIHorizonBaseImage {
             [pscustomobject]@{ BaseVm = [pscustomobject]@{ id = 'bvm-1' }; Snapshot = [pscustomobject]@{ id = 'snap-new'; name = $SnapshotName } }
@@ -293,6 +298,25 @@ Describe 'Approval, promotion, post-check and rollback' {
             $lkg = Get-Content $lkgPath -Raw | ConvertFrom-Json
             $lkg.snapshotName | Should -Be 'GI-20261124-020202'
             $lkg.runId | Should -Be $run.runId
+
+            # Retention runs once production passed, as a finished run, and is recorded on the run
+            Should -Invoke -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle -Times 1 -Exactly -ParameterFilter { $RunFinished -and -not $ReportOnly }
+            $saved.retention.removed | Should -Be @('Baseline 26.11.11.1340')
+            $saved.retention.freedGb | Should -Be 60
+            $saved.retention.chain | Should -Be 'Master > Baseline 26.11.20.1249 > GI-20261124-020202'
+        }
+
+        It 'stays Completed when snapshot retention throws' {
+            Mock -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle { throw 'vCenter gone' }
+            Set-Ctx Pools @(
+                (New-TestPool -Id 'p-a' -Name 'PRD-A' -Snap 'snap-new')
+                (New-TestPool -Id 'p-b' -Name 'PRD-B' -Snap 'snap-new')
+            )
+            $run = New-ScheduledRun -Config $cfg -Start (Get-Date).AddHours(-1)
+            Invoke-GIStagePostCheck -Config $cfg -Run $run | Should -BeTrue
+            $saved = Get-GIRun -Config $cfg -RunId $run.runId
+            $saved.status | Should -Be 'Completed'
+            $saved.retention.errors[0] | Should -Match 'vCenter gone'
         }
 
         It 'completes, and writes lastKnownGood, when all pools are on the expected snapshot and healthy' {
@@ -333,6 +357,7 @@ Describe 'Approval, promotion, post-check and rollback' {
             $saved.status | Should -Be 'Failed'
             $saved.error | Should -Match 'PostCheck'
             Test-Path (Join-Path $cfg.Paths.State 'lastKnownGood.json') | Should -BeFalse
+            Should -Invoke -ModuleName VDI-GIPipeline Invoke-GISnapshotLifecycle -Times 0 -Exactly
             Should -Invoke -ModuleName VDI-GIPipeline Send-GIReport -Times 1 -Exactly
         }
 

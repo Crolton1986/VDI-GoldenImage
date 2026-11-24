@@ -40,9 +40,13 @@
     MachineReadyTimeoutMin = 60
   }
 
-  # Snapshot retention (Prune = $false => report only)
-  # ProtectAncestors: never delete a parent of an in-use snapshot (Horizon tracks snapshots by path)
-  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }
+  # Snapshot naming and retention (Prune = $false => report only). Runs after production PostCheck passes.
+  # Names: '<NamePrefix> yy.MM.dd.HHmm'. Mode Chain keeps: root (Master) > previous Baseline > production Baseline.
+  # ProtectAncestors: Chain = keep parents of a pending push; Tree = keep parents of any in-use snapshot.
+  Snapshots = @{
+    NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true
+    ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15
+  }
 
   # Production promotion behaviour
   Promotion = @{

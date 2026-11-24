@@ -164,7 +164,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
-| Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors | Retention. See Safety behavior. |
+| Snapshots | NamePrefix, Mode, Keep, MaxChainDepth, Prune, ProtectAncestors, ConsolidateTimeoutMin, MinFreeSpacePercent | Naming and retention. See Safety behavior. |
 | Promotion | AutoPromote, MaintenanceWindow | MaintenanceWindow has Days and StartTime. The next matching window is used when you don't pass `-StartTime`. |
 | Email | Enabled, SmtpServer, Port, From, To, UseSsl | Run report by mail. |
 | Dashboard | Port, CertificateThumbprint, ViewerGroup, ApproverGroup, AdminGroup, RefreshSeconds | Web dashboard. Shown read-only in the dashboard. Edit the psd1 and restart it. |
@@ -319,8 +319,14 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 ## Safety behavior
 
 * Preflight stops the run if the golden VM is powered on or if any configured pool already has a push pending. It then takes the `pre-maint-<RunId>` safety snapshot, so a bad update pass can be reverted.
-* Retention is report-only until you set `Snapshots.Prune = $true`. When it prunes, it keeps the newest `Snapshots.Keep` snapshots of each kind (`GI-*` and `pre-maint-*`), never touches snapshots it did not create, and never deletes a snapshot that is in use by any pool (current or pending), the last-known-good, the current run's snapshots, or an ancestor of any of those (`ProtectAncestors`). Horizon tracks the base image by snapshot path, so removing a parent can break provisioning for pools on its children. Test in the lab before turning `ProtectAncestors` off. If Horizon can't be read, retention deletes nothing.
-* When the snapshot chain gets deeper than `Snapshots.MaxChainDepth`, the report warns you. Pruning can't flatten the chain. Plan a new golden image generation (a full clone of the VM) instead.
+* New snapshots are named `<Snapshots.NamePrefix> yy.MM.dd.HHmm` (default `Baseline 26.11.24.0131`).
+* Retention runs after a production push passes PostCheck, never before. It's report-only until you set `Snapshots.Prune = $true`; the Snapshot stage message and the run report list what it would remove.
+* In `Chain` mode (the default) the golden VM ends up as `Master > previous Baseline > production Baseline`. Older Baselines and the finished run's `pre-maint-*` snapshot are removed even though they sit under the production snapshot. vSphere merges a removed snapshot's changes into its child, so nothing in the image is lost. With `Keep = 2`, promoting `Baseline 26.11.24.0131` removes `Baseline 26.11.11.1340` and keeps `Baseline 26.11.20.1249` for rollback.
+* Retention never removes the root snapshot, snapshots it doesn't manage (names other than `<prefix> *`, `GI-*`, `pre-maint-*`), any snapshot a pool uses or has a push pending for, or the last-known-good. If any push is pending, or Horizon can't be read, it removes nothing.
+* Snapshots are removed one at a time, oldest first. After each one it checks `ConsolidationNeeded` and consolidates disks (timeout `Snapshots.ConsolidateTimeoutMin`), then re-reads Horizon to confirm every pool's image snapshot still resolves. If consolidation fails or a pool's snapshot stops resolving, it stops and reports an error. The report shows used space before and after, space freed, datastore free space and the remaining chain.
+* The Snapshot stage also consolidates first if vCenter flags the VM, and fails if that doesn't work, so a new Baseline never stacks on an unconsolidated disk. It warns when a datastore is below `Snapshots.MinFreeSpacePercent` free.
+* Horizon records the image by snapshot path, and removing a parent changes the path of its children. Test Chain mode in the lab first: promote, let retention remove the oldest Baseline, then confirm Resync and adding machines still work on the pool. `Tree` mode keeps the old behavior (never remove a parent of an in-use snapshot).
+* When the snapshot chain gets deeper than `Snapshots.MaxChainDepth`, the report warns you. Plan a new golden image generation (a full clone of the VM) instead.
 * Promotion schedules the pools one after another. If one fails, the pools already scheduled in that promotion are cancelled.
 * `Promotion.AutoPromote` is `$false` by default, so a person has to approve every run.
 

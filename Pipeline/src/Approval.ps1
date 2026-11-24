@@ -187,11 +187,37 @@ function Invoke-GIStagePostCheck {
         $Run.status = 'Completed'
         Save-GIRun -Config $Config -Run $Run
         Set-GILastKnownGood -Config $Config -Run $Run
+        Invoke-GIPostProductionRetention -Config $Config -Run $Run
     } finally {
         Save-GIReport -Config $Config -Run $Run | Out-Null
         Send-GIReport -Config $Config -Run $Run
     }
     return $true
+}
+
+function Invoke-GIPostProductionRetention {
+    <#
+    .SYNOPSIS
+      Runs snapshot retention once production is on the new Baseline. Results go in $Run.retention and
+      the report. Never throws: a completed run stays completed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] $Run)
+    try {
+        $life = Invoke-GISnapshotLifecycle -Config $Config -Run $Run -RunFinished
+        $rec = ConvertTo-GIRetentionRecord -Result $life
+        $msg = "Snapshot retention $($life.Mode): removed $(@($life.Removed).Count)$(if (@($life.Removed).Count) { " ($($life.Removed -join ', '))" }). Chain: $($life.Chain)"
+        if ($null -ne $rec.freedGb) { $msg += ". Freed $($rec.freedGb) GB" }
+        Write-GILog -Config $Config -RunId $Run.runId -Message $msg -Level $(if (@($life.Errors).Count) { 'Warn' } else { 'Info' })
+        foreach ($w in $life.Warnings) { Write-GILog -Config $Config -RunId $Run.runId -Message $w -Level Warn }
+        foreach ($e in $life.Errors) { Write-GILog -Config $Config -RunId $Run.runId -Message $e -Level Error }
+    } catch {
+        $rec = [pscustomobject]@{ at = (Get-Date).ToString('o'); mode = 'Failed'; errors = @("Snapshot retention failed: $($_.Exception.Message)") }
+        Write-GILog -Config $Config -RunId $Run.runId -Message $rec.errors[0] -Level Error
+    }
+    if ($Run -is [System.Collections.IDictionary] -or $Run.PSObject.Properties['retention']) { $Run.retention = $rec }
+    else { $Run | Add-Member -NotePropertyName retention -NotePropertyValue $rec }
+    Save-GIRun -Config $Config -Run $Run
 }
 
 function Invoke-GIRollback {
