@@ -2,6 +2,57 @@
 
 Runs the monthly golden image routine for Horizon instant-clone pools from a management server: patch the golden VM, snapshot it, test it on a test pool, wait for a human to approve, then push it to production in a maintenance window.
 
+## Quick start
+
+Clone the repository and run the launcher from the Pipeline folder:
+
+```powershell
+git clone https://github.com/<your-org>/VDI-GoldenImage.git
+cd VDI-GoldenImage\Pipeline
+
+# Production: needs administrator rights, relaunches itself elevated if you aren't
+.\Start-GIPipeline.ps1
+
+# Lab or test machine: no admin, no scheduled tasks, 127.0.0.1 only
+.\Start-GIPipeline.ps1 -LocalAdmin
+```
+
+You can start it from Windows PowerShell 5.1 or PowerShell 7. If PowerShell 7.2 or later isn't installed, the launcher asks before installing it (with winget, or the MSI from GitHub) and then continues in PowerShell 7. It installs the Pode module, which is the only module it needs before the web server can start. Then it starts the dashboard in setup mode and opens http://127.0.0.1:8080/setup in your browser. The setup page does the rest, one step at a time, with live progress.
+
+![Setup page during module install](docs/setup-installing.png)
+
+| Step | What it does | Lab | Production |
+|---|---|---|---|
+| Mode | You choose Lab or Production. With `-LocalAdmin` the choice is locked to Lab. | Yes | Yes |
+| Prerequisites | Checks the OS, PowerShell version, admin rights, that powershellgallery.com is reachable, free disk space (2 GB), the execution policy, and scripts blocked as downloaded files. | Yes | Yes |
+| Modules | Installs what's missing: Pode, VMware.PowerCLI, Microsoft.PowerShell.SecretManagement and Microsoft.PowerShell.SecretStore, plus Pester and PSScriptAnalyzer, which are optional. PowerCLI is large, so the first install takes several minutes. Modules go to AllUsers in Production and CurrentUser in Lab. | Yes | Yes |
+| PowerCLI | Turns off the customer experience program and sets how PowerCLI treats invalid vCenter certificates. | Yes | Yes |
+| Vault | Creates the SecretStore vault and sets it to open without a password for the Windows user running setup. | Yes | Yes |
+| Dashboard access | Sets the https port, the certificate (pick one from the machine store or create a self-signed one) and the AD groups for viewers, approvers and admins. | Skipped | Yes |
+| Tasks | Registers the four scheduled tasks (see Scheduling below). | Skipped | Yes |
+| Finish | Marks setup complete. | Yes | Yes |
+
+A few things to know before you start:
+
+* The Tasks step asks for your Windows password, because Task Scheduler needs it to run tasks when you're logged off. It's used once to register the tasks and isn't stored. The Skip button leaves Task Scheduler untouched, so you can register the tasks yourself later.
+* The vault opens without a password for the user who runs setup, because the scheduled tasks have to read the secrets without anyone there to type one. Anyone who can log on as that user can read the secrets, so protect that account.
+* Everything, including the vault, the tasks and the dashboard, runs as the user who ran setup.
+
+![Setup complete](docs/setup-complete.png)
+
+After Finish, Production hands off to the `VDI-GI-Dashboard` scheduled task, which serves the dashboard over https, and the setup page stops itself a few seconds later. The launcher prints the dashboard address. In Lab mode the same page keeps running on 127.0.0.1, and you continue at `/settings` to enter your vCenter, Horizon and App Volumes details.
+
+Launcher options:
+
+| Option | Effect |
+|---|---|
+| `-ResetSetup` | Moves `config/setup.json` aside so setup runs again. |
+| `-NoBrowser` | Doesn't open a browser. It prints the address instead. |
+| `-Port` | Port for the setup page and for `-LocalAdmin` (default 8080). The production dashboard uses the port you pick in setup. |
+| `-ConfigPath` | Uses a different config file. |
+
+Setup progress is saved in `config/setup.json`, and each background step writes a log to `config/setup-<Step>.log`. If a step fails, fix the cause and press Retry. Steps check what's already in place, so repeating one is safe.
+
 ## What it does
 
 ```
@@ -26,7 +77,11 @@ If something is wrong after promotion, `-Stage Rollback` pushes the last-known-g
 
 Each run has a state file in `state/`, an HTML report in `reports/` and a log in `logs/`. The file formats are in `docs/CONTRACT.md`.
 
-## Requirements
+## Manual setup (without the launcher)
+
+The launcher does all of this for you. Use these steps when you want to prepare the server yourself.
+
+### Requirements
 
 On the management server:
 
@@ -49,7 +104,7 @@ The service account needs these permissions:
 
 The golden VM needs VMware Tools running and a local administrator account for the guest credential. The pipeline copies `VDI-GoldenImage.ps1` into the guest at `GoldenImage.ScriptPathInGuest` on every run, so you don't have to keep it there yourself. The guest script's own `.config` file and `Install` folder still live next to it as described in the top-level README.
 
-The vault has to work without a prompt for the account that runs the scheduled tasks. Sign in as that account once and run:
+The vault has to work without a prompt for the account that runs the scheduled tasks. The launcher sets this up for you. To do it by hand, sign in as that account once and run:
 
 ```powershell
 Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault
@@ -58,7 +113,7 @@ Set-SecretStoreConfiguration -Authentication None -Interaction None -Confirm:$fa
 
 A different SecretManagement vault works too, as long as it's readable by that account without interaction. The SecretStore vault is per user, so create the secrets as the service account as well. The dashboard can also set them (see Credentials under Dashboard).
 
-## Secrets
+### Secrets
 
 The config file holds only secret names. Create these as the service account, or enter them in the dashboard:
 
@@ -68,6 +123,29 @@ Set-Secret -Name GI-Horizon    -Secret (Get-Credential -Message 'Horizon adminis
 Set-Secret -Name GI-AppVol     -Secret (Get-Credential -Message 'App Volumes administrator')
 Set-Secret -Name GI-GuestAdmin -Secret (Get-Credential -Message 'Golden VM local administrator')
 ```
+
+### Scheduling
+
+`Register-GIPipelineTasks.ps1` creates four scheduled tasks. Run it from an elevated PowerShell 7 session. The setup page does this in its Tasks step.
+
+```powershell
+$cred = Get-Credential DOMAIN\svc-vdi-gi
+.\Register-GIPipelineTasks.ps1 -Credential $cred -WhatIf
+.\Register-GIPipelineTasks.ps1 -Credential $cred -PipelineDay Tuesday -PipelineTime 20:00
+.\Register-GIPipelineTasks.ps1 -Credential $cred -ConfigPath D:\GI\prod.config.psd1
+.\Register-GIPipelineTasks.ps1 -Unregister
+```
+
+| Task | Runs | When |
+|---|---|---|
+| VDI-GI-Pipeline | `Invoke-GIPipeline.ps1 -Stage All` | Weekly, Tuesday 20:00 by default |
+| VDI-GI-PostCheck | `Invoke-GIPipeline.ps1 -Stage PostCheck` | Every hour |
+| VDI-GI-Dashboard | `Web\Start-GIDashboard.ps1` | At startup, restarted up to 3 times, 1 minute apart |
+| VDI-GI-Runner | `Invoke-GIPipeline.ps1 -FromRequest` | No trigger. The dashboard starts it when you queue a run |
+
+The tasks run whether or not the account is logged on, with highest privileges. Running the script again updates the tasks in place. PostCheck exits with 3 while a push is still running, and the task history shows that as a failure. That's expected. The account needs the "Log on as a batch job" right.
+
+The dashboard runs as the same account, and that account needs permission to start `VDI-GI-Runner` and to change the trigger of `VDI-GI-Pipeline`. If the dashboard reports that it couldn't start the runner or update the schedule, check the permissions on those tasks in Task Scheduler. `-Unregister` removes all four tasks.
 
 ## Configuration
 
@@ -216,7 +294,7 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 
 `-NoTls` serves plain http and `-NoAuth` skips sign-in. Use them for a lab only. With `-NoAuth` the dashboard is strictly read-only: the approve, reject, settings and run controls are disabled. `-NoAuth` also works on a non-Windows host.
 
-`-LocalAdmin` is for lab and smoke tests. It binds to 127.0.0.1 over plain http, with no sign-in, and treats everyone who reaches it as admin and approver. Never expose it: don't put it behind a reverse proxy, a port forward or a firewall rule, and don't use it on a server that real users can log on to.
+`-LocalAdmin` is for lab and smoke tests. On first run, `Start-GIPipeline.ps1 -LocalAdmin` also goes through `/setup`, locked to Lab mode. It binds to 127.0.0.1 over plain http, with no sign-in, and treats everyone who reaches it as admin and approver. Never expose it: don't put it behind a reverse proxy, a port forward or a firewall rule, and don't use it on a server that real users can log on to.
 
 ### Routes
 
@@ -235,29 +313,6 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 | `GET /audit` | Audit log (admins only) |
 | `GET /api/runs` | Runs as JSON |
 | `GET /api/runs/:runId` | One run as JSON |
-
-## Scheduling
-
-`Register-GIPipelineTasks.ps1` creates four scheduled tasks. Run it from an elevated PowerShell 7 session.
-
-```powershell
-$cred = Get-Credential DOMAIN\svc-vdi-gi
-.\Register-GIPipelineTasks.ps1 -Credential $cred -WhatIf
-.\Register-GIPipelineTasks.ps1 -Credential $cred -PipelineDay Tuesday -PipelineTime 20:00
-.\Register-GIPipelineTasks.ps1 -Credential $cred -ConfigPath D:\GI\prod.config.psd1
-.\Register-GIPipelineTasks.ps1 -Unregister
-```
-
-| Task | Runs | When |
-|---|---|---|
-| VDI-GI-Pipeline | `Invoke-GIPipeline.ps1 -Stage All` | Weekly, Tuesday 20:00 by default |
-| VDI-GI-PostCheck | `Invoke-GIPipeline.ps1 -Stage PostCheck` | Every hour |
-| VDI-GI-Dashboard | `Web\Start-GIDashboard.ps1` | At startup, restarted up to 3 times, 1 minute apart |
-| VDI-GI-Runner | `Invoke-GIPipeline.ps1 -FromRequest` | No trigger. The dashboard starts it when you queue a run |
-
-The tasks run whether or not the account is logged on, with highest privileges. Running the script again updates the tasks in place. PostCheck exits with 3 while a push is still running, and the task history shows that as a failure. That's expected. The account needs the "Log on as a batch job" right.
-
-The dashboard runs as the same account, and that account needs permission to start `VDI-GI-Runner` and to change the trigger of `VDI-GI-Pipeline`. If the dashboard reports that it couldn't start the runner or update the schedule, check the permissions on those tasks in Task Scheduler. `-Unregister` removes all four tasks.
 
 ## Safety behavior
 
@@ -295,7 +350,7 @@ For the first rollout, run the stages one at a time against the lab pools with `
 
 A suggested order for first-time setup:
 
-1. Register the tasks with `Register-GIPipelineTasks.ps1`.
+1. Run `Start-GIPipeline.ps1`, or register the tasks with `Register-GIPipelineTasks.ps1`.
 2. Start the dashboard (or let the VDI-GI-Dashboard task do it) and sign in as an admin.
 3. Fill in each Settings section.
 4. Set the credentials on the vCenter, Horizon, App Volumes and Golden image sections.

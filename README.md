@@ -102,6 +102,8 @@ Two parameters make the script usable from automation. `-Unattended` suppresses 
 
 The `Pipeline` folder uses these to run the whole monthly routine from a management server: patching, snapshots, a test-pool push, validation, approval and a scheduled production push. See [Pipeline/README.md](Pipeline/README.md).
 
+To get started, run `Pipeline\Start-GIPipeline.ps1` (or add `-LocalAdmin` to try it on a test machine) and follow the setup page.
+
 ## Configuration
 
 The script uses a default set of variables defined internally within the `$VAR` hash table. You can easily override these settings without modifying the main script file by using a configuration file. **This makes future updates of the script much easier**, as your custom settings remain preserved when you replace the main `.ps1` file with a newer version.
