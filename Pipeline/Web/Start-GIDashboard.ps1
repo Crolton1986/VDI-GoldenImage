@@ -90,6 +90,7 @@ if ($Setup -and -not (Test-GISetupComplete -Config $config)) {
 $viewsPath = $ctx.ViewsPath
 $settingsViewsPath = $ctx.SettingsViewsPath
 $setupViewsPath = $ctx.SetupViewsPath
+$navContextPath = Join-Path $webRoot 'NavContext.ps1'
 
 Start-PodeServer -Quiet {
     # Make the context, module and view functions available in every route runspace.
@@ -98,6 +99,7 @@ Start-PodeServer -Quiet {
     Use-PodeScript -Path $viewsPath
     Use-PodeScript -Path $settingsViewsPath
     Use-PodeScript -Path $setupViewsPath
+    Use-PodeScript -Path $navContextPath
 
     # --- Setup mode: everything goes to /setup until setup is complete ---
     if ($ctx.SetupMode) {
@@ -137,14 +139,14 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $runs = @(Get-GIRunList -Config (Get-GIDashboardConfig $c) -Last 50)
-        $html = New-GIRunListPage -Runs $runs -RefreshSeconds $c.RefreshSeconds
-        if (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent) { $html = Add-GIAdminNav -Html $html }
-        Write-PodeHtmlResponse -Value $html
+        Write-PodeHtmlResponse -Value (New-GIRunListPage -Runs $runs -RefreshSeconds $c.RefreshSeconds)
     }
 
     Add-PodeRoute -Method Get -Path '/runs/:runId' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $id = $WebEvent.Parameters['runId']
         if (-not (Test-GIRunId $id) -or -not (Test-Path -LiteralPath (Join-Path (Get-GIDashboardConfig $c).Paths.State "$id.json"))) {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Run not found.') -StatusCode 404
@@ -172,13 +174,12 @@ Start-PodeServer -Quiet {
             $runToken = Get-GIFormToken -Secret $c.FormSecret -User $user -RunId 'run'
             $notice += New-GIRunActionsHtml -Run $run -Token $runToken -Busy $busy
         }
-        $html = New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice
-        if ($isAdmin) { $html = Add-GIAdminNav -Html $html }
-        Write-PodeHtmlResponse -Value $html
+        Write-PodeHtmlResponse -Value (New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice)
     }
 
     Add-PodeRoute -Method Post -Path '/runs/:runId/decision' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $id = $WebEvent.Parameters['runId']
         $deny = { param($code, $msg) Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $msg) -StatusCode $code }
         if (-not (Test-GIRunId $id)) { & $deny 404 'Run not found.'; return }
@@ -212,6 +213,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/settings' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Settings are for the admin group.') -StatusCode 403; return }
         $first = @((Get-GISettingsSchema).Keys)[0]
         Move-PodeResponseUrl -Url "/settings/$first"
@@ -219,6 +221,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/settings/:section' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Settings are for the admin group.') -StatusCode 403; return }
         $schema = Get-GISettingsSchema
         $sk = [string]$WebEvent.Parameters['section']
@@ -233,6 +236,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/settings/:section' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $schema = Get-GISettingsSchema
         $sk = [string]$WebEvent.Parameters['section']
         if (-not $schema.Contains($sk)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Unknown settings section.') -StatusCode 404; return }
@@ -287,6 +291,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/settings/:section/credential' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $schema = Get-GISettingsSchema
         $sk = [string]$WebEvent.Parameters['section']
         if (-not $schema.Contains($sk)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Unknown settings section.') -StatusCode 404; return }
@@ -315,6 +320,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/settings/:section/test' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $schema = Get-GISettingsSchema
         $sk = [string]$WebEvent.Parameters['section']
         if (-not $schema.Contains($sk) -or -not $schema[$sk]['Test']) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Nothing to test here.') -StatusCode 404; return }
@@ -334,6 +340,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/run' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Run controls are for the admin group.') -StatusCode 403; return }
         $cfg = Get-GIDashboardConfig $c
         $user = Get-GIDashboardUser -Context $c -WebEvent $WebEvent
@@ -353,6 +360,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/run/start' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $hdr = @{ Origin = $WebEvent.Request.Headers['Origin']; Host = $WebEvent.Request.Headers['Host'] }
         $why = Get-GIPostRejection -Context $c -WebEvent $WebEvent -Role Admin -FormId 'run' -Headers $hdr
         if ($why) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $why.Message) -StatusCode $why.Code; return }
@@ -374,6 +382,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/run/rollback' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $hdr = @{ Origin = $WebEvent.Request.Headers['Origin']; Host = $WebEvent.Request.Headers['Host'] }
         $why = Get-GIPostRejection -Context $c -WebEvent $WebEvent -Role Admin -FormId 'run' -Headers $hdr
         if ($why) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $why.Message) -StatusCode $why.Code; return }
@@ -398,6 +407,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Post -Path '/run/cancel-request' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $hdr = @{ Origin = $WebEvent.Request.Headers['Origin']; Host = $WebEvent.Request.Headers['Host'] }
         $why = Get-GIPostRejection -Context $c -WebEvent $WebEvent -Role Admin -FormId 'run' -Headers $hdr
         if ($why) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $why.Message) -StatusCode $why.Code; return }
@@ -407,6 +417,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/audit' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'The audit log is for the admin group.') -StatusCode 403; return }
         Write-PodeHtmlResponse -Value (New-GIAuditPage -Entries @(Get-GIAudit -Config (Get-GIDashboardConfig $c) -Last 200))
     }
@@ -416,6 +427,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/setup' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $cfg = Get-GIDashboardConfig $c
         $complete = Test-GISetupComplete -Config $cfg
         if (-not $c.SetupMode -and -not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) {
@@ -445,6 +457,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/setup/log/:step' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         if (-not $c.SetupMode -and -not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Setup logs are for the admin group.') -StatusCode 403; return
         }
@@ -457,12 +470,14 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/setup/status' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $state = Get-GISetupState -Config (Get-GIDashboardConfig $c) -ModeLocked:$c.ModeLocked
         Write-PodeJsonResponse -Value (New-GISetupStatusJson -State $state)
     }
 
     Add-PodeRoute -Method Post -Path '/setup/:step' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $step = [string]$WebEvent.Parameters['step']
         $hdr = @{ Origin = $WebEvent.Request.Headers['Origin']; Host = $WebEvent.Request.Headers['Host'] }
         $why = if (-not $c.SetupMode) { @{ Code = 403; Message = 'Setup changes are only possible from the setup server (Start-GIPipeline.ps1 -ResetSetup).' } }
@@ -521,6 +536,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/reports/:runId' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $id = $WebEvent.Parameters['runId']
         $file = if (Test-GIRunId $id) { Join-Path (Get-GIDashboardConfig $c).Paths.Reports "$id.html" }
         if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -534,6 +550,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/logs/:runId' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $id = $WebEvent.Parameters['runId']
         $file = if (Test-GIRunId $id) { Join-Path (Get-GIDashboardConfig $c).Paths.Logs "$id.log" }
         if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -546,6 +563,7 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/pools' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $runs = @(Get-GIRunList -Config (Get-GIDashboardConfig $c) -Last 50)
         $lkg = Get-GILastKnownGood -Config (Get-GIDashboardConfig $c)
         Write-PodeHtmlResponse -Value (New-GIPoolsPage -LastKnownGood $lkg -Runs $runs -TestPoolName ([string](Get-GIDashboardConfig $c).Pools.Test.Name) -RefreshSeconds $c.RefreshSeconds)
@@ -553,12 +571,14 @@ Start-PodeServer -Quiet {
 
     Add-PodeRoute -Method Get -Path '/api/runs' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $runs = @(Get-GIRunList -Config (Get-GIDashboardConfig $c) -Last 50)
         Write-PodeJsonResponse -Value (ConvertTo-Json -InputObject $runs -Depth 10)
     }
 
     Add-PodeRoute -Method Get -Path '/api/runs/:runId' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
+        Set-GINavContext -Context $c -WebEvent $WebEvent
         $id = $WebEvent.Parameters['runId']
         if (-not (Test-GIRunId $id) -or -not (Test-Path -LiteralPath (Join-Path (Get-GIDashboardConfig $c).Paths.State "$id.json"))) {
             Write-PodeJsonResponse -Value '{"error":"Run not found"}' -StatusCode 404
