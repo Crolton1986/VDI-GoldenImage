@@ -92,6 +92,16 @@ You can bypass the menu by specifying the exact task using the `-Action` paramet
 .\VDI-GoldenImage.ps1 -Action MsTeams
 ```
 
+## Automated maintenance pipeline
+
+Two parameters make the script usable from automation. `-Unattended` suppresses every prompt: download questions are answered from `UnattendedDownload` (default `$true`), "continue the installation?" is answered Yes, and Horizon Recording registration is skipped with a warning. It requires `-Action` and exits with code 2 if it is missing. `-ResultFile <path>` writes a JSON file with the action, success flag, errors, finish time and the installed version of each component. Either way the exit code is 0 on success and 1 if any error was reported.
+
+```
+.\VDI-GoldenImage.ps1 -Action AppVolumes -Unattended -ResultFile C:\ProgramData\VDI\result.json
+```
+
+The `Pipeline` folder uses these to run the whole monthly routine from a management server: patching, snapshots, a test-pool push, validation, approval and a scheduled production push. See [Pipeline/README.md](Pipeline/README.md).
+
 ## Configuration
 
 The script uses a default set of variables defined internally within the `$VAR` hash table. You can easily override these settings without modifying the main script file by using a configuration file. **This makes future updates of the script much easier**, as your custom settings remain preserved when you replace the main `.ps1` file with a newer version.
