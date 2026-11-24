@@ -408,6 +408,56 @@ Describe 'Test-GITcpPort' {
     }
 }
 
+Describe 'Test-GIConnection AppVolumes' {
+    BeforeAll {
+        # A web exception with a status code, shaped like what Invoke-RestMethod throws
+        function global:New-GIHttpError([int]$Code, [string]$Reason) {
+            $resp = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$Code)
+            $resp.ReasonPhrase = $Reason
+            $ex = [Microsoft.PowerShell.Commands.HttpResponseException]::new("Response status code does not indicate success: $Code ($Reason).", $resp)
+            return $ex
+        }
+    }
+    BeforeEach {
+        $cfg = New-TestConfig
+        $cfg.AppVolumes = @{ Server = 'avm.test'; CredentialSecret = 'GI-av'; Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities' } }
+        Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { [pscredential]::new('u', (ConvertTo-SecureString 'p' -AsPlainText -Force)) }
+        $global:GIAvCalls = [System.Collections.Generic.List[string]]::new()
+    }
+    AfterAll { Remove-Item function:global:New-GIHttpError -ErrorAction SilentlyContinue; Remove-Variable GIAvCalls -Scope Global -ErrorAction SilentlyContinue }
+
+    It 'falls back to /cv_api paths on 404 and says which paths worked' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod {
+            $global:GIAvCalls.Add("$Method $Uri")
+            if ($Uri -like '*/app_volumes/*') { throw (New-GIHttpError 404 'Not Found') }
+            if ($Uri -like '*online_entities') { return ('{"online":{"records":[{"name":"a"},{"name":"b"}]}}' | ConvertFrom-Json) }
+            return @{}
+        }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeTrue
+        $r.detail | Should -Match '2 online entities'
+        $r.detail | Should -Match 'Login worked at /cv_api/sessions'
+        $r.detail | Should -Match 'POST https://avm.test/app_volumes/sessions -> 404 Not Found'
+        $r.detail | Should -Match 'Online entities worked at /cv_api/online_entities'
+    }
+
+    It 'stops on a non-404 and reports the URL and status' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod { $global:GIAvCalls.Add("$Uri"); throw (New-GIHttpError 401 'Unauthorized') }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match 'POST https://avm.test/app_volumes/sessions -> 401 Unauthorized'
+        $global:GIAvCalls.Count | Should -Be 1
+    }
+
+    It 'lists every path tried when all of them 404' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod { throw (New-GIHttpError 404 'Not Found') }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match '/app_volumes/sessions -> 404'
+        $r.detail | Should -Match '/cv_api/sessions -> 404'
+    }
+}
+
 Describe 'Set-GIPipelineScheduleTask' {
     It 'reports ok = $false off Windows' -Skip:$IsWindows {
         $cfg = New-TestConfig

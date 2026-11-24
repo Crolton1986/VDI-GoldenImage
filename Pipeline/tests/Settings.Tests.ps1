@@ -255,7 +255,7 @@ Describe 'Save-GISettingsSection' {
         $a[0].user | Should -Be 'DOMAIN\bob'
         @($a[0].detail.changes).Count | Should -Be 1
         $a[0].detail.changes[0].key | Should -Be 'Keep'
-        $a[0].detail.changes[0].old | Should -Be 3
+        $a[0].detail.changes[0].old | Should -Be 2
         $a[0].detail.changes[0].new | Should -Be 4
     }
 
@@ -279,7 +279,7 @@ Describe 'Save-GISettingsSection' {
     }
 
     It 'does nothing (no write, no audit) when nothing changed' {
-        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ Keep = '3'; MaxChainDepth = '10'; ProtectAncestors = 'on' }).Values
+        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = '2'; MaxChainDepth = '10'; ProtectAncestors = 'on'; ConsolidateTimeoutMin = '60'; MinFreeSpacePercent = '15' }).Values
         (Save-GISettingsSection -Config $cfg -Section Snapshots -Values $v).Changed.Count | Should -Be 0
         Test-Path $settingsFile | Should -BeFalse
     }

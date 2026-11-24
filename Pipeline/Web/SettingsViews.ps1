@@ -273,7 +273,7 @@ function New-GISettingsSectionPage {
             $cls = 'fail'
             $word = 'Failed'
             if ($ok) { $cls = 'ok'; $word = 'OK' }
-            $h += "<div class=""testres $cls"" role=""status""><strong>$word</strong> $(ConvertTo-GIHtml (Get-GIValue $TestResult 'detail'))</div>"
+            $h += "<div class=""testres $cls"" role=""status""><strong>$word</strong> $((ConvertTo-GIHtml ([string](Get-GIValue $TestResult 'detail'))) -replace "`r?`n", '<br>')</div>"
         }
     }
 

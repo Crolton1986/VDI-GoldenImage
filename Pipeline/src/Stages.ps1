@@ -320,16 +320,33 @@ function Invoke-GIStageSnapshot {
     if ($m -and $m.PSObject.Properties['manifest'] -and $m.manifest) {
         foreach ($p in $m.manifest.PSObject.Properties) { $manifest[$p.Name] = $p.Value }
     }
+    # Fix a pending consolidation (failed or manual delete) before stacking a new Baseline on top
+    $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
+    $cons = Invoke-GIGoldenConsolidation -Config $Config -VM $vm
+    if (-not $cons.Ok) { throw "$($cons.Message). Consolidate the golden VM's disks in vCenter, then re-run." }
+    if ($cons.Needed) { Write-GILog -Config $Config -RunId $Run.runId -Message "Golden VM needed disk consolidation before the snapshot: $($cons.Message)" -Level Warn }
+
+    $minFree = [double](Get-GIConfigValue $Config 'Snapshots.MinFreeSpacePercent' 15)
+    $space = Get-GIGoldenSpace -VM $vm
+    $spaceWarn = @()
+    if ($space) {
+        foreach ($d in $space.Datastores | Where-Object { $null -ne $_.FreePercent -and $_.FreePercent -lt $minFree }) {
+            $spaceWarn += "Datastore $($d.Name) has $($d.FreePercent)% free ($($d.FreeGB) GB), below $minFree%."
+        }
+    }
+    foreach ($w in $spaceWarn) { Write-GILog -Config $Config -RunId $Run.runId -Message $w -Level Warn }
+
     $snap = New-GIGoldenSnapshot -Config $Config -Run $Run -Manifest $manifest
     $Run.snapshot = $snap
     Save-GIRun -Config $Config -Run $Run
 
-    $life = Invoke-GISnapshotLifecycle -Config $Config -Run $Run
+    # Preview only: snapshots are removed after the production push passes PostCheck
+    $life = Invoke-GISnapshotLifecycle -Config $Config -Run $Run -ReportOnly
     foreach ($w in $life.Warnings) { Write-GILog -Config $Config -RunId $Run.runId -Message $w -Level Warn }
     $removeList = @($life.Plan | Where-Object Action -eq 'Remove' | ForEach-Object Name)
     @{
-        Message = "Created $($snap.name). Retention $($life.Mode): $($removeList.Count) candidate(s), $(@($life.Removed).Count) removed, chain depth $($life.ChainDepth)"
-        Data    = @{ retentionMode = $life.Mode; candidates = $removeList; removed = @($life.Removed); chainDepth = $life.ChainDepth; warnings = @($life.Warnings) }
+        Message = "Created $($snap.name). After production: $($removeList.Count) snapshot(s) to remove$(if ($removeList.Count) { " ($($removeList -join ', '))" }), chain depth $($life.ChainDepth)"
+        Data    = @{ retentionMode = $life.Mode; candidates = $removeList; chain = $life.Chain; chainDepth = $life.ChainDepth; warnings = @($life.Warnings) + $spaceWarn; consolidation = $cons.Message }
     }
 }
 
@@ -477,7 +494,7 @@ function Test-GIPoolHealth {
         # AVM response shapes vary by release; match each record's JSON text against the machine name
         # so the check doesn't depend on exact field names. Endpoints are set in config.
         try {
-            $online = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)))
+            $online = @((Get-GIAppVolOnlineEntities -Config $Config).Entities)
             $attach = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name Attachments)))
             $onlineText = @($online | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 })
             $attachText = @($attach | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 })

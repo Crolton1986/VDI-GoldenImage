@@ -79,6 +79,66 @@ Describe 'Get-GISnapshotPruneCandidates' {
     }
 }
 
+Describe 'Get-GISnapshotPruneCandidates -Mode Chain' {
+    BeforeEach {
+        # Master > Baseline 26.11.11.1340 > Baseline 26.11.20.1249 > pre-maint-X > Baseline 26.11.24.0131
+        $chain = @(
+            (New-Snap 'm'  'Master'                  90 $null)
+            (New-Snap 'b1' 'Baseline 26.11.11.1340'  13 'm')
+            (New-Snap 'b2' 'Baseline 26.11.20.1249'   4 'b1')
+            (New-Snap 'p3' 'pre-maint-20261124-0100'  1 'b2')
+            (New-Snap 'b3' 'Baseline 26.11.24.0131'   0 'p3')
+        )
+        $pat = @('Baseline *', 'GI-*')
+    }
+
+    It 'leaves Master > previous > production once production is on the newest Baseline' {
+        $r = Get-GISnapshotPruneCandidates -Snapshots $chain -Mode Chain -Keep 2 -BaselinePatterns $pat -ProtectedNames @('Baseline 26.11.24.0131')
+        ($r | Where-Object Action -eq 'Remove').Name | Sort-Object | Should -Be @('Baseline 26.11.11.1340', 'pre-maint-20261124-0100')
+        ($r | Where-Object Id -eq 'm').Reason | Should -Be 'Root snapshot'
+        ($r | Where-Object Id -eq 'b2').Action | Should -Be 'Keep'
+    }
+
+    It 'never removes the root, even when it matches a managed name' {
+        $c = @((New-Snap 'r' 'Baseline 25.01.01.0000' 400 $null)) + @($chain | Select-Object -Skip 1 | ForEach-Object { $_.ParentId = if ($_.Id -eq 'b1') { 'r' } else { $_.ParentId }; $_ })
+        $r = Get-GISnapshotPruneCandidates -Snapshots $c -Mode Chain -Keep 1 -BaselinePatterns $pat
+        ($r | Where-Object Id -eq 'r').Action | Should -Be 'Keep'
+    }
+
+    It 'never removes a manual snapshot with another name' {
+        $c = $chain + @((New-Snap 'x' 'Before driver test' 20 'b1'))
+        $r = Get-GISnapshotPruneCandidates -Snapshots $c -Mode Chain -Keep 1 -BaselinePatterns $pat
+        ($r | Where-Object Id -eq 'x').Reason | Should -Be 'Not created by pipeline'
+    }
+
+    It 'keeps a Baseline a pool still uses even when it is older than Keep' {
+        $r = Get-GISnapshotPruneCandidates -Snapshots $chain -Mode Chain -Keep 2 -BaselinePatterns $pat -ProtectedNames @('Baseline 26.11.11.1340')
+        ($r | Where-Object Id -eq 'b1').Action | Should -Be 'Keep'
+    }
+
+    It 'with ProtectAncestors, keeps every parent of a pending push' {
+        $r = Get-GISnapshotPruneCandidates -Snapshots $chain -Mode Chain -Keep 1 -BaselinePatterns $pat -PendingNames @('Baseline 26.11.24.0131')
+        foreach ($id in 'b1', 'b2', 'p3') { ($r | Where-Object Id -eq $id).Reason | Should -Be 'Ancestor of a pending push' }
+    }
+
+    It 'counts old GI-* runs as Baselines' {
+        $c = @(
+            (New-Snap 'm' 'Master' 90 $null)
+            (New-Snap 'g' 'GI-20261001-010000' 50 'm')
+            (New-Snap 'b2' 'Baseline 26.11.20.1249' 4 'g')
+            (New-Snap 'b3' 'Baseline 26.11.24.0131' 0 'b2')
+        )
+        $r = Get-GISnapshotPruneCandidates -Snapshots $c -Mode Chain -Keep 2 -BaselinePatterns $pat
+        ($r | Where-Object Action -eq 'Remove').Id | Should -Be @('g')
+    }
+}
+
+Describe 'New-GISnapshotName' {
+    It 'formats as <prefix> yy.MM.dd.HHmm' {
+        New-GISnapshotName -Prefix 'Baseline' -At ([datetime]'2026-11-24 01:31') | Should -Be 'Baseline 26.11.24.0131'
+    }
+}
+
 Describe 'Get-GISnapshotChainDepth' {
     It 'measures the deepest chain' {
         $s = @((New-Snap 'a' 'GI-a' 3 $null), (New-Snap 'b' 'GI-b' 2 'a'), (New-Snap 'c' 'GI-c' 1 'b'), (New-Snap 'd' 'GI-d' 1 'a'))
@@ -94,7 +154,7 @@ Describe 'Invoke-GISnapshotLifecycle' {
             Root = $root
             Paths = @{ State = (Join-Path $root 'state'); Reports = (Join-Path $root 'reports'); Logs = (Join-Path $root 'logs') }
             GoldenImage = @{ VmName = 'GI-VM' }
-            Snapshots = @{ Keep = 1; MaxChainDepth = 3; Prune = $true }
+            Snapshots = @{ Keep = 1; MaxChainDepth = 3; Prune = $true; Mode = 'Tree' }
         }
         New-Item -ItemType Directory -Path $cfg.Paths.State -Force | Out-Null
     }
@@ -102,11 +162,15 @@ Describe 'Invoke-GISnapshotLifecycle' {
     BeforeEach {
         # PowerCLI isn't installed on the test box; define stubs so Mock can replace them
         InModuleScope VDI-GIPipeline {
-            function script:Get-VM { param($Name) }
+            function script:Get-VM { param($Name, $Id) }
+            function script:Get-View { param($Id, $Property) }
+            function script:Get-Datastore { param($RelatedObject) }
             function script:Get-Snapshot { param($VM) }
             function script:Remove-Snapshot { param($Snapshot, [switch]$Confirm) }
         }
-        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM' } }
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; UsedSpaceGB = 100; ExtensionData = [pscustomobject]@{ Runtime = [pscustomobject]@{ ConsolidationNeeded = $false } } } }
+        Mock -ModuleName VDI-GIPipeline Get-Datastore { [pscustomobject]@{ Name = 'ds1'; FreeSpaceGB = 500; CapacityGB = 1000 } }
+        Mock -ModuleName VDI-GIPipeline Start-Sleep { }
         Mock -ModuleName VDI-GIPipeline Get-Snapshot {
             @(
                 [pscustomobject]@{ Id = 's1'; Name = 'GI-1'; Created = (Get-Date).AddDays(-30); ParentSnapshotId = $null }
@@ -120,7 +184,7 @@ Describe 'Invoke-GISnapshotLifecycle' {
     }
 
     It 'fails closed: removes nothing when Horizon usage cannot be read' {
-        Mock -ModuleName VDI-GIPipeline Get-GIProtectedSnapshotNames { throw 'Horizon down' }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { throw 'Horizon down' }
         $r = Invoke-GISnapshotLifecycle -Config $cfg
         $r.Mode | Should -Be 'ReportOnly'
         Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0
@@ -128,7 +192,7 @@ Describe 'Invoke-GISnapshotLifecycle' {
     }
 
     It 'removes only non-protected, non-ancestor snapshots when Prune is on' {
-        Mock -ModuleName VDI-GIPipeline Get-GIProtectedSnapshotNames { @('GI-3') }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { @{ Current = @('GI-3'); Pending = @(); Unresolved = @() } }
         $r = Invoke-GISnapshotLifecycle -Config $cfg
         $r.Mode | Should -Be 'Prune'
         $r.Removed | Should -Be @('GI-branch')
@@ -136,15 +200,156 @@ Describe 'Invoke-GISnapshotLifecycle' {
     }
 
     It 'is report-only when Prune is off' {
-        Mock -ModuleName VDI-GIPipeline Get-GIProtectedSnapshotNames { @() }
-        $c = $cfg.Clone(); $c.Snapshots = @{ Keep = 1; MaxChainDepth = 3; Prune = $false }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { @{ Current = @(); Pending = @(); Unresolved = @() } }
+        $c = $cfg.Clone(); $c.Snapshots = @{ Keep = 1; MaxChainDepth = 3; Prune = $false; Mode = 'Tree' }
         $r = Invoke-GISnapshotLifecycle -Config $c
         $r.Mode | Should -Be 'ReportOnly'
         Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0
     }
 
     It 'warns when the chain is deeper than MaxChainDepth' {
-        Mock -ModuleName VDI-GIPipeline Get-GIProtectedSnapshotNames { @() }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { @{ Current = @(); Pending = @(); Unresolved = @() } }
         (Invoke-GISnapshotLifecycle -Config $cfg).Warnings -join ' ' | Should -Match 'chain depth 4 exceeds 3'
     }
 }
+
+Describe 'Invoke-GISnapshotLifecycle -Mode Chain' {
+    BeforeAll {
+        $root = Join-Path $TestDrive 'c'
+        New-Item -ItemType Directory -Path $root | Out-Null
+        $script:ccfg = @{
+            Root = $root
+            Paths = @{ State = (Join-Path $root 'state'); Reports = (Join-Path $root 'reports'); Logs = (Join-Path $root 'logs') }
+            GoldenImage = @{ VmName = 'GI-VM' }
+            Snapshots = @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $true; ProtectAncestors = $true }
+        }
+        New-Item -ItemType Directory -Path $ccfg.Paths.State -Force | Out-Null
+    }
+
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Get-VM { param($Name, $Id) }
+            function script:Get-Snapshot { param($VM) }
+            function script:Remove-Snapshot { param($Snapshot, [switch]$Confirm) }
+            function script:Get-View { param($Id, $Property) }
+            function script:Get-Datastore { param($RelatedObject) }
+        }
+        $global:GISnapCtx = @{ Removed = [System.Collections.Generic.List[string]]::new(); Consolidations = 0; NeedConsolidation = $false; ConsolidateState = 'success'; UsedGB = 300 }
+        Mock -ModuleName VDI-GIPipeline Get-VM {
+            $ed = [pscustomobject]@{ Runtime = [pscustomobject]@{ ConsolidationNeeded = $global:GISnapCtx.NeedConsolidation } }
+            $ed | Add-Member -MemberType ScriptMethod -Name ConsolidateVMDisks_Task -Value {
+                $global:GISnapCtx.Consolidations++
+                if ($global:GISnapCtx.ConsolidateState -eq 'success') { $global:GISnapCtx.NeedConsolidation = $false }
+                'task-1'
+            }
+            [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; UsedSpaceGB = $global:GISnapCtx.UsedGB; ExtensionData = $ed }
+        }
+        Mock -ModuleName VDI-GIPipeline Get-View {
+            [pscustomobject]@{ Info = [pscustomobject]@{ State = $global:GISnapCtx.ConsolidateState; Error = [pscustomobject]@{ LocalizedMessage = 'disk locked' } } }
+        }
+        Mock -ModuleName VDI-GIPipeline Get-Datastore { [pscustomobject]@{ Name = 'ds1'; FreeSpaceGB = 400; CapacityGB = 1000 } }
+        Mock -ModuleName VDI-GIPipeline Start-Sleep { }
+        Mock -ModuleName VDI-GIPipeline Get-Snapshot {
+            @(
+                [pscustomobject]@{ Id = 'm';  Name = 'Master';                  Created = (Get-Date).AddDays(-90); ParentSnapshotId = $null }
+                [pscustomobject]@{ Id = 'b1'; Name = 'Baseline 26.11.11.1340';  Created = (Get-Date).AddDays(-13); ParentSnapshotId = 'm' }
+                [pscustomobject]@{ Id = 'b2'; Name = 'Baseline 26.11.20.1249';  Created = (Get-Date).AddDays(-4);  ParentSnapshotId = 'b1' }
+                [pscustomobject]@{ Id = 'p3'; Name = 'pre-maint-RUN3';          Created = (Get-Date).AddDays(-1);  ParentSnapshotId = 'b2' }
+                [pscustomobject]@{ Id = 'b3'; Name = 'Baseline 26.11.24.0131';  Created = (Get-Date);              ParentSnapshotId = 'p3' }
+            )
+        }
+        Mock -ModuleName VDI-GIPipeline Remove-Snapshot {
+            $global:GISnapCtx.Removed.Add($Snapshot.Name)
+            $global:GISnapCtx.UsedGB -= 50
+            $global:GISnapCtx.NeedConsolidation = $true
+        }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { @{ Current = @('Baseline 26.11.24.0131'); Pending = @(); Unresolved = @() } }
+        $script:run3 = [pscustomobject]@{ runId = 'RUN3'; snapshot = [pscustomobject]@{ id = 'b3'; name = 'Baseline 26.11.24.0131' }; safetySnapshot = [pscustomobject]@{ id = 'p3'; name = 'pre-maint-RUN3' } }
+    }
+    AfterEach { Remove-Variable GISnapCtx -Scope Global -ErrorAction SilentlyContinue }
+
+    It 'after production, removes the oldest Baseline and the finished pre-maint, consolidating after each' {
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3 -RunFinished
+        $r.Mode | Should -Be 'Prune'
+        $r.Removed | Should -Be @('Baseline 26.11.11.1340', 'pre-maint-RUN3')
+        $global:GISnapCtx.Consolidations | Should -Be 2
+        $r.Chain | Should -Be 'Master > Baseline 26.11.20.1249 > Baseline 26.11.24.0131'
+        $r.SpaceBefore.UsedGB | Should -Be 300
+        $r.SpaceAfter.UsedGB | Should -Be 200
+        (ConvertTo-GIRetentionRecord -Result $r).freedGb | Should -Be 100
+        $r.Errors.Count | Should -Be 0
+    }
+
+    It 'keeps the running pre-maint snapshot when the run is not finished' {
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3
+        $r.Removed | Should -Be @('Baseline 26.11.11.1340')
+    }
+
+    It '-ReportOnly lists candidates and removes nothing' {
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3 -RunFinished -ReportOnly
+        $r.Mode | Should -Be 'ReportOnly'
+        @($r.Plan | Where-Object Action -eq 'Remove').Count | Should -Be 2
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0 -Exactly
+    }
+
+    It 'removes nothing while a push is pending' {
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { @{ Current = @('Baseline 26.11.20.1249'); Pending = @('Baseline 26.11.24.0131'); Unresolved = @() } }
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3 -RunFinished
+        $r.Mode | Should -Be 'ReportOnly'
+        $r.Warnings -join ' ' | Should -Match 'push is pending'
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0 -Exactly
+    }
+
+    It 'stops after a failed consolidation' {
+        $global:GISnapCtx.ConsolidateState = 'error'
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3 -RunFinished
+        $r.Removed | Should -Be @('Baseline 26.11.11.1340')
+        $r.Errors -join ' ' | Should -Match 'disk locked'
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 1 -Exactly
+    }
+
+    It 'stops when a pool snapshot no longer resolves in Horizon after a removal' {
+        $global:GISnapCtx.UsageCalls = 0
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage {
+            $global:GISnapCtx.UsageCalls++
+            if ($global:GISnapCtx.UsageCalls -eq 1) { @{ Current = @('Baseline 26.11.24.0131'); Pending = @(); Unresolved = @() } }
+            else { @{ Current = @(); Pending = @(); Unresolved = @('PRD-W11') } }
+        }
+        $r = Invoke-GISnapshotLifecycle -Config $ccfg -Run $run3 -RunFinished
+        $r.Removed | Should -Be @('Baseline 26.11.11.1340')
+        $r.Errors -join ' ' | Should -Match 'PRD-W11'
+    }
+}
+
+Describe 'Invoke-GIGoldenConsolidation' {
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Get-VM { param($Name, $Id) }
+            function script:Get-View { param($Id, $Property) }
+        }
+        $global:GICons = @{ Need = $false; Calls = 0 }
+        Mock -ModuleName VDI-GIPipeline Get-VM {
+            $ed = [pscustomobject]@{ Runtime = [pscustomobject]@{ ConsolidationNeeded = $global:GICons.Need } }
+            $ed | Add-Member -MemberType ScriptMethod -Name ConsolidateVMDisks_Task -Value { $global:GICons.Calls++; $global:GICons.Need = $false; 'task-1' }
+            [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; ExtensionData = $ed }
+        }
+        Mock -ModuleName VDI-GIPipeline Get-View { [pscustomobject]@{ Info = [pscustomobject]@{ State = 'success' } } }
+        Mock -ModuleName VDI-GIPipeline Start-Sleep { }
+    }
+    AfterEach { Remove-Variable GICons -Scope Global -ErrorAction SilentlyContinue }
+
+    It 'does nothing when vCenter does not flag the VM' {
+        $r = Invoke-GIGoldenConsolidation -Config @{} -VM ([pscustomobject]@{ Id = 'vm-1' })
+        $r.Needed | Should -BeFalse
+        $global:GICons.Calls | Should -Be 0
+    }
+
+    It 'consolidates when ConsolidationNeeded is set' {
+        $global:GICons.Need = $true
+        $r = Invoke-GIGoldenConsolidation -Config @{} -VM ([pscustomobject]@{ Id = 'vm-1' })
+        $r.Needed | Should -BeTrue
+        $r.Ok | Should -BeTrue
+        $global:GICons.Calls | Should -Be 1
+    }
+}
+
