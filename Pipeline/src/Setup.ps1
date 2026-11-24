@@ -92,6 +92,56 @@ function Get-GISetupNextStep {
     return $null
 }
 
+function Get-GISetupLog {
+    <#
+    .SYNOPSIS
+      Last lines of a background step's transcript, output and error logs as one string.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $Step,
+        [int] $Tail = 300
+    )
+    if ($script:GISetupSteps -cnotcontains $Step) { throw "Unknown setup step '$Step'." }
+    $dir = Join-Path $Config.Root 'config'
+    $files = [ordered]@{ transcript = "setup-$Step.transcript.log"; output = "setup-$Step.log"; errors = "setup-$Step.log.err" }
+    $parts = foreach ($k in $files.Keys) {
+        $f = Join-Path $dir $files[$k]
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $lines = @(Get-Content -LiteralPath $f -Tail $Tail -ErrorAction SilentlyContinue)
+        "== $k ==`n$($lines -join "`n")"
+    }
+    if (-not $parts) { return '(no log yet)' }
+    return ($parts -join "`n`n")
+}
+
+function Get-GISetupLastProgressAge {
+    <#
+    .SYNOPSIS
+      Time since the newest progress line of a step (lines start with HH:mm:ss), else since it started. $null if unknown.
+    #>
+    [CmdletBinding()]
+    [OutputType([timespan])]
+    param([Parameter(Mandatory)] $State, [Parameter(Mandatory)] [string] $Step)
+    $st = $State.steps.$Step
+    $now = Get-Date
+    $last = $null
+    $detail = @($st.detail)
+    if ($detail.Count -gt 0) {
+        $m = [regex]::Match([string]$detail[-1], '^(\d{2}:\d{2}:\d{2})')
+        if ($m.Success) {
+            $t = [datetime]::ParseExact($m.Groups[1].Value, 'HH:mm:ss', [cultureinfo]::InvariantCulture)
+            $last = $now.Date + $t.TimeOfDay
+            if ($last -gt $now) { $last = $last.AddDays(-1) }
+        }
+    }
+    if (-not $last -and $st.startedAt) { $last = [datetime]$st.startedAt }
+    if (-not $last) { return $null }
+    return $now - $last
+}
+
 function Get-GISetupRunningStep {
     param([Parameter(Mandatory)] $State)
     foreach ($s in $script:GISetupSteps) { if ($State.steps.$s.status -eq 'running') { return $s } }
@@ -227,7 +277,8 @@ function Start-GISetupStep {
     # A runner that dies right away (bad arguments, can't load the module) never reports back; catch it here
     if ($proc.WaitForExit(3000)) {
         $s3 = Get-GISetupState -Config $Config
-        if ($s3.steps.$Step.status -eq 'running') {
+        # Get-GISetupState already turns a dead pid into 'failed: Interrupted'; replace that with the real reason
+        if ($s3.steps.$Step.status -eq 'running' -or ($s3.steps.$Step.status -eq 'failed' -and $s3.steps.$Step.message -like 'Interrupted:*')) {
             $err = ''
             foreach ($f in "$log.err", $log) {
                 if (Test-Path -LiteralPath $f) { $err = ((Get-Content -LiteralPath $f -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim(); if ($err) { break } }

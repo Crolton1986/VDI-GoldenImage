@@ -160,15 +160,21 @@ function Invoke-GISetupPrerequisites {
         Write-GISetupProgress -Config $Config -Step $step -Line "[$flag] ${Name}: $Detail"
     }
 
+    $begin = { param([string]$Name) Write-GISetupProgress -Config $Config -Step $step -Line "Checking $Name..." }
+
     $win = [bool]$IsWindows
+    & $begin 'operating system'
     & $add 'Operating system' $win $(if ($win) { 'Windows' } else { 'Not Windows (Lab only; Production needs Windows)' }) $production
 
+    & $begin 'PowerShell version'
     $psv = $PSVersionTable.PSVersion
     & $add 'PowerShell version' ($psv -ge [version]'7.2') "PowerShell $psv (need 7.2 or newer)" $true
 
+    & $begin 'administrator rights'
     $admin = [bool](Test-GIIsAdministrator)
     & $add 'Administrator' $admin $(if ($admin) { 'Running elevated' } else { 'Not elevated' + $(if ($production) { ' (required for Production)' } else { ' (informational in Lab)' }) }) $production
 
+    & $begin 'PSGallery reachable (up to 15 seconds)'
     try {
         # Any HTTP answer below 500 means the network path works (the gallery rejects HEAD with 405)
         $r = Invoke-WebRequest -Method Get -Uri 'https://www.powershellgallery.com/api/v2/' -TimeoutSec 15 -UseBasicParsing -SkipHttpErrorCheck -ErrorAction Stop
@@ -181,6 +187,7 @@ function Invoke-GISetupPrerequisites {
     }
 
     $root = [string](Get-GISetupObjectValue $Config 'Root' (Get-Location).Path)
+    & $begin 'free disk space'
     try {
         $freeGB = [double](Get-GIFreeDiskGB -Path $root)
         & $add 'Free disk space' ($freeGB -ge 2) "$freeGB GB free for $root (need 2 GB)" $true
@@ -190,22 +197,33 @@ function Invoke-GISetupPrerequisites {
     }
 
     if ($win) {
+        & $begin 'execution policy'
         $ep = [string](Get-ExecutionPolicy)
         $bad = $ep -in @('Restricted', 'AllSigned')
         $detail = "Execution policy $ep"
         if ($bad) { $detail += '. Run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned' }
         & $add 'Execution policy' (-not $bad) $detail $bad
 
-        $blocked = @()
+        & $begin 'downloaded-file block (scripts under the pipeline folder)'
+        $blocked = [System.Collections.Generic.List[string]]::new()
+        $scanned = 0; $cut = $false
         if (Test-Path -LiteralPath $root) {
-            $blocked = @(Get-ChildItem -LiteralPath $root -Filter '*.ps1' -Recurse -File -ErrorAction SilentlyContinue |
-                    Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue })
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            $opt = [System.IO.EnumerationOptions]::new()
+            $opt.RecurseSubdirectories = $true; $opt.IgnoreInaccessible = $true
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($root, '*', $opt)) {
+                if ($f -notmatch '\.(ps1|psm1|psd1)$') { continue }
+                if ($scanned -ge 2000 -or $clock.Elapsed.TotalSeconds -ge 30) { $cut = $true; break }
+                $scanned++
+                if (Get-Item -LiteralPath $f -Stream Zone.Identifier -ErrorAction SilentlyContinue) { $blocked.Add($f) }
+            }
         }
+        $note = if ($cut) { " (scan cut short after $scanned files; the rest weren't checked)" } else { '' }
         if ($blocked.Count -gt 0) {
-            & $add 'Downloaded-file block' $false "$($blocked.Count) script(s) marked as downloaded. Run: Get-ChildItem '$root' -Recurse | Unblock-File" $true
+            & $add 'Downloaded-file block' $false "$($blocked.Count) script(s) marked as downloaded$note. Run: Get-ChildItem '$root' -Recurse | Unblock-File" $true
         }
         else {
-            & $add 'Downloaded-file block' $true 'No blocked scripts' $true
+            & $add 'Downloaded-file block' $true "No blocked scripts$note" $true
         }
     }
 

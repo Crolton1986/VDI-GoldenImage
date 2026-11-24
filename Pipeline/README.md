@@ -19,6 +19,8 @@ cd VDI-GoldenImage\Pipeline
 
 You can start it from Windows PowerShell 5.1 or PowerShell 7. If PowerShell 7.2 or later isn't installed, the launcher asks before installing it (with winget, or the MSI from GitHub) and then continues in PowerShell 7. It installs the Pode module, which is the only module it needs before the web server can start. Then it starts the dashboard in setup mode and opens http://127.0.0.1:8080/setup in your browser. The setup page does the rest, one step at a time, with live progress.
 
+Running from a OneDrive folder, or any path with spaces, works. For production, keep the pipeline in a fixed local folder such as `C:\ProgramData\VDI`, so the scheduled tasks don't depend on OneDrive Files On-Demand while you're logged off.
+
 ![Setup page during module install](docs/setup-installing.png)
 
 | Step | What it does | Lab | Production |
@@ -51,7 +53,7 @@ Launcher options:
 | `-Port` | Port for the setup page and for `-LocalAdmin` (default 8080). The production dashboard uses the port you pick in setup. |
 | `-ConfigPath` | Uses a different config file. |
 
-Setup progress is saved in `config/setup.json`, and each background step writes a log to `config/setup-<Step>.log`. If a step fails, fix the cause and press Retry. Steps check what's already in place, so repeating one is safe.
+Setup progress is saved in `config/setup.json`, and each background step writes `config/setup-<Step>.transcript.log` (everything the step printed), `config/setup-<Step>.log` (its output) and `config/setup-<Step>.log.err` (its errors). Every step that has started has a View log link on the setup page that shows the end of these files, and a running step shows its latest lines inline. If a step fails, fix the cause and press Retry. Steps check what's already in place, so repeating one is safe.
 
 ## What it does
 

@@ -219,7 +219,9 @@ function New-GISetupPage {
         $TaskDefinitions = @(),
         [string]$CurrentUser = '',
         [bool]$IsComplete = $false,
-        [bool]$ReadOnly = $false
+        [bool]$ReadOnly = $false,
+        [hashtable]$LogTails = @{},
+        [int]$StallMinutes = 0
     )
     $order = Get-GISetupStepOrder
     $running = Get-GISetupRunningStep $State
@@ -249,6 +251,15 @@ function New-GISetupPage {
             $open = ''
             if ($st -in 'running', 'failed') { $open = ' open' }
             $card += "<details$open><summary>Details ($($last.Count))</summary><pre class=""detail"">$(($last | ForEach-Object { ConvertTo-GIHtml $_ }) -join "`n")</pre></details>"
+        }
+        if ($st -eq 'running') {
+            $procId = Get-GIValue $step 'pid' $null
+            if ($procId) { $card += "<p class=""muted"">process $(ConvertTo-GIHtml ([string]$procId))</p>" }
+            if ($LogTails.ContainsKey($n) -and $LogTails[$n]) { $card += "<pre class=""detail log-tail"" style=""font-family:monospace"">$(ConvertTo-GIHtml ([string]$LogTails[$n]))</pre>" }
+            if ($StallMinutes -ge 2) { $card += "<p class=""warn"">No progress for $(ConvertTo-GIHtml ([string]$StallMinutes)) minutes. Check the log; if the process has stopped, this step switches to failed and you can retry it.</p>" }
+        }
+        if ($st -notin 'pending', 'skipped' -and $n -in 'Prerequisites', 'Modules', 'PowerCLI', 'Vault') {
+            $card += "<p class=""links""><a href=""/setup/log/$(ConvertTo-GIHtml $n)"" target=""_blank"" rel=""noopener"">View log</a></p>"
         }
         if ($n -eq 'Modules' -and $st -ne 'pending') { $card += Get-GISetupModulesTable $State }
         if (-not $ReadOnly -and -not $IsComplete) {

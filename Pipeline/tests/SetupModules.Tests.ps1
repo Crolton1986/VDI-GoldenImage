@@ -166,6 +166,17 @@ Describe 'Invoke-GISetupPrerequisites' {
         Mock -ModuleName VDI-GIPipeline Invoke-WebRequest { throw 'no route' }
         { Invoke-GISetupPrerequisites -Config $script:cfg -State @{ mode = 'Lab' } } | Should -Throw '1 prerequisite(s) failed*PSGallery*'
     }
+    It 'writes a Checking line before the result line for the PSGallery check' {
+        $global:GIModLines = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName VDI-GIPipeline Write-GISetupProgress { $global:GIModLines.Add($Line) }
+        Invoke-GISetupPrerequisites -Config $script:cfg -State @{ mode = 'Lab' } | Out-Null
+        $lines = @($global:GIModLines)
+        Remove-Variable GIModLines -Scope Global
+        $c = [array]::FindIndex($lines, [Predicate[string]]{ param($l) $l -like 'Checking PSGallery*' })
+        $r = [array]::FindIndex($lines, [Predicate[string]]{ param($l) $l -like '`[OK`] PSGallery reachable*' })
+        $c | Should -BeGreaterOrEqual 0
+        $r | Should -BeGreaterThan $c
+    }
     It 'blocks on low disk space' {
         Mock -ModuleName VDI-GIPipeline Get-GIFreeDiskGB { 0.5 }
         { Invoke-GISetupPrerequisites -Config $script:cfg -State @{ mode = 'Lab' } } | Should -Throw '*Free disk space*'

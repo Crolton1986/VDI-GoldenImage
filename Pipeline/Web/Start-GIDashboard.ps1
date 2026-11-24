@@ -429,10 +429,30 @@ Start-PodeServer -Quiet {
             $a = @{ Root = $cfg.Root; Config = $cfg }; if ($c.ConfigPath) { $a.ConfigPath = $c.ConfigPath }
             @(Get-GIPipelineTaskDefinition @a)
         } else { @() }
+        $tails = @{}; $stall = 0
+        $runningStep = Get-GISetupRunningStep -State $state
+        if ($runningStep) {
+            $tf = Join-Path (Join-Path $cfg.Root 'config') "setup-$runningStep.transcript.log"
+            if (Test-Path -LiteralPath $tf) { $tails[$runningStep] = (@(Get-Content -LiteralPath $tf -Tail 10 -ErrorAction SilentlyContinue)) -join "`n" }
+            $age = Get-GISetupLastProgressAge -State $state -Step $runningStep
+            if ($age) { $stall = [int][math]::Floor($age.TotalMinutes) }
+        }
         $page = New-GISetupPage -State $state -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId 'setup') `
             -Notice ([string]$WebEvent.Query['n']) -Certificates $certs -TaskDefinitions $defs -CurrentUser (Get-GICurrentUserName) `
-            -IsComplete $complete -ReadOnly ($complete -and -not $c.SetupMode)
+            -IsComplete $complete -ReadOnly ($complete -and -not $c.SetupMode) -LogTails $tails -StallMinutes $stall
         Write-PodeHtmlResponse -Value $page
+    }
+
+    Add-PodeRoute -Method Get -Path '/setup/log/:step' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        if (-not $c.SetupMode -and -not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) {
+            Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Setup logs are for the admin group.') -StatusCode 403; return
+        }
+        $step = [string]$WebEvent.Parameters['step']
+        if ($step -cnotin @('Mode', 'Prerequisites', 'Modules', 'PowerCLI', 'Vault', 'DashboardAccess', 'Tasks', 'Finish')) {
+            Write-PodeTextResponse -Value 'Unknown setup step.' -ContentType 'text/plain' -StatusCode 404; return
+        }
+        Write-PodeTextResponse -Value (Get-GISetupLog -Config (Get-GIDashboardConfig $c) -Step $step) -ContentType 'text/plain; charset=utf-8'
     }
 
     Add-PodeRoute -Method Get -Path '/setup/status' @auth -ScriptBlock {

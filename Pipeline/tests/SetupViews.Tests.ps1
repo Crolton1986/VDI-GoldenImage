@@ -168,3 +168,31 @@ Describe 'New-GISetupStatusJson' {
         $o.version | Should -Match '^[0-9a-f]{16}$'
     }
 }
+
+Describe 'New-GISetupPage logs' {
+    BeforeAll {
+        $script:run = New-State -Status @{ Mode = 'done'; Prerequisites = 'done'; Modules = 'running' } -Extra @{ Modules = @{ pid = 4321; detail = @('10:00:00 Installing Pode') } }
+    }
+    It 'links View log on started background-step cards only' {
+        $html = New-GISetupPage -State $script:run -Token 't'
+        $html | Should -Not -Match '/setup/log/Mode'
+        $html | Should -Match 'href="/setup/log/Prerequisites" target="_blank"'
+        $html | Should -Match 'href="/setup/log/Modules"'
+        $html | Should -Not -Match '/setup/log/PowerCLI'
+        $html | Should -Not -Match '/setup/log/Finish'
+    }
+    It 'shows the runner pid on the running card' {
+        (New-GISetupPage -State $script:run -Token 't') | Should -Match 'process 4321'
+    }
+    It 'renders the log tail encoded' {
+        $html = New-GISetupPage -State $script:run -Token 't' -LogTails @{ Modules = "line <b>one</b>`nline two" }
+        $html | Should -Match 'line &lt;b&gt;one&lt;/b&gt;'
+        $html | Should -Not -Match 'line <b>one'
+        $html | Should -Match 'log-tail'
+    }
+    It 'shows the stall hint at 2 minutes or more, not at 1' {
+        (New-GISetupPage -State $script:run -Token 't' -StallMinutes 2) | Should -Match 'No progress for 2 minutes\. Check the log; if the process has stopped, this step switches to failed and you can retry it\.'
+        (New-GISetupPage -State $script:run -Token 't' -StallMinutes 1) | Should -Not -Match 'No progress for'
+        (New-GISetupPage -State $script:run -Token 't') | Should -Not -Match 'No progress for'
+    }
+}
