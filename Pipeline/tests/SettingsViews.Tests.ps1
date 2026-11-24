@@ -36,19 +36,17 @@ BeforeAll {
 }
 
 Describe 'Settings layout' {
-    It 'lists all sections and highlights the active one' {
+    It 'only wraps the content (sections live in the side nav)' {
         $h = New-GISettingsLayout -Schema $schema -ActiveSection 'Dashboard' -ContentHtml '<p>x</p>'
-        $h | Should -Match 'href="/settings/vCenter"'
-        $h | Should -Match 'href="/settings/Dashboard" class="active"'
-        $h | Should -Not -Match 'href="/settings/vCenter" class="active"'
+        $h | Should -Be '<div class="settings-main"><p>x</p></div>'
+        $h | Should -Not -Match 'sidemenu'
     }
 }
 
 Describe 'Settings section page' {
-    It 'posts to the section with hidden token and admin nav' {
+    It 'posts to the section with hidden token' {
         $h = Page
         $h | Should -Match '<form method="post" action="/settings/vCenter" class="settings-form"><input type="hidden" name="token" value="tok123">'
-        $h | Should -Match 'href="/settings"'
     }
     It 'renders string and encodes values' {
         $h = Page

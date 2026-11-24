@@ -94,10 +94,9 @@ Describe 'Roles and POST checks' {
         $na = $base.Clone(); $na.NoAuth = $true
         (Get-GIPostRejection -Context $na -WebEvent (New-Post @('VDI-Pipeline-Admins') 'run') -Role Admin -FormId 'run').Message | Should -Match 'read-only'
     }
-    It 'adds admin nav links once' {
-        $html = '<nav><a href="/">Runs</a></nav>'
-        $once = Add-GIAdminNav -Html $html
-        $once | Should -Match 'href="/settings"'
-        Add-GIAdminNav -Html $once | Should -Be $once
+    It 'renders the side nav and no longer has the old admin nav splice' {
+        $html = New-GIPage -Title 't' -BodyHtml '<p>x</p>'
+        $html | Should -Match '<nav class="sidenav"'
+        Get-Command Add-GIAdminNav -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 }

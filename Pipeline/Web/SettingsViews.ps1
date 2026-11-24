@@ -38,14 +38,7 @@ function New-GISettingsLayout {
         [string]$ActiveSection = '',
         [Parameter(Mandatory)][AllowEmptyString()][string]$ContentHtml   # already-encoded HTML
     )
-    $items = foreach ($key in $Schema.Keys) {
-        $title = ConvertTo-GIHtml (Get-GIValue $Schema[$key] 'Title' $key)
-        $cls = ''
-        $cur = ''
-        if ([string]$key -ceq $ActiveSection) { $cls = ' class="active"'; $cur = ' aria-current="page"' }
-        "<a href=""/settings/$(ConvertTo-GIHtml $key)""$cls$cur>$title</a>"
-    }
-    "<div class=""settings-wrap""><nav class=""sidemenu"" aria-label=""Settings sections"">$($items -join '')</nav><div class=""settings-main"">$ContentHtml</div></div>"
+    "<div class=""settings-main"">$ContentHtml</div>"
 }
 
 function Get-GIControlHtml {
@@ -174,7 +167,7 @@ function New-GISettingsSectionPage {
     $section = Get-GISchemaSection $Schema $SectionKey
     $sk = ConvertTo-GIHtml $SectionKey
     if ($null -eq $section) {
-        return New-GIPage -Title 'Settings' -ShowAdminNav -BodyHtml (New-GISettingsLayout -Schema $Schema -ActiveSection '' -ContentHtml '<h2>Unknown section</h2>')
+        return New-GIPage -Title 'Settings' -BodyHtml (New-GISettingsLayout -Schema $Schema -ActiveSection '' -ContentHtml '<h2>Unknown section</h2>')
     }
     $values = Get-GIValue $SectionData 'Values' @{}
     if ($null -eq $Errors) { $Errors = @{} }
@@ -284,7 +277,7 @@ function New-GISettingsSectionPage {
         }
     }
 
-    New-GIPage -Title "Settings - $(Get-GIValue $section 'Title' $SectionKey)" -ShowAdminNav -BodyHtml (New-GISettingsLayout -Schema $Schema -ActiveSection $SectionKey -ContentHtml $h)
+    New-GIPage -Title "Settings - $(Get-GIValue $section 'Title' $SectionKey)" -BodyHtml (New-GISettingsLayout -Schema $Schema -ActiveSection $SectionKey -ContentHtml $h)
 }
 
 function New-GIRunControlPage {
@@ -357,7 +350,7 @@ function New-GIRunControlPage {
 <p><label>Type the pool name to confirm<br><input type="text" name="confirmPool" value="" autocomplete="off"$dis></label></p>
 <p><button type="submit" class="danger"$dis>Roll back</button></p></form></section>
 "@
-    New-GIPage -Title 'Run control' -ShowAdminNav -BodyHtml $h
+    New-GIPage -Title 'Run control' -BodyHtml $h
 }
 
 function ConvertTo-GIAuditDetailHtml {
@@ -409,7 +402,7 @@ function New-GIAuditPage {
     $body = '<h2>Audit log</h2><section class="card"><table><thead><tr><th>At</th><th>User</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>'
     if (-not $rows) { $body += '<tr><td colspan="5" class="muted">No audit entries.</td></tr>' } else { $body += ($rows -join '') }
     $body += '</tbody></table></section>'
-    New-GIPage -Title 'Audit log' -ShowAdminNav -BodyHtml $body
+    New-GIPage -Title 'Audit log' -BodyHtml $body
 }
 
 function New-GIRunActionsHtml {

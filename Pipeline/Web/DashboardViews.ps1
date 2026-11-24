@@ -124,10 +124,45 @@ function Get-GICss {
 :root{--bg:#f4f6f8;--fg:#1d2733;--card:#fff;--line:#d9dfe5;--mut:#5d6b7a;--link:#0b5cad}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
-header{background:#1d2733;color:#fff;padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
-header h1{font-size:17px;margin:0}
-header a{color:#cfe3ff;text-decoration:none}
-main{padding:12px 16px;max-width:1200px;margin:0 auto}
+header.topbar{background:#1d2733;color:#fff;padding:10px 16px;display:flex;gap:12px;align-items:center}
+header.topbar h1{font-size:17px;margin:0}
+.layout{display:grid;grid-template-columns:240px minmax(0,1fr);align-items:start}
+body.nav-collapsed .layout{grid-template-columns:56px minmax(0,1fr)}
+main{padding:12px 16px;max-width:1200px;width:100%;margin:0 auto}
+.sidenav{position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--card);border-right:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column}
+.sidenav button.navcollapse{display:flex;align-items:center;gap:12px;width:100%;margin:0 0 6px;padding:8px 18px;border:0;border-radius:0;background:none;color:var(--mut);text-align:left}
+.sidenav button.navcollapse:hover{background:#eef2f6;color:var(--fg)}
+.sidenav button.navcollapse .ico{transition:transform .15s}
+body.nav-collapsed .navcollapse .ico{transform:rotate(180deg)}
+.navitem{display:flex;align-items:center;gap:12px;padding:9px 18px;color:var(--fg);text-decoration:none;border-left:4px solid transparent;padding-left:14px}
+.navitem .ico,.navchild .ico{flex:none}
+.navitem .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+a.navitem:hover,.navchild:hover{background:#eef2f6}
+.navitem.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
+.navitem.disabled,.navchild.disabled{color:var(--mut);opacity:.55;cursor:not-allowed}
+.navlock{display:inline-flex;margin-left:auto}.navlock .ico{width:14px;height:14px}
+.navsub{margin:0}
+.navsub summary{cursor:pointer;padding:3px 18px 3px 54px;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+.navchild{display:block;padding:6px 18px 6px 54px;color:var(--fg);text-decoration:none;border-left:4px solid transparent}
+.navchild.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
+.sidenav a:focus-visible,.sidenav button:focus-visible,.sidenav summary:focus-visible,.navtoggle-mobile:focus-visible{outline:2px solid var(--link);outline-offset:-2px}
+.navtoggle-mobile{display:none;padding:4px 6px;background:none;border:1px solid #cfe3ff;color:#fff}
+.navtoggle-mobile:focus-visible{outline-color:#cfe3ff}
+.navbackdrop{display:none}
+body.nav-collapsed .sidenav .label,body.nav-collapsed .navsub,body.nav-collapsed .navlock{display:none}
+body.nav-collapsed .navitem{padding-right:0;justify-content:flex-start}
+@media (max-width:760px){
+.layout{display:block}
+body.nav-collapsed .layout{display:block}
+.navtoggle-mobile{display:inline-flex}
+.sidenav{position:fixed;top:0;left:0;bottom:0;width:260px;max-width:85vw;height:auto;z-index:30;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 12px rgba(0,0,0,.25)}
+body.nav-open .sidenav{transform:none}
+body.nav-open .navbackdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:20}
+.sidenav button.navcollapse{display:none}
+body.nav-collapsed .sidenav .label,body.nav-collapsed .navsub,body.nav-collapsed .navlock{display:revert}
+body.nav-collapsed .sidenav .navsub{display:block}
+}
+@media (prefers-reduced-motion:reduce){.sidenav,.navcollapse .ico{transition:none}}
 h2{font-size:16px;margin:22px 0 8px}
 section.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:10px 0;overflow-x:auto}
 section.attn{border-left:5px solid #d98200;background:#fff8ec}
@@ -149,10 +184,6 @@ tr.cat td{background:#eef2f6;font-weight:600}
 .links a{margin-right:14px}
 code,pre{font-family:ui-monospace,Consolas,monospace}
 .ferr{border:0;background:none;padding:0;color:#c0392b;white-space:normal;display:block;font-size:13px}
-.settings-wrap{display:grid;grid-template-columns:200px 1fr;gap:16px;align-items:start}
-.sidemenu{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 0}
-.sidemenu a{display:block;padding:7px 14px;text-decoration:none;color:var(--fg);border-left:4px solid transparent}
-.sidemenu a.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
 .field{margin:12px 0}.field>label,.field>.lbl{display:block;font-weight:600;margin-bottom:3px}
 .field .help{color:var(--mut);font-size:12px;margin-top:2px}
 .field .warn{color:#8a5a00;font-size:12px;margin-top:2px}
@@ -167,7 +198,6 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
 .testres{padding:6px 10px;border-radius:4px;margin:8px 0}.testres.ok{background:#e3f4e8;color:#14643a}.testres.fail{background:#fdf0ee;color:#9b2c1f}
 .errsum{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;margin:10px 0}
 table.edit input[type=text],table.edit select,table.edit input[type=number]{width:100%;min-width:90px}
-@media (max-width:600px){.settings-wrap{grid-template-columns:1fr}.sidemenu{display:flex;flex-wrap:wrap}.sidemenu a{border-left:0;border-bottom:3px solid transparent}.sidemenu a.active{border-bottom-color:var(--link)}}
 @media (max-width:600px){main{padding:8px}th,td{padding:5px 4px;font-size:13px}.kv{grid-template-columns:1fr}}
 .setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:#1b6fd1}.setup-step.s-done{border-left-color:#1e8a44}.setup-step.s-failed{border-left-color:#c0392b}
 .setup-step h2{margin:0 0 4px;font-size:16px}.setup-step .num{display:inline-block;min-width:22px;color:var(--mut)}
@@ -181,19 +211,151 @@ pre.detail{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;pad
 '@
 }
 
+function Get-GINavIcon {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Name)
+    $p = switch ($Name) {
+        'list'    { '<path d="M8 6h12M8 12h12M8 18h12"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>' }
+        'layers'  { '<path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 13 9 5 9-5"/>' }
+        'play'    { '<path d="M7 4.5v15l12-7.5-12-7.5z"/>' }
+        'gear'    { '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>' }
+        'clipboard' { '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h6"/>' }
+        'wrench'  { '<path d="M14.5 6.5a4 4 0 0 0 4.9 4.9l-9.4 9.4a2.1 2.1 0 0 1-3-3l9.4-9.4a4 4 0 0 0-1.9-1.9z"/>' }
+        'braces'  { '<path d="M9 4C6.5 4 7.5 9 5 12c2.5 3 1.5 8 4 8M15 4c2.5 0 1.5 5 4 8-2.5 3-1.5 8-4 8"/>' }
+        'lock'    { '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>' }
+        'menu'    { '<path d="M4 6h16M4 12h16M4 18h16"/>' }
+        'chevrons' { '<path d="m13 6-6 6 6 6M19 6l-6 6 6 6"/>' }
+        default   { '' }
+    }
+    "<svg class=""ico"" width=""18"" height=""18"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round"" aria-hidden=""true"" focusable=""false"">$p</svg>"
+}
+
+function Get-GINavItems {
+    <# The fixed, ordered side-nav item list. Role 'Admin' items are disabled (not hidden) for non-admins. #>
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param()
+    $children = @()
+    if (Get-Command -Name Get-GISettingsSchema -ErrorAction SilentlyContinue) {
+        $schema = Get-GISettingsSchema
+        if ($schema -is [System.Collections.IDictionary]) {
+            $children = @(foreach ($key in $schema.Keys) {
+                    $t = $schema[$key]
+                    $label = if ($t -is [System.Collections.IDictionary] -and $t.Contains('Title')) { [string]$t['Title'] } else { [string]$key }
+                    @{ Label = $label; Href = "/settings/$key"; Key = [string]$key }
+                })
+        }
+    }
+    @(
+        @{ Label = 'Runs'; Href = '/'; Icon = 'list'; Role = ''; Children = @() }
+        @{ Label = 'Pools'; Href = '/pools'; Icon = 'layers'; Role = ''; Children = @() }
+        @{ Label = 'Run control'; Href = '/run'; Icon = 'play'; Role = 'Admin'; Children = @() }
+        @{ Label = 'Settings'; Href = '/settings'; Icon = 'gear'; Role = 'Admin'; Children = $children }
+        @{ Label = 'Audit'; Href = '/audit'; Icon = 'clipboard'; Role = 'Admin'; Children = @() }
+        @{ Label = 'Setup'; Href = '/setup'; Icon = 'wrench'; Role = 'Admin'; Children = @() }
+        @{ Label = 'JSON API'; Href = '/api/runs'; Icon = 'braces'; Role = ''; Children = @() }
+    )
+}
+
+function New-GISideNav {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][hashtable]$Context)
+    $path = if ($Context.ContainsKey('Path')) { [string]$Context.Path } else { '' }
+    $isAdmin = $Context.ContainsKey('IsAdmin') -and [bool]$Context.IsAdmin
+    $setupMode = $Context.ContainsKey('SetupMode') -and [bool]$Context.SetupMode
+    $setupComplete = (-not $Context.ContainsKey('SetupComplete')) -or [bool]$Context.SetupComplete
+    $setupLocked = $setupMode -and -not $setupComplete
+
+    $parts = foreach ($item in (Get-GINavItems)) {
+        $label = ConvertTo-GIHtml $item.Label
+        $href = $item.Href
+        $icon = Get-GINavIcon $item.Icon
+        $disabledTitle = $null
+        if ($setupLocked) {
+            if ($href -ne '/setup') { $disabledTitle = 'Finish setup first' }
+        } elseif ($item.Role -eq 'Admin' -and -not $isAdmin) {
+            $disabledTitle = 'Admins only'
+        }
+        $active = $false
+        if ($href -eq '/') { $active = ($path -eq '/' -or $path.StartsWith('/runs/')) }
+        elseif ($href -eq '/settings') { $active = ($path -eq '/settings' -or $path.StartsWith('/settings/')) }
+        else { $active = ($path -eq $href) }
+        $kids = @($item.Children)
+
+        if ($disabledTitle) {
+            $t = ConvertTo-GIHtml $disabledTitle
+            $row = "<span class=""navitem disabled"" aria-disabled=""true"" title=""$t"">$icon<span class=""label"">$label</span><span class=""navlock"">$(Get-GINavIcon 'lock')</span></span>"
+        } else {
+            $cls = 'navitem'; $cur = ''
+            if ($active) { $cls = 'navitem active'; $cur = ' aria-current="page"' }
+            $row = "<a class=""$cls"" href=""$href"" title=""$label""$cur>$icon<span class=""label"">$label</span></a>"
+        }
+        if ($kids.Count -eq 0) { $row; continue }
+
+        $kidHtml = foreach ($k in $kids) {
+            $kl = ConvertTo-GIHtml $k.Label
+            if ($disabledTitle) {
+                "<span class=""navchild disabled"" aria-disabled=""true"" title=""$(ConvertTo-GIHtml $disabledTitle)"">$kl</span>"
+            } elseif ($path -ieq $k.Href) {
+                "<a class=""navchild active"" href=""$(ConvertTo-GIHtml $k.Href)"" aria-current=""page"">$kl</a>"
+            } else {
+                "<a class=""navchild"" href=""$(ConvertTo-GIHtml $k.Href)"">$kl</a>"
+            }
+        }
+        $open = ''
+        if ($active -and -not $disabledTitle) { $open = ' open' }
+        "<div class=""navgroup"">$row<details class=""navsub""$open><summary>Sections</summary><div class=""navchildren"">$(@($kidHtml) -join '')</div></details></div>"
+    }
+    $collapse = "<button type=""button"" class=""navcollapse"" aria-expanded=""true"" aria-controls=""sidenav"" aria-label=""Collapse menu"" title=""Collapse menu"">$(Get-GINavIcon 'chevrons')<span class=""label"">Collapse</span></button>"
+    "<nav class=""sidenav"" id=""sidenav"" aria-label=""Main"">$collapse$(@($parts) -join '')</nav>"
+}
+
+function Get-GINavScript {
+    @'
+(function(){
+var K='giNavCollapsed',b=document.body;
+function get(){try{return localStorage.getItem(K)}catch(e){return null}}
+function put(v){try{localStorage.setItem(K,v)}catch(e){}}
+if(get()==='1'){b.classList.add('nav-collapsed')}
+function sync(){
+var c=b.classList.contains('nav-collapsed'),o=b.classList.contains('nav-open');
+var x=document.querySelector('.navcollapse');
+if(x){x.setAttribute('aria-expanded',c?'false':'true');var t=c?'Expand menu':'Collapse menu';x.setAttribute('aria-label',t);x.title=t}
+var m=document.querySelector('.navtoggle-mobile');
+if(m){m.setAttribute('aria-expanded',o?'true':'false')}
+}
+document.addEventListener('DOMContentLoaded',sync);
+document.addEventListener('click',function(e){
+var t=e.target;if(!t||!t.closest){return}
+if(t.closest('.navcollapse')){b.classList.toggle('nav-collapsed');put(b.classList.contains('nav-collapsed')?'1':'0');sync();return}
+if(t.closest('.navtoggle-mobile')){b.classList.toggle('nav-open');sync();return}
+if(b.classList.contains('nav-open')&&!t.closest('.sidenav')){b.classList.remove('nav-open');sync()}
+});
+document.addEventListener('keydown',function(e){
+if(e.key==='Escape'&&b.classList.contains('nav-open')){b.classList.remove('nav-open');sync();var m=document.querySelector('.navtoggle-mobile');if(m){m.focus()}}
+});
+})();
+'@
+}
+
 function New-GIPage {
     [CmdletBinding()]
     [OutputType([string])]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = 'Per-request nav context set by the dashboard middleware; Pode routes and view builders share no other channel.')]
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][string]$BodyHtml,   # already-encoded HTML
-        [int]$RefreshSeconds = 0,
-        [switch]$ShowAdminNav
+        [int]$RefreshSeconds = 0
     )
     $refresh = ''
     if ($RefreshSeconds -gt 0) { $refresh = "<meta http-equiv=""refresh"" content=""$RefreshSeconds"">" }
-    $adminNav = ''
-    if ($ShowAdminNav) { $adminNav = ' &middot; <a href="/settings">Settings</a> &middot; <a href="/run">Run</a> &middot; <a href="/audit">Audit</a>' }
+    $ctx = @{ Path = ''; IsAdmin = $false; IsApprover = $false; SetupMode = $false; SetupComplete = $true }
+    $g = Get-Variable -Name GINavContext -Scope Global -ErrorAction SilentlyContinue
+    if ($g -and $g.Value -is [System.Collections.IDictionary]) { foreach ($k in $g.Value.Keys) { $ctx[[string]$k] = $g.Value[$k] } }
+    $nav = New-GISideNav -Context $ctx
+    $menuIcon = Get-GINavIcon 'menu'
     @"
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -202,10 +364,15 @@ $refresh
 <title>$(ConvertTo-GIHtml $Title)</title>
 <style>$(Get-GICss)</style></head>
 <body>
-<header><h1>VDI Golden Image Pipeline</h1><nav><a href="/">Runs</a> &middot; <a href="/pools">Pools</a>$adminNav &middot; <a href="/api/runs">JSON</a></nav></header>
+<script>$(Get-GINavScript)</script>
+<header class="topbar"><button type="button" class="navtoggle-mobile" aria-controls="sidenav" aria-expanded="false" aria-label="Open menu">$menuIcon</button><h1>VDI Golden Image Pipeline</h1></header>
+<div class="layout">
+$nav
 <main>
 $BodyHtml
 </main>
+</div>
+<div class="navbackdrop"></div>
 </body></html>
 "@
 }
@@ -570,16 +737,4 @@ function Get-GIPostRejection {
         return @{ Code = 403; Message = 'Form expired or invalid. Reload the page and try again.' }
     }
     return $null
-}
-
-function Add-GIAdminNav {
-    # Adds Settings/Run/Audit links to a rendered page's nav for admins (pages built before the admin nav existed)
-    [CmdletBinding()]
-    [OutputType([string])]
-    param([Parameter(Mandatory)][string]$Html)
-    if ($Html -match 'href="/settings"') { return $Html }
-    $links = ' &middot; <a href="/settings">Settings</a> &middot; <a href="/run">Run</a> &middot; <a href="/audit">Audit</a></nav>'
-    $i = $Html.IndexOf('</nav>')
-    if ($i -lt 0) { return $Html }
-    return $Html.Substring(0, $i) + $links + $Html.Substring($i + 6)
 }
