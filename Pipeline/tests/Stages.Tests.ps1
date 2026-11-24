@@ -123,6 +123,85 @@ Describe 'Invoke-GIStagePreflight' {
         $r.Data.poolIds['PRD-B'] | Should -Be 'p-b'
         $r.Data.baseVmId | Should -Be 'bvm-1'
     }
+
+    It 'fails before touching Horizon when a ticked installer is missing on the host' {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; PowerState = 'PoweredOff' } }
+        $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'VMware-tools-12.5.0-x86_64.exe') -Value 'x'
+        $cfg.GoldenImage.InstallerSourceDir = $dir
+        $cfg.GoldenImage.Actions = @('VmTools', 'Horizon', 'MsTeams')
+        { Invoke-GIStagePreflight -Config $cfg -Run $run } | Should -Throw '*Horizon Agent (`*Horizon-Agent-x86_64-`*.exe)*'
+        Should -Invoke -ModuleName VDI-GIPipeline Get-GIHorizonBaseImage -Times 0 -Exactly
+    }
+
+    It 'passes when every ticked installer is present or auto-downloads' {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; PowerState = 'PoweredOff' } }
+        $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'VMware-tools-12.5.0-x86_64.exe') -Value 'x'
+        $cfg.GoldenImage.InstallerSourceDir = $dir
+        $cfg.GoldenImage.Actions = @('VmTools', 'MsTeams')
+        { Invoke-GIStagePreflight -Config $cfg -Run $run } | Should -Not -Throw
+    }
+
+    It 'skips the installer check when no host folder is set' {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; PowerState = 'PoweredOff' } }
+        $cfg.GoldenImage.Actions = @('Horizon')
+        { Invoke-GIStagePreflight -Config $cfg -Run $run } | Should -Not -Throw
+    }
+}
+
+Describe 'Get-GIInstallerStatus' {
+    BeforeEach {
+        $script:dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $old = Join-Path $dir 'VMware-tools-12.4.0-x86_64.exe'; Set-Content -LiteralPath $old -Value 'old'
+        (Get-Item -LiteralPath $old).LastWriteTime = (Get-Date).AddDays(-30)
+        Set-Content -LiteralPath (Join-Path $dir 'VMware-tools-12.5.0-x86_64.exe') -Value 'new'
+        $cfg.GoldenImage.InstallerSourceDir = $dir
+        $cfg.GoldenImage.Actions = @('VmTools', 'Horizon', 'FSLogix')
+    }
+
+    It 'lists every known package in run order' {
+        (Get-GIInstallerStatus -Config $cfg).Packages.Action | Should -Be @('VmTools', 'Horizon', 'DEM', 'AppVolumes', 'HorizonRec', 'FSLogix', 'MsTeams', 'OneDrive', 'GoogleDrive')
+    }
+
+    It 'picks the newest matching file and marks Found, Missing and Download' {
+        $p = (Get-GIInstallerStatus -Config $cfg).Packages
+        $tools = $p | Where-Object Action -eq 'VmTools'
+        $tools.State | Should -Be 'Found'
+        $tools.File | Should -Be 'VMware-tools-12.5.0-x86_64.exe'
+        $tools.Selected | Should -BeTrue
+        ($p | Where-Object Action -eq 'Horizon').State | Should -Be 'Missing'
+        ($p | Where-Object Action -eq 'FSLogix').State | Should -Be 'Download'
+        ($p | Where-Object Action -eq 'DEM').Selected | Should -BeFalse
+    }
+
+    It 'reports NoFolder when no host folder is set' {
+        $cfg.GoldenImage.InstallerSourceDir = ''
+        $r = Get-GIInstallerStatus -Config $cfg
+        $r.Folder | Should -Be ''
+        @($r.Packages | Where-Object State -ne 'NoFolder') | Should -BeNullOrEmpty
+    }
+
+    It 'reports a missing folder without throwing' {
+        $cfg.GoldenImage.InstallerSourceDir = Join-Path $TestDrive 'nope'
+        (Get-GIInstallerStatus -Config $cfg).FolderError | Should -BeLike '*not found*'
+    }
+
+    It 'resolves a relative folder from the Pipeline root' {
+        $cfg.GoldenImage.InstallerSourceDir = 'installers'
+        (Get-GIInstallerStatus -Config $cfg).Folder | Should -Be (Join-Path $cfg.Root 'installers')
+    }
+
+    It 'uses the same file masks as VDI-GoldenImage.ps1' {
+        $guest = Get-Content -Raw (Join-Path $PSScriptRoot '..' '..' 'VDI-GoldenImage.ps1')
+        $masks = InModuleScope VDI-GIPipeline { $h = @{}; foreach ($k in $script:GIGuestPackages.Keys) { $h[$k] = $script:GIGuestPackages[$k].Mask }; $h }
+        foreach ($k in $masks.Keys) {
+            $m = [regex]::Match($guest, '(?m)^\s*' + $k + '\s*=\s*@\{.*?SrcFile\s*=\s*"([^"]+)"')
+            $m.Success | Should -BeTrue -Because "SwSet.$k should exist in VDI-GoldenImage.ps1"
+            $m.Groups[1].Value | Should -Be $masks[$k] -Because "mask for $k"
+        }
+    }
 }
 
 Describe 'Wait-GIPoolPush' {

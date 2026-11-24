@@ -76,6 +76,66 @@ function Get-GIControlHtml {
     }
 }
 
+function Get-GIPackagesFieldHtml {
+    <# Checkbox table for the 'packages' field. $Installers is Get-GIInstallerStatus output; without it only the checkboxes render. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)]$Field, $Value, $Installers = $null)
+    $fk = [string]$Field.Key
+    $selected = @(@($Value) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    $rowsByAction = @{}
+    $showStatus = $null -ne $Installers
+    if ($showStatus) { foreach ($p in @(Get-GIValue $Installers 'Packages' @())) { $rowsByAction[[string]$p.Action] = $p } }
+    $head = '<tr><th scope="col">Maintain</th><th scope="col">Package</th>'
+    if ($showStatus) { $head += '<th scope="col">Installer on host</th><th scope="col">Status</th>' }
+    $head += '</tr>'
+    $body = foreach ($action in @(Get-GIValue $Field 'ItemValues' @())) {
+        $a = [string]$action
+        $id = Get-GIHtmlId 'pkg' $a
+        $chk = ''
+        if ($selected -ccontains $a) { $chk = ' checked' }
+        $info = if ($rowsByAction.ContainsKey($a)) { $rowsByAction[$a] } else { $null }
+        $name = if ($info) { [string]$info.Name } else { $a }
+        $row = "<tr><td><input type=""checkbox"" id=""$id"" name=""$(ConvertTo-GIHtml $fk)"" value=""$(ConvertTo-GIHtml $a)""$chk></td>"
+        $row += "<td><label for=""$id"">$(ConvertTo-GIHtml $name)</label><div class=""help"">$(ConvertTo-GIHtml $a)$(if ($info) { " &middot; <code>$(ConvertTo-GIHtml $info.Mask)</code>" })</div></td>"
+        if ($showStatus) {
+            $file = '<span class="muted">-</span>'
+            if ($info -and $info.File) {
+                $meta = @()
+                if ($info.Version) { $meta += "v$($info.Version)" }
+                if ($null -ne $info.SizeMB) { $meta += "$($info.SizeMB) MB" }
+                if ($info.Modified) { $meta += ([datetime]$info.Modified).ToString('yyyy-MM-dd') }
+                $file = "<code>$(ConvertTo-GIHtml $info.File)</code><div class=""help"">$(ConvertTo-GIHtml ($meta -join ', '))</div>"
+            }
+            $state = if ($info) { [string]$info.State } else { 'NoFolder' }
+            $badge = switch ($state) {
+                'Found' { '<span class="badge st-ok">Found</span>' }
+                'Download' { '<span class="badge st-sched">Downloads automatically</span>' }
+                'Missing' {
+                    if ($selected -ccontains $a) { '<span class="badge st-bad">Missing</span>' } else { '<span class="badge st-pending">Missing</span>' }
+                }
+                default { '<span class="badge st-skip">Not checked</span>' }
+            }
+            $row += "<td>$file</td><td>$badge</td>"
+        }
+        "$row</tr>"
+    }
+    $h = "<table class=""edit pkgs""><thead>$head</thead><tbody>$(@($body) -join '')</tbody></table>"
+    if ($showStatus) {
+        $folder = [string](Get-GIValue $Installers 'Folder' '')
+        $ferr = Get-GIValue $Installers 'FolderError' $null
+        if ($ferr) { $h += "<div class=""testres fail"" role=""status"">$(ConvertTo-GIHtml $ferr)</div>" }
+        elseif ($folder) {
+            $miss = @(@(Get-GIValue $Installers 'Packages' @()) | Where-Object { $_.Selected -and $_.State -eq 'Missing' })
+            if ($miss.Count) { $h += "<div class=""testres fail"" role=""status"">$($miss.Count) ticked package(s) have no installer in $(ConvertTo-GIHtml $folder). Preflight will stop the run until you add them or untick them.</div>" }
+            else { $h += "<div class=""help"">Checked $(ConvertTo-GIHtml $folder) just now.</div>" }
+        } else {
+            $h += '<div class="help">No installer folder set, so the pipeline can''t check installers. They must already be in the Install folder inside the golden VM.</div>'
+        }
+    }
+    return $h
+}
+
 function Get-GITableFieldHtml {
     [CmdletBinding()]
     [OutputType([string])]
@@ -249,6 +309,9 @@ function New-GISettingsSectionPage {
                 }
                 'table' {
                     $h += "<div class=""lbl"">$label</div>$(Get-GITableFieldHtml -Field $f -Value $v)"
+                }
+                'packages' {
+                    $h += "<div class=""lbl"">$label</div>$(Get-GIPackagesFieldHtml -Field $f -Value $v -Installers (Get-GIValue $SectionData 'Installers' $null))"
                 }
                 default {
                     $h += "<label for=""$fid"">$label</label>$(Get-GIControlHtml -Field $f -Name $fk -Value $v)"

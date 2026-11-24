@@ -211,6 +211,8 @@ vCenter = @{
   - `list`: string array, edited one per line,
   - `enum`: `Values = @(...)`,
   - `days`: subset of Monday..Sunday,
+  - `packages`: string array chosen from `ItemValues` with one checkbox per item, saved in `ItemValues` order. The Packages
+    section passes `Installers` (from `Get-GIInstallerStatus`) in its section data so the page can show each installer's host status,
   - `time`: `HH:mm`,
   - `secret`: the config value is the SecretManagement secret *name*. The form shows username +
     password for that secret; saving calls `Set-GISecretCredential`. The secret name itself is not
@@ -226,7 +228,7 @@ Settings API:
 | `Get-GISettingsSchema` | Returns the schema |
 | `Get-GISettingsSection -Config -Section` | `@{ Section; Values = @{ <Key> = <effective value> } }` read from merged Config (secret fields: `@{ Name; IsSet; UserName }` via `Get-GISecretStatus`) |
 | `Test-GISettingsSection -Section -Values <hashtable>` | Returns `@{ <Key> = 'error text' }`, empty when valid. Values are already typed (see ConvertFrom-GISettingsForm) |
-| `ConvertFrom-GISettingsForm -Section -Form <hashtable>` | Converts raw form strings to typed values per schema (`int`, bool from checkbox presence, list split on newlines and trimmed, days from repeated checkbox values, table rows from `<Key>[<i>].<Col>` names). Secret fields are excluded. Returns `@{ Values; Errors }` |
+| `ConvertFrom-GISettingsForm -Section -Form <hashtable>` | Converts raw form strings to typed values per schema (`int`, bool from checkbox presence, list split on newlines and trimmed, days and packages from repeated checkbox values, table rows from `<Key>[<i>].<Col>` names). Secret fields are excluded. Returns `@{ Values; Errors }` |
 | `Save-GISettingsSection -Config -Section -Values -By` | Validates, writes only the section's keys into settings.json (deep set), backup + atomic write, audit entry `settings.save` with field-level diff (`old`/`new`; secrets never included). Throws with all errors if invalid |
 
 ## Audit log: `state/audit.jsonl`

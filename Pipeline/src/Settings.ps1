@@ -2,7 +2,20 @@
 # Edits are stored as a sparse overlay in <Root>/config/settings.json; Get-GIConfig merges it over the psd1.
 
 $script:GIDayNames = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
-$script:GIGuestActions = @('VmTools', 'Horizon', 'DEM', 'AppVolumes', 'HorizonRec', 'FSLogix', 'MsTeams', 'OneDrive', 'GoogleDrive')
+# Packages the guest script can maintain, in the order they run. Mask mirrors $SwSet.<Action>.SrcFile in
+# VDI-GoldenImage.ps1 (a test keeps them in sync). AutoDownload: the guest script fetches it from the web when missing.
+$script:GIGuestPackages = [ordered]@{
+    VmTools     = @{ Name = 'VMware Tools';                Mask = 'VMware-tools-*64.exe';                 AutoDownload = $false }
+    Horizon     = @{ Name = 'Horizon Agent';               Mask = '*Horizon-Agent-x86_64-*.exe';          AutoDownload = $false }
+    DEM         = @{ Name = 'Dynamic Environment Manager'; Mask = '*Dynamic*Environment*Manager*x64.msi'; AutoDownload = $false }
+    AppVolumes  = @{ Name = 'App Volumes Agent';           Mask = '*AppVolumes*Agent*.msi';               AutoDownload = $false }
+    HorizonRec  = @{ Name = 'Horizon Recording Agent';     Mask = 'HorizonRecordingAgent-*.exe';          AutoDownload = $false }
+    FSLogix     = @{ Name = 'Microsoft FSLogix Apps';      Mask = 'FSLogix_*.zip';                        AutoDownload = $true }
+    MsTeams     = @{ Name = 'Microsoft Teams for VDI';     Mask = 'teamsbootstrapper.exe';                AutoDownload = $true }
+    OneDrive    = @{ Name = 'Microsoft OneDrive';          Mask = 'OneDriveSetup.exe';                    AutoDownload = $true }
+    GoogleDrive = @{ Name = 'Google Drive';                Mask = 'GoogleDriveSetup.exe';                 AutoDownload = $true }
+}
+$script:GIGuestActions = @($script:GIGuestPackages.Keys)
 $script:GITimePattern = '^([01]\d|2[0-3]):[0-5]\d$'
 
 $script:GISettingsSchema = [ordered]@{
@@ -39,19 +52,24 @@ $script:GISettingsSchema = [ordered]@{
     }
     GoldenImage = @{
         Title = 'Golden image'; ConfigPath = 'GoldenImage'; Test = 'GoldenImage'; ReadOnly = $false
-        Description = 'The golden image VM and the actions run inside it.'
+        Description = 'The golden image VM and how the pipeline reaches it. Pick the maintained software under Packages.'
         Fields = @(
             @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Required = $true }
             @{ Key = 'GuestCredentialSecret'; Label = 'Guest administrator'; Type = 'secret'; Help = 'Local administrator inside the golden image.' }
             @{ Key = 'ScriptPathInGuest'; Label = 'Script path in guest'; Type = 'string'; Required = $true }
             @{ Key = 'GuestWorkDir'; Label = 'Guest work folder'; Type = 'string'; Default = 'C:\ProgramData\VDI\Pipeline'; Required = $true }
             @{ Key = 'CopyScript'; Label = 'Copy script into guest before each run'; Type = 'bool'; Default = $true }
-            @{ Key = 'InstallerSourceDir'; Label = 'Installer folder on pipeline host'; Type = 'string'
-               Help = 'Optional. Files here are copied into the Install folder next to the guest script before the actions run. Unchanged files are skipped. Relative paths resolve from the Pipeline folder.' }
-            @{ Key = 'Actions'; Label = 'Actions'; Type = 'list'; ItemValues = $script:GIGuestActions
-               Help = "One per line, run in order with -Unattended after updates. Valid: $($script:GIGuestActions -join ', ')." }
             @{ Key = 'FinalizeAction'; Label = 'Finalize action'; Type = 'enum'; Values = @('Finalize', 'FinalizeFast'); Required = $true }
             @{ Key = 'PowerOffTimeoutMin'; Label = 'Power-off timeout (min)'; Type = 'int'; Min = 5; Max = 600; Required = $true }
+        )
+    }
+    Packages = @{
+        Title = 'Packages'; ConfigPath = 'GoldenImage'; Test = $null; ReadOnly = $false
+        Description = 'The software maintained in the golden image, and whether each installer is on the pipeline host. Ticked packages run in the order shown with -Unattended after Windows Update.'
+        Fields = @(
+            @{ Key = 'InstallerSourceDir'; Label = 'Installer folder on pipeline host'; Type = 'string'
+               Help = 'Optional. Files here are copied into the Install folder next to the guest script before the packages run; unchanged files are skipped. Relative paths resolve from the Pipeline folder. Leave empty if you stage installers in the guest yourself.' }
+            @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = $script:GIGuestActions }
         )
     }
     WindowsUpdate = @{
@@ -211,7 +229,7 @@ function ConvertTo-GISettingsFieldValue {
             if ([int]::TryParse([string]$Value, [ref]$n)) { return $n }
             return $Value
         }
-        { $_ -in 'list', 'days' } {
+        { $_ -in 'list', 'days', 'packages' } {
             if (-not $Found -or $null -eq $Value) { return , @() }
             return , @(@($Value) | ForEach-Object { [string]$_ })
         }
@@ -269,7 +287,10 @@ function Get-GISettingsSection {
             $values[$f.Key] = @{ Name = (Get-GISettingsAttr $f 'DefaultName' $null); IsSet = $false; UserName = $null; Configured = $false }
         }
     }
-    return @{ Section = $Section; Values = $values }
+    $result = @{ Section = $Section; Values = $values }
+    # The Packages page shows which installers are in the host folder (a local directory read)
+    if ($Section -eq 'Packages') { $result.Installers = Get-GIInstallerStatus -Config $Config }
+    return $result
 }
 
 function Convert-GISettingsScalar {
@@ -322,6 +343,14 @@ function ConvertFrom-GISettingsForm {
             'days' {
                 $items = foreach ($r in @($raw)) { if ($null -ne $r) { ([string]$r) -split ',' } }
                 $values[$key] = @($items | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            }
+            'packages' {
+                # Checkboxes post one value each; keep catalog order, put unknown names last so validation reports them.
+                $items = @(foreach ($r in @($raw)) { if ($null -ne $r) { ([string]$r) -split ',' } }) | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+                $order = @(Get-GISettingsAttr $f 'ItemValues' @())
+                $known = @($order | Where-Object { $items -ccontains $_ })
+                $unknown = @($items | Where-Object { $order -cnotcontains $_ } | Select-Object -Unique)
+                $values[$key] = @($known + $unknown)
             }
             'table' {
                 $rx = '^' + [regex]::Escape($key) + '\[(\d+)\]\.(.+)$'
@@ -428,7 +457,7 @@ function Test-GISettingsSection {
         if ($requiredIf -and $Values.Contains($requiredIf) -and $Values[$requiredIf] -eq $true) { $required = $true }
 
         switch ($f.Type) {
-            'list' {
+            { $_ -in 'list', 'packages' } {
                 $items = @(@($value) | Where-Object { $null -ne $_ -and ([string]$_).Trim() -ne '' } | ForEach-Object { ([string]$_).Trim() })
                 if ($items.Count -eq 0) {
                     if ($required) { $errors[$key] = 'At least one entry is required.' }

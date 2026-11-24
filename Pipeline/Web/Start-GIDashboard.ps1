@@ -275,6 +275,7 @@ Start-PodeServer -Quiet -Threads 4 {
             $shown = @{ Section = $sk; Values = @{} }
             foreach ($k in $current.Values.Keys) { $shown.Values[$k] = $current.Values[$k] }
             foreach ($k in $conv.Values.Keys) { $shown.Values[$k] = $conv.Values[$k] }
+            if ($current.ContainsKey('Installers')) { $shown.Installers = $current.Installers }
             $page = New-GISettingsSectionPage -Schema $schema -SectionKey $sk -SectionData $shown -Errors $errors `
                 -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId "settings:$sk") -Notice 'Not saved: fix the highlighted fields.' -IsHttps $c.IsHttps
             Write-PodeHtmlResponse -Value $page -StatusCode 400

@@ -66,7 +66,7 @@ Preflight -> Maintain -> Snapshot -> TestPush -> Validate -> Approval -> Promote
  pre-maint-* guest       report                  checks      or script)  per window last-known-good
 ```
 
-1. Preflight checks that the golden VM is powered off and that no pool has a push pending, then takes a safety snapshot named `pre-maint-<RunId>`.
+1. Preflight checks that the golden VM is powered off, that every ticked package has an installer on the host (when an installer folder is set) and that no pool has a push pending, then takes a safety snapshot named `pre-maint-<RunId>`.
 2. Maintain powers the VM on and runs Windows Update passes and `VDI-GoldenImage.ps1 -Unattended` actions inside the guest through VMware Tools, then runs the finalize action and waits for power off.
 3. Snapshot creates `GI-<RunId>` with a manifest of the installed agent versions, then applies the retention policy.
 4. TestPush pushes the snapshot to the test pool.
@@ -106,7 +106,9 @@ The service account needs these permissions:
 
 The golden VM needs VMware Tools running and a local administrator account for the guest credential. The pipeline copies `VDI-GoldenImage.ps1` into the guest at `GoldenImage.ScriptPathInGuest` on every run, so you don't have to keep it there yourself. The guest script's own `.config` file lives next to it as described in the top-level README.
 
-Installers for VMware Tools, Horizon Agent, DEM, App Volumes and Horizon Recording can't be downloaded automatically, so they have to reach the guest's `Install` folder somehow. Set `GoldenImage.InstallerSourceDir` to a folder on the pipeline host and drop the packages there; Maintain copies them into `Install` next to `ScriptPathInGuest` before the actions run. Files the guest already has with the same name and size are skipped, so a 300 MB Horizon Agent copies once, not every night. Leave it empty if you stage installers in the guest yourself. Keep only the version you want per product in the folder; the guest script picks the newest file matching each mask.
+Installers for VMware Tools, Horizon Agent, DEM, App Volumes and Horizon Recording can't be downloaded automatically, so they have to reach the guest's `Install` folder somehow. Set the installer folder under Settings → Packages (`GoldenImage.InstallerSourceDir`) and drop the packages there; Maintain copies them into `Install` next to `ScriptPathInGuest` before the packages run. Files the guest already has with the same name and size are skipped, so a 300 MB Horizon Agent copies once, not every night. Leave it empty if you stage installers in the guest yourself. Keep only the version you want per product in the folder; the guest script picks the newest file matching each mask.
+
+Settings → Packages lists every package the guest script knows. Tick the ones to maintain; they run in the order shown. Each row shows the installer the pipeline found in the host folder (file, version, size, date) and a status: Found, Downloads automatically (FSLogix, Teams, OneDrive and Google Drive are fetched by the guest script when missing), Missing, or Not checked when no folder is set. A ticked package that's Missing stops the run in Preflight, before the snapshot and before Windows Update.
 
 The vault has to work without a prompt for the account that runs the scheduled tasks. The launcher sets this up for you. To do it by hand, sign in as that account once and run:
 
@@ -163,7 +165,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | vCenter | Server, CredentialSecret | Used for snapshots, power operations and guest operations. |
 | Horizon | Server, CredentialSecret, Domain, SkipCertificateCheck | Connection Server REST API. Leave the certificate check on in production. |
 | AppVolumes | Server, CredentialSecret, SkipCertificateCheck, TestPackages, Endpoints | TestPackages are the packages assigned to the test pool's computers. Endpoints are the REST paths and differ between releases. |
-| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
+| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update; edit them and InstallerSourceDir under Settings → Packages, which saves them in catalog order. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
 | Snapshots | NamePrefix, Mode, Keep, MaxChainDepth, Prune, ProtectAncestors, ConsolidateTimeoutMin, MinFreeSpacePercent | Naming and retention. See Safety behavior. |
@@ -326,7 +328,7 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 
 ## Safety behavior
 
-* Preflight stops the run if the golden VM is powered on or if any configured pool already has a push pending. It then takes the `pre-maint-<RunId>` safety snapshot, so a bad update pass can be reverted.
+* Preflight stops the run if the golden VM is powered on, if a ticked package has no installer in the host installer folder (when one is set), or if any configured pool already has a push pending. It then takes the `pre-maint-<RunId>` safety snapshot, so a bad update pass can be reverted.
 * New snapshots are named `<Snapshots.NamePrefix> yy.MM.dd.HHmm` (default `Baseline 26.11.24.0131`).
 * Retention runs after a production push passes PostCheck, never before. It's report-only until you set `Snapshots.Prune = $true`; the Snapshot stage message and the run report list what it would remove.
 * In `Chain` mode (the default) the golden VM ends up as `Master > previous Baseline > production Baseline`. Older Baselines and the finished run's `pre-maint-*` snapshot are removed even though they sit under the production snapshot. vSphere merges a removed snapshot's changes into its child, so nothing in the image is lost. With `Keep = 2`, promoting `Baseline 26.11.24.0131` removes `Baseline 26.11.11.1340` and keeps `Baseline 26.11.20.1249` for rollback.

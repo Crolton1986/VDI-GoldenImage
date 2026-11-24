@@ -170,10 +170,10 @@ Describe 'Test-GISettingsSection' {
         $e.ContainsKey('Endpoints.OnlineEntities') | Should -BeFalse
     }
     It 'whitelists guest actions' {
-        $v = @{ VmName = 'vm'; ScriptPathInGuest = 'C:\x.ps1'; GuestWorkDir = 'C:\w'; CopyScript = $true; Actions = @('VmTools', 'Bogus'); FinalizeAction = 'Finalize'; PowerOffTimeoutMin = 90 }
-        (Test-GISettingsSection -Section GoldenImage -Values $v).Actions | Should -BeLike '*Bogus*'
+        $v = @{ InstallerSourceDir = ''; Actions = @('VmTools', 'Bogus') }
+        (Test-GISettingsSection -Section Packages -Values $v).Actions | Should -BeLike '*Bogus*'
         $v.Actions = @('VmTools', 'OneDrive', 'GoogleDrive', 'HorizonRec')
-        (Test-GISettingsSection -Section GoldenImage -Values $v).Count | Should -Be 0
+        (Test-GISettingsSection -Section Packages -Values $v).Count | Should -Be 0
     }
     It 'rejects duplicate production pools' {
         $v = Valid-Pools
@@ -339,14 +339,14 @@ Describe 'Schema vs pipeline.config.psd1' {
                 foreach ($part in (@($def.ConfigPath.Split('.')) + @($f.Key.Split('.')))) {
                     if ($node -is [System.Collections.IDictionary] -and $node.Contains($part)) { $node = $node[$part] } else { $found = $false; break }
                 }
-                $hasDefault = $f.Contains('Default') -or $f.Contains('DefaultName') -or $f.Type -in 'bool', 'list', 'days', 'table'
+                $hasDefault = $f.Contains('Default') -or $f.Contains('DefaultName') -or $f.Type -in 'bool', 'list', 'days', 'table', 'packages'
                 if (-not $found -and -not $hasDefault) { "$($sec.Key).$($f.Key)" }
             }
         }
         @($problems) | Should -BeNullOrEmpty
     }
     It 'defines the documented sections and read-only Dashboard' {
-        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
+        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Packages', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
         (Get-GISettingsSchema).Dashboard.ReadOnly | Should -BeTrue
         (Get-GISettingsSchema).Promotion.Title | Should -Be 'Schedule & promotion'
     }
@@ -357,5 +357,38 @@ Describe 'Production pool safety default' {
         Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
         $prod = (Get-GISettingsSchema)['Pools'].Fields | Where-Object Key -eq 'Production'
         ($prod.Columns | Where-Object Key -eq 'LogoffPolicy').Values[0] | Should -Be 'WAIT_FOR_LOGOFF'
+    }
+}
+
+Describe 'Packages section' {
+    It 'owns Actions and InstallerSourceDir; Golden image no longer lists them' {
+        $s = Get-GISettingsSchema
+        $s.Packages.ConfigPath | Should -Be 'GoldenImage'
+        @($s.Packages.Fields.Key) | Should -Be @('InstallerSourceDir', 'Actions')
+        @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'Actions'
+        @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'InstallerSourceDir'
+    }
+    It 'parses ticked boxes into catalog order and keeps unknown names for validation' {
+        $r = ConvertFrom-GISettingsForm -Section Packages -Form @{ Actions = @('MsTeams', 'VmTools', 'Bogus'); InstallerSourceDir = ' D:\Inst ' }
+        $r.Values.Actions | Should -Be @('VmTools', 'MsTeams', 'Bogus')
+        $r.Values.InstallerSourceDir | Should -Be 'D:\Inst'
+        (Test-GISettingsSection -Section Packages -Values $r.Values).Actions | Should -BeLike '*Bogus*'
+    }
+    It 'treats no ticked boxes as an empty selection' {
+        (ConvertFrom-GISettingsForm -Section Packages -Form @{ InstallerSourceDir = '' }).Values.Actions.Count | Should -Be 0
+    }
+    It 'saves to GoldenImage.Actions and GoldenImage.InstallerSourceDir' {
+        $p = New-SettingsConfig
+        $null = Save-GISettingsSection -Config (Get-GIConfig -Path $p) -Section Packages -Values @{ Actions = @('VmTools', 'Horizon'); InstallerSourceDir = 'D:\Inst' }
+        $c = Get-GIConfig -Path $p
+        $c.GoldenImage.Actions | Should -Be @('VmTools', 'Horizon')
+        $c.GoldenImage.InstallerSourceDir | Should -Be 'D:\Inst'
+        $c.GoldenImage.VmName | Should -Be 'W11-GI-01'
+    }
+    It 'returns installer status with the section values' {
+        $d = (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section Packages)
+        $d.Installers | Should -Not -BeNullOrEmpty
+        @($d.Installers.Packages).Count | Should -Be 9
+        (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section vCenter).ContainsKey('Installers') | Should -BeFalse
     }
 }

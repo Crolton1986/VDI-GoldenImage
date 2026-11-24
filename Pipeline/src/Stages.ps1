@@ -87,6 +87,51 @@ function Invoke-GIGuestScript {
     return Invoke-VMScript -VM $VM -GuestCredential $Credential -ScriptType Powershell -ScriptText $ScriptText -ErrorAction Stop
 }
 
+function Resolve-GIInstallerSourceDir {
+    # GoldenImage.InstallerSourceDir as a full path, or '' when not set. Relative paths resolve from the Pipeline folder.
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $dir = [string](Get-GIConfigValue $Config 'GoldenImage.InstallerSourceDir' '')
+    if (-not $dir.Trim()) { return '' }
+    $dir = $dir.Trim()
+    if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path $Config.Root $dir }
+    return $dir
+}
+
+function Get-GIInstallerStatus {
+    <#
+    .SYNOPSIS
+        One row per known package: whether it's selected and whether its installer is in the host folder.
+        State: Found, Download (missing, guest script fetches it), Missing, NoFolder (no host folder set). Never throws.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $dir = Resolve-GIInstallerSourceDir -Config $Config
+    $selected = @(Get-GIConfigValue $Config 'GoldenImage.Actions' @()) | ForEach-Object { [string]$_ }
+    $folderError = $null
+    $files = @()
+    if ($dir) {
+        try {
+            if (Test-Path -LiteralPath $dir -PathType Container) { $files = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction Stop) }
+            else { $folderError = "Folder '$dir' not found on the pipeline host." }
+        } catch { $folderError = "Can't read '$dir': $($_.Exception.Message)" }
+    }
+    $rows = foreach ($action in $script:GIGuestPackages.Keys) {
+        $pkg = $script:GIGuestPackages[$action]
+        $match = $files | Where-Object { $_.Name -like $pkg.Mask } | Sort-Object LastWriteTime, Name | Select-Object -Last 1
+        $state = if (-not $dir) { 'NoFolder' } elseif ($match) { 'Found' } elseif ($pkg.AutoDownload) { 'Download' } else { 'Missing' }
+        $version = ''
+        if ($match -and $match.Extension -eq '.exe') { try { $version = [string]$match.VersionInfo.FileVersion } catch { $version = '' } }
+        [pscustomobject]@{
+            Action = $action; Name = $pkg.Name; Mask = $pkg.Mask; AutoDownload = [bool]$pkg.AutoDownload
+            Selected = ($selected -ccontains $action); State = $state
+            File = $(if ($match) { $match.Name } else { '' }); Version = $version.Trim()
+            SizeMB = $(if ($match) { [math]::Round($match.Length / 1MB, 1) } else { $null })
+            Modified = $(if ($match) { $match.LastWriteTime } else { $null })
+        }
+    }
+    return [pscustomobject]@{ Folder = $dir; FolderError = $folderError; Packages = @($rows) }
+}
+
 function Sync-GIGuestInstallers {
     # Copies installer packages from a folder on the pipeline host into the guest's Install folder.
     # Files the guest already has with the same name and size are skipped, so large agents copy once.
@@ -246,6 +291,16 @@ function Invoke-GIStagePreflight {
     if ($vm.PowerState -ne 'PoweredOff') {
         throw "Golden VM '$($vm.Name)' is $($vm.PowerState). Someone may be working on it; power it off to let the pipeline run."
     }
+    # Catch a missing installer now, not after Windows Update has run for ten minutes
+    $inst = Get-GIInstallerStatus -Config $Config
+    if ($inst.Folder) {
+        if ($inst.FolderError) { throw "Installer folder problem: $($inst.FolderError) Fix it under Settings > Packages." }
+        $missing = @($inst.Packages | Where-Object { $_.Selected -and $_.State -eq 'Missing' })
+        if ($missing.Count) {
+            $list = ($missing | ForEach-Object { "$($_.Name) ($($_.Mask))" }) -join ', '
+            throw "Installer missing on host for: $list in $($inst.Folder). Add it or untick it under Settings > Packages."
+        }
+    }
     $img = Get-GIHorizonBaseImage -Config $Config
 
     $poolNames = @($Config.Pools.Test.Name) + @($Config.Pools.Production | ForEach-Object { $_.Name })
@@ -290,9 +345,8 @@ function Invoke-GIStageMaintain {
     }
 
     $data = @{ actions = @() }
-    $installerSrc = Get-GIConfigValue $Config 'GoldenImage.InstallerSourceDir' ''
+    $installerSrc = Resolve-GIInstallerSourceDir -Config $Config
     if ($installerSrc) {
-        if (-not [System.IO.Path]::IsPathRooted($installerSrc)) { $installerSrc = Join-Path $Config.Root $installerSrc }
         $guestInstall = Join-Path (Split-Path $gi.ScriptPathInGuest -Parent) 'Install'
         Set-GIProgress -Config $Config -Run $Run -Message "Copying installers to $guestInstall"
         $sync = Sync-GIGuestInstallers -VM $vm -Credential $cred -SourceDir $installerSrc -GuestDir $guestInstall
