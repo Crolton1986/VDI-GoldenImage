@@ -3,8 +3,9 @@
 .SYNOPSIS
   Registers (or removes) the Windows scheduled tasks that run the golden image pipeline.
 .DESCRIPTION
-  Creates four tasks on the management server. All run pwsh.exe under the service account
-  passed in -Credential, whether or not the user is logged on, with highest privileges.
+  Creates four tasks on the management server. All run pwsh.exe under the account passed in
+  -Credential (default: prompts for the CURRENT user), whether or not the user is logged on, with
+  highest privileges. The task definitions live in src/Tasks.ps1 and are shared with the /setup page.
 
     VDI-GI-Pipeline   Invoke-GIPipeline.ps1 -Stage All, weekly (-PipelineDay / -PipelineTime)
     VDI-GI-PostCheck  Invoke-GIPipeline.ps1 -Stage PostCheck, every hour. Exit code 3 means
@@ -19,7 +20,9 @@
 
   Re-running the script updates existing tasks. Needs Windows, PowerShell 7 and an elevated session.
 .PARAMETER Credential
-  Service account that runs the tasks. It needs the SecretStore vault set up for non-interactive use.
+  Account that runs the tasks. Optional: when omitted you are prompted for the CURRENT user
+  (Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME"). It needs the SecretStore vault set up
+  for non-interactive use.
 .PARAMETER ConfigPath
   Optional pipeline config file, passed to every task.
 .PARAMETER PipelineDay
@@ -37,7 +40,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Register')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Register')]
+    [Parameter(ParameterSetName = 'Register')]
     [pscredential] $Credential,
 
     [string] $ConfigPath,
@@ -61,90 +64,22 @@ if (-not $principalCheck.IsInRole([Security.Principal.WindowsBuiltInRole]::Admin
     throw 'Run this script from an elevated (Run as administrator) PowerShell session.'
 }
 
-$taskNames = 'VDI-GI-Pipeline', 'VDI-GI-PostCheck', 'VDI-GI-Dashboard', 'VDI-GI-Runner'
+Import-Module (Join-Path $PSScriptRoot 'VDI-GIPipeline.psd1') -Force
 
 if ($Unregister) {
-    foreach ($name in $taskNames) {
-        if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {
-            Write-Host "Task $name not found, skipping."
-            continue
-        }
-        if ($PSCmdlet.ShouldProcess($name, 'Unregister scheduled task')) {
-            Unregister-ScheduledTask -TaskName $name -Confirm:$false
-            Write-Host "Removed task $name."
-        }
-    }
+    foreach ($name in (Unregister-GIPipelineTask -WhatIf:$WhatIfPreference)) { Write-Host "Removed task $name." }
     return
 }
 
-$pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
-$pipelineScript = Join-Path $PSScriptRoot 'Invoke-GIPipeline.ps1'
-$dashboardScript = Join-Path $PSScriptRoot 'Web\Start-GIDashboard.ps1'
-foreach ($f in $pipelineScript, $dashboardScript) {
-    if (-not (Test-Path -LiteralPath $f)) { throw "Script not found: $f" }
+if (-not $Credential) {
+    $Credential = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message 'Account that runs the pipeline tasks'
+    if (-not $Credential) { throw 'A credential is required.' }
 }
 
-$configArg = ''
-if ($ConfigPath) {
-    $resolved = (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).ProviderPath
-    $configArg = " -ConfigPath `"$resolved`""
-}
+$defArgs = @{ Root = $PSScriptRoot; PipelineDay = $PipelineDay; PipelineTime = $PipelineTime }
+if ($ConfigPath) { $defArgs.ConfigPath = $ConfigPath }
+$definitions = Get-GIPipelineTaskDefinition @defArgs
 
-function New-GITaskAction {
-    param([string] $ScriptPath, [string] $ScriptArgs)
-    $argText = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-    if ($ScriptArgs) { $argText += " $ScriptArgs" }
-    if ($configArg) { $argText += $configArg }
-    New-ScheduledTaskAction -Execute $pwsh -Argument $argText -WorkingDirectory $PSScriptRoot
-}
-
-$userName = $Credential.UserName
-$password = $Credential.GetNetworkCredential().Password
-$principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Password -RunLevel Highest
-
-$baseSettings = @{
-    AllowStartIfOnBatteries    = $true
-    DontStopIfGoingOnBatteries = $true
-    StartWhenAvailable         = $true
-}
-
-$definitions = @(
-    @{
-        Name        = 'VDI-GI-Pipeline'
-        Description = 'Golden image pipeline: maintain, snapshot, test push, validate, approval gate.'
-        Action      = New-GITaskAction -ScriptPath $pipelineScript -ScriptArgs '-Stage All'
-        Trigger     = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $PipelineDay -At $PipelineTime
-        Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
-    }
-    @{
-        Name        = 'VDI-GI-PostCheck'
-        Description = 'Golden image pipeline: hourly production post-check (exit code 3 = not finished yet).'
-        Action      = New-GITaskAction -ScriptPath $pipelineScript -ScriptArgs '-Stage PostCheck'
-        Trigger     = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Hours 1)
-        Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-    }
-    @{
-        Name        = 'VDI-GI-Dashboard'
-        Description = 'Golden image pipeline: Pode web dashboard.'
-        Action      = New-GITaskAction -ScriptPath $dashboardScript -ScriptArgs ''
-        Trigger     = New-ScheduledTaskTrigger -AtStartup
-        Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    }
-    @{
-        Name        = 'VDI-GI-Runner'
-        Description = 'Golden image pipeline: runs the request queued from the dashboard. Started on demand.'
-        Action      = New-GITaskAction -ScriptPath $pipelineScript -ScriptArgs '-FromRequest'
-        Trigger     = $null
-        Settings    = New-ScheduledTaskSettingsSet @baseSettings -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
-    }
-)
-
-foreach ($d in $definitions) {
-    if ($PSCmdlet.ShouldProcess($d.Name, "Register scheduled task as $userName")) {
-        $taskArgs = @{ Action = $d.Action; Settings = $d.Settings; Principal = $principal; Description = $d.Description }
-        if ($d.Trigger) { $taskArgs.Trigger = $d.Trigger }
-        $task = New-ScheduledTask @taskArgs
-        Register-ScheduledTask -TaskName $d.Name -InputObject $task -User $userName -Password $password -Force | Out-Null
-        Write-Host "Registered task $($d.Name)."
-    }
+foreach ($r in (Register-GIPipelineTask -Definitions $definitions -Credential $Credential -WhatIf:$WhatIfPreference)) {
+    Write-Host "Registered task $($r.Name)."
 }

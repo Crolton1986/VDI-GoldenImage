@@ -14,6 +14,9 @@
 .PARAMETER NoAuth
     Skip AD authentication (lab/testing, and non-Windows hosts). The dashboard is then strictly
     read-only: approve/reject is disabled.
+.PARAMETER Setup
+    First-run setup mode (started by Start-GIPipeline.ps1): 127.0.0.1 only, no sign-in, and every page
+    redirects to /setup until setup is complete. Combined with -LocalAdmin, setup is locked to Lab mode.
 .PARAMETER LocalAdmin
     Lab and smoke tests only: plain http on 127.0.0.1, no authentication, and the caller is treated
     as admin and approver. Refuses any other bind address.
@@ -29,7 +32,8 @@ param(
     [int]$Port,
     [switch]$NoTls,
     [switch]$NoAuth,
-    [switch]$LocalAdmin
+    [switch]$LocalAdmin,
+    [switch]$Setup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +41,8 @@ $webRoot = $PSScriptRoot
 $pipelineRoot = Split-Path -Parent $webRoot
 $manifest = Join-Path $pipelineRoot 'VDI-GIPipeline.psd1'
 
+$modeLocked = [bool]$LocalAdmin   # launched for a lab/test run: setup can only choose Lab
+if ($Setup) { $LocalAdmin = [switch]$true }
 if ($LocalAdmin) { $NoAuth = [switch]$true; $NoTls = [switch]$true }
 Import-Module $manifest -Force
 Import-Module Pode -MaximumVersion 2.99.99 -ErrorAction Stop
@@ -59,6 +65,10 @@ $script:DashboardContext = @{
     ManifestPath   = $manifest
     ViewsPath      = Join-Path $webRoot 'DashboardViews.ps1'
     SettingsViewsPath = Join-Path $webRoot 'SettingsViews.ps1'
+    SetupViewsPath = Join-Path $webRoot 'SetupViews.ps1'
+    SetupMode      = [bool]$Setup
+    ModeLocked     = $modeLocked
+    StopAt         = $null      # set after a production setup finishes; a timer then stops this server
     ConfigPath     = $ConfigPath
     NoAuth         = [bool]$NoAuth
     LocalAdmin     = [bool]$LocalAdmin
@@ -73,8 +83,13 @@ if (-not $NoAuth -and -not $IsWindows) { throw 'AD authentication needs a Window
 if (-not $NoAuth -and $NoTls) { Write-Warning 'Basic auth over plain http sends passwords in clear text. Use https outside the lab.' }
 
 $ctx = $script:DashboardContext
+if ($Setup -and -not (Test-GISetupComplete -Config $config)) {
+    # Persist the Lab lock before any request can choose a mode
+    Initialize-GISetupState -Config $config -ModeLocked:$modeLocked | Out-Null
+}
 $viewsPath = $ctx.ViewsPath
 $settingsViewsPath = $ctx.SettingsViewsPath
+$setupViewsPath = $ctx.SetupViewsPath
 
 Start-PodeServer -Quiet {
     # Make the context, module and view functions available in every route runspace.
@@ -82,6 +97,22 @@ Start-PodeServer -Quiet {
     Import-PodeModule -Path $manifest
     Use-PodeScript -Path $viewsPath
     Use-PodeScript -Path $settingsViewsPath
+    Use-PodeScript -Path $setupViewsPath
+
+    # --- Setup mode: everything goes to /setup until setup is complete ---
+    if ($ctx.SetupMode) {
+        Add-PodeMiddleware -Name 'GISetupRedirect' -ScriptBlock {
+            $c = (Get-PodeState -Name 'GIContext')
+            if ($WebEvent.Path -like '/setup*') { return $true }
+            if (Test-GISetupComplete -Config (Get-GIDashboardConfig $c)) { return $true }
+            Move-PodeResponseUrl -Url '/setup'
+            return $false
+        }
+        Add-PodeTimer -Name 'GISetupHandoff' -Interval 2 -ScriptBlock {
+            $c = (Get-PodeState -Name 'GIContext')
+            if ($c.StopAt -and (Get-Date) -ge $c.StopAt) { Close-PodeServer }
+        }
+    }
 
     # --- Endpoint ---
     if ($ctx.LocalAdmin) {
@@ -378,6 +409,94 @@ Start-PodeServer -Quiet {
         $c = (Get-PodeState -Name 'GIContext')
         if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'The audit log is for the admin group.') -StatusCode 403; return }
         Write-PodeHtmlResponse -Value (New-GIAuditPage -Entries @(Get-GIAudit -Config (Get-GIDashboardConfig $c) -Last 200))
+    }
+
+
+    #----- First-run setup -----
+
+    Add-PodeRoute -Method Get -Path '/setup' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        $cfg = Get-GIDashboardConfig $c
+        $complete = Test-GISetupComplete -Config $cfg
+        if (-not $c.SetupMode -and -not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) {
+            Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'Setup status is for the admin group.') -StatusCode 403; return
+        }
+        $state = Get-GISetupState -Config $cfg -ModeLocked:$c.ModeLocked
+        $user = Get-GIDashboardUser -Context $c -WebEvent $WebEvent
+        $next = Get-GISetupNextStep -State $state
+        $certs = if ($next -eq 'DashboardAccess') { @(Get-GIServerCertificate) } else { @() }
+        $defs = if ($next -eq 'Tasks') {
+            $a = @{ Root = $cfg.Root; Config = $cfg }; if ($c.ConfigPath) { $a.ConfigPath = $c.ConfigPath }
+            @(Get-GIPipelineTaskDefinition @a)
+        } else { @() }
+        $page = New-GISetupPage -State $state -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId 'setup') `
+            -Notice ([string]$WebEvent.Query['n']) -Certificates $certs -TaskDefinitions $defs -CurrentUser (Get-GICurrentUserName) `
+            -IsComplete $complete -ReadOnly ($complete -and -not $c.SetupMode)
+        Write-PodeHtmlResponse -Value $page
+    }
+
+    Add-PodeRoute -Method Get -Path '/setup/status' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        $state = Get-GISetupState -Config (Get-GIDashboardConfig $c) -ModeLocked:$c.ModeLocked
+        Write-PodeJsonResponse -Value (New-GISetupStatusJson -State $state)
+    }
+
+    Add-PodeRoute -Method Post -Path '/setup/:step' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        $step = [string]$WebEvent.Parameters['step']
+        $hdr = @{ Origin = $WebEvent.Request.Headers['Origin']; Host = $WebEvent.Request.Headers['Host'] }
+        $why = if (-not $c.SetupMode) { @{ Code = 403; Message = 'Setup changes are only possible from the setup server (Start-GIPipeline.ps1 -ResetSetup).' } }
+               else { Get-GIPostRejection -Context $c -WebEvent $WebEvent -Role Admin -FormId 'setup' -Headers $hdr }
+        if ($why) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $why.Message) -StatusCode $why.Code; return }
+        $cfg = Get-GIDashboardConfig $c
+        $notice = ''
+        try {
+            $state = Get-GISetupState -Config $cfg -ModeLocked:$c.ModeLocked
+            switch ($step) {
+                'Mode' {
+                    $action = [string]$WebEvent.Data['invalidCertAction']; if (-not $action) { $action = 'Warn' }
+                    Set-GISetupMode -Config $cfg -Mode ([string]$WebEvent.Data['mode']) -InvalidCertAction $action -ModeLocked:$c.ModeLocked
+                }
+                { $_ -in 'Prerequisites', 'Modules', 'PowerCLI', 'Vault' } {
+                    Start-GISetupStep -Config $cfg -Step $step -ConfigPath $c.ConfigPath | Out-Null
+                }
+                'DashboardAccess' {
+                    Assert-GISetupCanStart -State $state -Step $step
+                    $opts = @{
+                        Port = [string]$WebEvent.Data['port']; CertThumbprint = [string]$WebEvent.Data['certificate']
+                        ViewerGroup = [string]$WebEvent.Data['viewerGroup']; ApproverGroup = [string]$WebEvent.Data['approverGroup']; AdminGroup = [string]$WebEvent.Data['adminGroup']
+                    }
+                    Invoke-GISetupStepCore -Config $cfg -Step $step -Arguments @{ Options = $opts } | Out-Null
+                }
+                'Tasks' {
+                    Assert-GISetupCanStart -State $state -Step $step
+                    if ([string]$WebEvent.Data['action'] -eq 'skip') {
+                        Invoke-GISetupStepCore -Config $cfg -Step $step -Arguments @{ Skip = $true } | Out-Null
+                    } else {
+                        $pw = [string]$WebEvent.Data['password']
+                        $sec = if ($pw) { [System.Net.NetworkCredential]::new('', $pw).SecurePassword } else { $null }
+                        $pw = $null
+                        $a = @{}
+                        if ($sec) { $a.Credential = [pscredential]::new((Get-GICurrentUserName), $sec) }
+                        if ($c.ConfigPath) { $a.ConfigPath = $c.ConfigPath }
+                        Invoke-GISetupStepCore -Config $cfg -Step $step -Arguments $a | Out-Null
+                    }
+                }
+                'Finish' {
+                    $done = Complete-GISetup -Config $cfg
+                    if ($done.StartDashboardTask) {
+                        try { Start-ScheduledTask -TaskName 'VDI-GI-Dashboard' -ErrorAction Stop }
+                        catch { $notice = "Setup is complete, but the VDI-GI-Dashboard task didn't start: $($_.Exception.Message)" }
+                        $c.StopAt = (Get-Date).AddSeconds(10)
+                    }
+                }
+                default { throw "Unknown setup step '$step'." }
+            }
+        } catch {
+            $notice = $_.Exception.Message
+        }
+        $q = if ($notice) { '?n=' + [uri]::EscapeDataString($notice) } else { '' }
+        Move-PodeResponseUrl -Url "/setup$q"
     }
 
     Add-PodeRoute -Method Get -Path '/reports/:runId' @auth -ScriptBlock {

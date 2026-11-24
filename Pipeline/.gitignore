@@ -5,3 +5,7 @@ reports/*
 logs/
 config/settings.json
 config/settings.json.bak
+config/setup.json
+config/setup.*.json
+config/setup-*.log
+config/setup-*.log.err

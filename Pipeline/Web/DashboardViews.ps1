@@ -169,6 +169,15 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
 table.edit input[type=text],table.edit select,table.edit input[type=number]{width:100%;min-width:90px}
 @media (max-width:600px){.settings-wrap{grid-template-columns:1fr}.sidemenu{display:flex;flex-wrap:wrap}.sidemenu a{border-left:0;border-bottom:3px solid transparent}.sidemenu a.active{border-bottom-color:var(--link)}}
 @media (max-width:600px){main{padding:8px}th,td{padding:5px 4px;font-size:13px}.kv{grid-template-columns:1fr}}
+.setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:#1b6fd1}.setup-step.s-done{border-left-color:#1e8a44}.setup-step.s-failed{border-left-color:#c0392b}
+.setup-step h2{margin:0 0 4px;font-size:16px}.setup-step .num{display:inline-block;min-width:22px;color:var(--mut)}
+.badge.sb-pending{background:#9aa5b1}.badge.sb-running{background:#1b6fd1}.badge.sb-done{background:#1e8a44}.badge.sb-failed{background:#c0392b}.badge.sb-skipped{background:#9aa5b1;font-style:italic}
+.spinner{display:inline-block;width:10px;height:10px;margin-right:5px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:gispin 1s linear infinite;vertical-align:-1px}
+@keyframes gispin{to{transform:rotate(360deg)}}
+pre.detail{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:6px 8px;margin:6px 0;white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}
+.setup-step fieldset{border:0;padding:0;margin:0}.setup-step .choice{margin:8px 0}
+.banner-ok{border-left:5px solid #1e8a44;background:#eef8f1;padding:8px 12px;margin:10px 0;font-weight:600}
+.waits{color:var(--mut);font-style:italic}
 '@
 }
 

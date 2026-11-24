@@ -265,3 +265,66 @@ Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `r
 `Dashboard.AdminGroup`: settings, credentials, Test connection, run controls. `ApproverGroup`: approve/reject.
 `ViewerGroup`: read. Login accepts all three. `-NoAuth`: read-only. `-LocalAdmin`: binds 127.0.0.1, no auth,
 caller is admin + approver (lab/smoke tests only).
+
+---
+
+# First-run setup (launcher + /setup)
+
+Entry point for people: `Start-GIPipeline.ps1` (runs in Windows PowerShell 5.1 or 7). It installs PowerShell 7
+if needed (asks first), elevates for Production, installs Pode only, then starts
+`Web/Start-GIDashboard.ps1 -Setup` on `http://127.0.0.1:<port>` and opens `/setup` until setup is complete.
+Everything (vault, tasks, dashboard) runs as the logged-in user who ran setup.
+
+## State: `config/setup.json` (gitignored)
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "Lab",                 // null until chosen, then Lab | Production
+  "modeLocked": true,            // true when launched with -LocalAdmin (Lab forced)
+  "startedAt": "<o>", "completedAt": null,
+  "options": { "invalidCertAction": "Warn" },
+  "steps": {
+    "Mode":            { "status": "done", "message": "Lab", "startedAt": "<o>", "endedAt": "<o>", "pid": null, "detail": [], "data": {} },
+    "Prerequisites":   { "status": "pending", ... },
+    "Modules":         { "status": "running", "pid": 4242, "detail": ["Installing VMware.PowerCLI 13.3.0 (CurrentUser)..."],
+                         "data": { "items": [ { "name": "Pode", "required": "2.10.0", "installed": "2.14.2", "status": "ok" } ] } },
+    "PowerCLI":        { ... }, "Vault": { ... }, "DashboardAccess": { ... }, "Tasks": { ... }, "Finish": { ... }
+  }
+}
+```
+
+- Step order (fixed): `Mode, Prerequisites, Modules, PowerCLI, Vault, DashboardAccess, Tasks, Finish`.
+- Step status: `pending | running | done | failed | skipped`. Lab mode marks `DashboardAccess` and `Tasks` skipped.
+- `detail` is a rolling list of progress lines (last 50 kept). `data` is step-specific.
+- Only one step runs at a time. A `running` step whose `pid` is no longer alive is treated as `failed` ("interrupted").
+- Writes are atomic (`Write-GIJsonAtomic`). Secrets (task password) are never written here.
+
+## Module list: `$script:GIRequiredModules` (src/SetupModules.ps1)
+
+`@{ Name; MinimumVersion; MaximumVersion (optional); Required = $true|$false; Note }` for Pode (2.x), VMware.PowerCLI,
+Microsoft.PowerShell.SecretManagement, Microsoft.PowerShell.SecretStore (required) and Pester 5.5+, PSScriptAnalyzer
+(optional: a failure is reported but doesn't fail the step). Scope: AllUsers in Production, CurrentUser in Lab.
+
+## Step functions
+
+Every step function: `Invoke-GISetup<Step> -Config <hashtable> -State <setup state object>` returns
+`@{ Message = '...'; Data = @{...} }` or throws. Progress lines go through
+`Write-GISetupProgress -Config -Step -Line` (appends to `detail`, saves). Steps are idempotent: check first, skip
+what's already in place, and say so in the message.
+
+| Step | Function | Runs |
+|---|---|---|
+| Mode | `Set-GISetupMode -Config -Mode -By` | in the web request |
+| Prerequisites | `Invoke-GISetupPrerequisites` | background process |
+| Modules | `Invoke-GISetupModules` | background process |
+| PowerCLI | `Invoke-GISetupPowerCLI` | background process |
+| Vault | `Invoke-GISetupVault` | background process |
+| DashboardAccess | `Invoke-GISetupDashboardAccess -Options @{ Port; CertThumbprint or CreateSelfSigned; ViewerGroup; ApproverGroup; AdminGroup }` | in the web request |
+| Tasks | `Invoke-GISetupTasks -Credential` or `-Skip` | in the web request (password never leaves memory) |
+| Finish | `Complete-GISetup` | in the web request |
+
+Background steps run as `pwsh -NoProfile -File Pipeline/Invoke-GISetupStep.ps1 -Step <name> [-ConfigPath]`
+(a separate process, so installing modules doesn't collide with modules loaded inside Pode), started by
+`Start-GISetupStep -Config -Step`, which refuses if another step is running or the step isn't the next one
+(a failed step can be retried).
