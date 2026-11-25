@@ -793,10 +793,14 @@ function Invoke-VdiSoftwareInstall{
                 MsgFce "INFO: Starting installation of '$($SwSettings.Name)'..."
                 $logFile = (Join-Path $script:LogDir $SwSettings.LogFile) -f (Get-Date)
                 # Build Start-Process execution/command based on file type
-                $startArgs = @{FilePath = ""; ArgumentList = ""; Wait = $true; ErrorAction = "Stop"}
+                $startArgs = @{FilePath = ""; ArgumentList = ""; Wait = $true; PassThru = $true; ErrorAction = "Stop"}
+                # Unattended: /qn never shows a dialog (files in use are replaced at reboot); interactive keeps the /qb progress bar.
+                # Restart Manager off so the installer doesn't stop on running agent services (wsnm, hzMonService, VMBlastS, ...).
+                $msiUi = if($script:Unattended){ "/qn" } else{ "/qb" }
+                $msiCommon = "MSIRESTARTMANAGERCONTROL=Disable"
                 if($swSrcFile.Extension -eq ".msi"){
                     $startArgs.FilePath = "msiexec.exe"
-                    $startArgs.ArgumentList = "/i ""$($swSrcFile.FullName)"" /qb /l* ""$logFile"" $ExtraArgs"
+                    $startArgs.ArgumentList = "/i ""$($swSrcFile.FullName)"" $msiUi /l* ""$logFile"" $msiCommon $ExtraArgs"
                 }else{
                     $startArgs.FilePath = $swSrcFile.FullName
                     if($InstallType -in ("fslogix")){
@@ -806,12 +810,20 @@ function Invoke-VdiSoftwareInstall{
                         #$startArgs.RedirectStandardOutput = $logFile
                         $startArgs.NoNewWindow = $true
                     } else{
-                        $startArgs.ArgumentList = "/S /v ""/qb /l* ""$logFile"" $ExtraArgs"""
+                        $startArgs.ArgumentList = "/S /v ""$msiUi /l* ""$logFile"" $msiCommon $ExtraArgs"""
                     }
                 }
                 if($script:VAR.ShowInstallParams){ MsgFce "DEBUG: Executing: $($startArgs.FilePath) $($startArgs.ArgumentList)" -Output note }
                 try{
-                    Start-Process @startArgs
+                    $proc = Start-Process @startArgs
+                    $exitCode = if($proc){ $proc.ExitCode } else{ $null }
+                    # 0 = OK, 3010/1641 = OK but a reboot is needed; anything else (incl. a killed installer) is a failure
+                    if($null -ne $exitCode -and $exitCode -notin 0, 3010, 1641){
+                        $logHint = if($startArgs.ArgumentList -match [regex]::Escape($logFile)){ " See $logFile" } else{ "" }
+                        MsgFce "ERROR: $($SwSettings.Name) installer exited with code $exitCode.$logHint" -Output error
+                        return
+                    }
+                    if($exitCode -in 3010, 1641){ MsgFce "INFO: $($SwSettings.Name) installed; a reboot is required to finish (exit code $exitCode)." }
                     MsgFce "INFO: $($SwSettings.Name) installation finished."
                     if($PostInstallAction){
                         MsgFce "INFO: Running post-installation tasks..."
