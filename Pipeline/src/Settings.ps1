@@ -121,6 +121,8 @@ $script:GISettingsSchema = [ordered]@{
                Help = '2 keeps production plus the previous one for rollback. The root (Master) snapshot is never removed and does not count.' }
             @{ Key = 'MaxChainDepth'; Label = 'Maximum chain depth'; Type = 'int'; Min = 2; Max = 31; Required = $true }
             @{ Key = 'Prune'; Label = 'Delete old snapshots'; Type = 'bool'; Warning = 'When off, retention only reports what it would delete. When on, old snapshots are removed and disks consolidated.' }
+            @{ Key = 'CleanupFailedRuns'; Label = 'Clean up after failed runs'; Type = 'bool'; Default = $true
+               Help = "At the start of Maintain: if the golden VM still sits on a failed run's pre-maint snapshot, revert to it first, then remove pre-maint snapshots of failed, rejected or rolled-back runs. When off, Maintain only reports what it would do." }
             @{ Key = 'ProtectAncestors'; Label = 'Protect ancestors of pending pushes'; Type = 'bool'; Confirm = $true
                Help = 'Chain mode: keeps every parent of a snapshot a push is still pending for. Tree mode: keeps every parent of any in-use snapshot.'
                Warning = 'Turning this off can delete a parent snapshot that a pending push depends on.' }

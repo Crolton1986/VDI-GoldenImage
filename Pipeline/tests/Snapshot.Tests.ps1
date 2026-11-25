@@ -353,3 +353,84 @@ Describe 'Invoke-GIGoldenConsolidation' {
     }
 }
 
+
+Describe 'Get-GIFailedRunSnapshots' {
+    BeforeAll {
+        function script:S($Id, $Name, $Parent, [switch] $Current, $DaysAgo = 1) {
+            [pscustomobject]@{ Id = $Id; Name = $Name; Created = (Get-Date).AddDays(-$DaysAgo); ParentId = $Parent; IsCurrent = [bool]$Current }
+        }
+        $script:status = @{ '20261124-143957' = 'Failed'; '20261120-100000' = 'Completed'; '20261125-090000' = 'AwaitingApproval'; '20261110-100000' = 'Rejected' }
+    }
+
+    It 'reverts to the outer of two nested leftovers when the VM sits on the inner one' {
+        $snaps = @(
+            (S 'm' 'Master' $null -DaysAgo 90)
+            (S 'b' 'Baseline 26.11.20.1249' 'm' -DaysAgo 5)
+            (S 'p1' 'pre-maint-20261124-143957' 'b' -DaysAgo 2)
+            (S 'p2' 'pre-maint-20261124-143957' 'p1' -Current -DaysAgo 1)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -CurrentRunId '20261126-010101'
+        $r.RevertTo.Id | Should -Be 'p1'
+        $r.RevertTo.RunStatus | Should -Be 'Failed'
+        @($r.Leftovers).Id | Should -Be @('p1', 'p2')
+    }
+
+    It 'does not revert when the VM sits on a Baseline, but still lists dead-branch leftovers' {
+        $snaps = @(
+            (S 'b' 'Baseline 26.11.20.1249' $null -Current -DaysAgo 5)
+            (S 'p1' 'pre-maint-20261124-143957' 'b' -DaysAgo 2)
+            (S 'p2' 'pre-maint-20261124-143957' 'p1' -DaysAgo 1)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -CurrentRunId '20261126-010101'
+        $r.RevertTo | Should -BeNullOrEmpty
+        @($r.Leftovers).Id | Should -Be @('p1', 'p2')
+    }
+
+    It 'leaves snapshots of active or completed runs and the current run alone' {
+        $snaps = @(
+            (S 'b' 'Baseline 26.11.20.1249' $null -DaysAgo 5)
+            (S 'pc' 'pre-maint-20261120-100000' 'b' -DaysAgo 4)
+            (S 'pa' 'pre-maint-20261125-090000' 'b' -DaysAgo 3)
+            (S 'pn' 'pre-maint-20261126-010101' 'pa' -Current -DaysAgo 0)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -CurrentRunId '20261126-010101'
+        @($r.Leftovers) | Should -BeNullOrEmpty
+        $r.RevertTo | Should -BeNullOrEmpty
+    }
+
+    It 'treats a run with no run file as finished and accepts the -HHmmss suffix' {
+        $snaps = @(
+            (S 'b' 'Baseline' $null -DaysAgo 5)
+            (S 'px' 'pre-maint-20261101-010101-093000' 'b' -Current -DaysAgo 2)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus @{} -CurrentRunId '20261126-010101'
+        $r.RevertTo.Id | Should -Be 'px'
+        $r.RevertTo.RunStatus | Should -Be 'Missing'
+    }
+
+    It 'stops the revert walk at the first snapshot that is not a leftover' {
+        $snaps = @(
+            (S 'pr' 'pre-maint-20261110-100000' $null -DaysAgo 10)
+            (S 'b' 'Baseline 26.11.20.1249' 'pr' -DaysAgo 5)
+            (S 'p1' 'pre-maint-20261124-143957' 'b' -Current -DaysAgo 2)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -CurrentRunId '20261126-010101'
+        $r.RevertTo.Id | Should -Be 'p1'
+        @($r.Leftovers).Id | Should -Be @('pr', 'p1')
+    }
+
+    It 'skips protected names and ignores non-pipeline snapshots' {
+        $snaps = @(
+            (S 'x' 'pre-maint-manual-test' $null -DaysAgo 3)
+            (S 'p1' 'pre-maint-20261124-143957' 'x' -Current -DaysAgo 2)
+        )
+        $r = Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -ProtectedNames @('pre-maint-20261124-143957')
+        @($r.Leftovers) | Should -BeNullOrEmpty
+    }
+
+    It 'gives ConvertTo-GISnapshotInfo an IsCurrent flag, false when the source has none' {
+        $i = [pscustomobject]@{ Id = 's1'; Name = 'GI-1'; Created = (Get-Date); ParentSnapshotId = $null } | ConvertTo-GISnapshotInfo
+        $i.IsCurrent | Should -BeFalse
+        ([pscustomobject]@{ Id = 's2'; Name = 'GI-2'; Created = (Get-Date); ParentSnapshotId = 's1'; IsCurrent = $true } | ConvertTo-GISnapshotInfo).IsCurrent | Should -BeTrue
+    }
+}

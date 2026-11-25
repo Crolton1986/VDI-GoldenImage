@@ -146,7 +146,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     MachineReadyTimeoutMin = 60
   }
   Snapshots = @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true
-                ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15 }   # Prune=$false => report only
+                ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15; CleanupFailedRuns = $true }   # Prune=$false => report only
   Promotion = @{
     AutoPromote = $false
     MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }   # next window used when no -StartTime given
@@ -341,8 +341,8 @@ Background steps run as `pwsh -NoProfile -File Pipeline/Invoke-GISetupStep.ps1 -
 ## Maintain sub-steps
 
 `run.stages.Maintain.steps` is rebuilt at the start of every Maintain attempt from the config:
-`SafetySnapshot, PowerOn, CopyScript, CopyInstallers, EnableUpdates, WindowsUpdate, Pkg:<Action>..., Reboot, Manifest, Finalize, PowerOff`.
-Steps that don't apply are `Skipped` with the reason as message. `resumable` steps (SafetySnapshot, EnableUpdates,
+`RevertFailedRun, SafetySnapshot, RemoveFailedRunSnapshots, PowerOn, CopyScript, CopyInstallers, EnableUpdates, WindowsUpdate, Pkg:<Action>..., Reboot, Manifest, Finalize, PowerOff`.
+Steps that don't apply are `Skipped` with the reason as message. `resumable` steps (RevertFailedRun, SafetySnapshot, RemoveFailedRunSnapshots, EnableUpdates,
 WindowsUpdate, Pkg:*) that succeeded before the resume point keep their result on a retry and aren't run again;
 all other steps run on every attempt. Resume happens when the previous attempt left a step Failed or Running, or
 when `-FromStep` is given. A snapshot revert task on the VM (vCenter event `VirtualMachine.revertToSnapshot` or
@@ -354,3 +354,15 @@ when `-FromStep` is given. A snapshot revert task on the VM (vCenter event `Virt
 - Package steps call `Invoke-GIGuestAction -TimeoutMin <GoldenImage.ActionTimeoutMin>`, which runs the guest command
   with `Invoke-VMScript -RunAsync` and polls it; on timeout it stops processes started from the guest `Install` folder
   and `msiexec`, then fails the step.
+
+### Failed-run safety snapshots
+
+`Get-GIFailedRunSnapshots -Snapshots -RunStatus -CurrentRunId -ProtectedNames` (pure) treats `pre-maint-<RunId>[-HHmmss]`
+as a leftover when its run is Failed, Rejected, RolledBack, Cancelled or its run file is missing, and it isn't the
+current run's or a protected name. `RevertTo` is the oldest leftover in the unbroken chain of leftovers that ends at
+the VM's current snapshot (`$null` when the current snapshot isn't a leftover). `Get-GIFailedRunSnapshotPlan` feeds it
+from `Get-Snapshot` and the run files. With `Snapshots.CleanupFailedRuns` (default on), Maintain's `RevertFailedRun`
+step reverts to `RevertTo` (VM must be off) and `RemoveFailedRunSnapshots` removes the leftovers oldest first after the
+new safety snapshot, with consolidation and a Horizon re-check after each. Removal is skipped while Horizon usage
+can't be read or a push is pending. When the setting is off, both steps only report. A safety snapshot is matched
+to its run by snapshot id, not name. The revert check that forces a full restart ignores Maintain's own revert.

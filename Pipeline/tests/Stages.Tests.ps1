@@ -505,24 +505,36 @@ Describe 'Invoke-GIStageMaintain' {
             function script:Start-VM { param($VM, [switch] $Confirm, $ErrorAction) }
             function script:Stop-VMGuest { param($VM, [switch] $Confirm, $ErrorAction) }
             function script:Get-VIEvent { param($Entity, $Start, $MaxSamples, $ErrorAction) }
+            function script:Set-VM { param($VM, $Snapshot, [switch] $Confirm, $ErrorAction) }
+            function script:Remove-Snapshot { param($Snapshot, [switch] $Confirm, $ErrorAction) }
+        }
+        function script:New-PSnap($Id, $Name, $Parent = $null, [switch] $Current, $MinutesAgo = 60) {
+            [pscustomobject]@{ Id = $Id; Name = $Name; Created = (Get-Date).AddMinutes(-$MinutesAgo); ParentSnapshotId = $Parent; IsCurrent = [bool]$Current }
         }
         $cfg.GoldenImage = @{ VmName = 'GI-VM'; GuestCredentialSecret = 'GI-GuestAdmin'; ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1'
             CopyScript = $false; Actions = @('VmTools', 'Horizon'); FinalizeAction = 'Finalize'; WindowsUpdate = @{ Enabled = $true } }
         Set-ModVar Calls ([System.Collections.Generic.List[string]]::new())
         Set-ModVar FailAction $null
         Set-ModVar Events @()
-        Set-ModVar Snap $null
+        Set-ModVar Snaps @()
+        Set-ModVar Usage @{ Current = @(); Pending = @(); Unresolved = @() }
+        Set-ModVar Reverted ([System.Collections.Generic.List[string]]::new())
+        Set-ModVar Removed ([System.Collections.Generic.List[string]]::new())
         $cred = [pscredential]::new('admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
         Set-ModVar Cred $cred
         Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { $global:GITestCtx.Cred }
         Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; PowerState = 'PoweredOff' } }
         Mock -ModuleName VDI-GIPipeline Start-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; PowerState = 'PoweredOn' } }
-        Mock -ModuleName VDI-GIPipeline Get-Snapshot { $global:GITestCtx.Snap }
+        Mock -ModuleName VDI-GIPipeline Get-Snapshot { $global:GITestCtx.Snaps }
+        Mock -ModuleName VDI-GIPipeline Set-VM { $global:GITestCtx.Reverted.Add([string]$Snapshot.Id) }
+        Mock -ModuleName VDI-GIPipeline Remove-Snapshot { $global:GITestCtx.Removed.Add([string]$Snapshot.Id) }
+        Mock -ModuleName VDI-GIPipeline Get-GISnapshotUsage { $global:GITestCtx.Usage }
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGoldenConsolidation { [pscustomobject]@{ Needed = $true; Ok = $true; Message = 'Disks consolidated' } }
         Mock -ModuleName VDI-GIPipeline New-Snapshot { [pscustomobject]@{ Id = 'snap-safe'; Name = $Name } }
         Mock -ModuleName VDI-GIPipeline Wait-GIGuestReady { }
         Mock -ModuleName VDI-GIPipeline Restart-GIGuest { $global:GITestCtx.Calls.Add('Reboot') }
         Mock -ModuleName VDI-GIPipeline Stop-VMGuest { }
-        Mock -ModuleName VDI-GIPipeline Get-VIEvent { $global:GITestCtx.Events }
+        Mock -ModuleName VDI-GIPipeline Get-VIEvent { $global:GITestCtx.Events | Where-Object { $_.CreatedTime -ge $Start } }
         Mock -ModuleName VDI-GIPipeline Invoke-GIGuestWindowsUpdate { $global:GITestCtx.Calls.Add('WU'); @{ Passes = @([pscustomobject]@{ pass = 1; installed = 3 }); Warning = '' } }
         Mock -ModuleName VDI-GIPipeline Invoke-GIGuestAction {
             $global:GITestCtx.Calls.Add($Action)
@@ -537,7 +549,7 @@ Describe 'Invoke-GIStageMaintain' {
     It 'runs every step in order on a fresh run and records them' {
         $r = Invoke-GIStageMaintain -Config $cfg -Run $run
         @($global:GITestCtx.Calls) | Should -Be @('Update', 'WU', 'VmTools', 'Horizon', 'Reboot', 'Exit', 'Finalize')
-        (Steps).id | Should -Be @('SafetySnapshot', 'PowerOn', 'CopyScript', 'CopyInstallers', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Manifest', 'Finalize', 'PowerOff')
+        (Steps).id | Should -Be @('RevertFailedRun', 'SafetySnapshot', 'RemoveFailedRunSnapshots', 'PowerOn', 'CopyScript', 'CopyInstallers', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Manifest', 'Finalize', 'PowerOff')
         @(Steps | Where-Object { $_.status -notin 'Succeeded', 'Skipped' }) | Should -BeNullOrEmpty
         StepStatus 'CopyScript' | Should -Be 'Skipped'
         (Steps | Where-Object id -eq 'Pkg:Horizon').message | Should -Be 'Installed version 1.0'
@@ -561,7 +573,7 @@ Describe 'Invoke-GIStageMaintain' {
         Set-ModVar FailAction 'Horizon'
         { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
         Set-ModVar FailAction $null
-        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        Set-ModVar Snaps @(New-PSnap 'snap-safe' "pre-maint-$($run.runId)")
         $global:GITestCtx.Calls.Clear()
         $null = Invoke-GIStageMaintain -Config $cfg -Run $run
         @($global:GITestCtx.Calls) | Should -Be @('Horizon', 'Reboot', 'Exit', 'Finalize')
@@ -574,7 +586,7 @@ Describe 'Invoke-GIStageMaintain' {
         Set-ModVar FailAction 'Horizon'
         { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
         Set-ModVar FailAction $null
-        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        Set-ModVar Snaps @(New-PSnap 'snap-safe' "pre-maint-$($run.runId)")
         $global:GITestCtx.Calls.Clear()
         $null = Invoke-GIStageMaintain -Config $cfg -Run $run -FromStep 'Pkg:VmTools'
         @($global:GITestCtx.Calls) | Should -Be @('VmTools', 'Horizon', 'Reboot', 'Exit', 'Finalize')
@@ -584,7 +596,7 @@ Describe 'Invoke-GIStageMaintain' {
         Set-ModVar FailAction 'Horizon'
         { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
         Set-ModVar FailAction $null
-        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $true })
+        Set-ModVar Snaps @(New-PSnap 'snap-safe' "pre-maint-$($run.runId)" -Current)
         Set-ModVar Events @([pscustomobject]@{ CreatedTime = (Get-Date); UserName = 'DOM\admin'; Info = [pscustomobject]@{ DescriptionId = 'VirtualMachine.revertToSnapshot' } })
         $global:GITestCtx.Calls.Clear()
         $null = Invoke-GIStageMaintain -Config $cfg -Run $run
@@ -597,7 +609,7 @@ Describe 'Invoke-GIStageMaintain' {
         Set-ModVar FailAction 'Horizon'
         { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
         Set-ModVar FailAction $null
-        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        Set-ModVar Snaps @(New-PSnap 'snap-safe' "pre-maint-$($run.runId)")
         Set-ModVar Events @([pscustomobject]@{ CreatedTime = (Get-Date); UserName = 'DOM\admin'; Info = [pscustomobject]@{ DescriptionId = 'VirtualMachine.revertToSnapshot' } })
         $null = Invoke-GIStageMaintain -Config $cfg -Run $run
         Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 2 -Exactly
@@ -613,6 +625,61 @@ Describe 'Invoke-GIStageMaintain' {
         $null = Invoke-GIStageMaintain -Config $cfg -Run $run
         $global:GITestCtx.Calls | Should -Contain 'WU'
         $global:GITestCtx.Calls | Should -Contain 'VmTools'
+    }
+
+    It 'reverts to a failed run''s outer safety snapshot, then removes the leftovers after its own snapshot' {
+        $failed = New-GIRun -Config $cfg -RunId '20261124-143957'; $failed.status = 'Failed'; Save-GIRun -Config $cfg -Run $failed
+        Set-ModVar Snaps @(
+            (New-PSnap 'b' 'Baseline 26.11.20.1249' -MinutesAgo 600)
+            (New-PSnap 'p1' 'pre-maint-20261124-143957' 'b' -MinutesAgo 300)
+            (New-PSnap 'p2' 'pre-maint-20261124-143957' 'p1' -Current -MinutesAgo 200)
+        )
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Reverted) | Should -Be @('p1')
+        @($global:GITestCtx.Removed) | Should -Be @('p1', 'p2')
+        (Steps | Where-Object id -eq 'RevertFailedRun').message | Should -Be 'Reverted to pre-maint-20261124-143957 (run 20261124-143957 is Failed)'
+        (Steps | Where-Object id -eq 'RemoveFailedRunSnapshots').message | Should -Be 'Removed 2: pre-maint-20261124-143957, pre-maint-20261124-143957'
+        Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 1 -Exactly
+    }
+
+    It 'leaves snapshots of a run that is still awaiting approval' {
+        $other = New-GIRun -Config $cfg -RunId '20261124-143957'; $other.status = 'AwaitingApproval'; Save-GIRun -Config $cfg -Run $other
+        Set-ModVar Snaps @((New-PSnap 'p1' 'pre-maint-20261124-143957' -Current))
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Reverted) | Should -BeNullOrEmpty
+        @($global:GITestCtx.Removed) | Should -BeNullOrEmpty
+        (Steps | Where-Object id -eq 'RemoveFailedRunSnapshots').message | Should -Be 'No failed-run safety snapshots'
+    }
+
+    It 'only reports when Snapshots.CleanupFailedRuns is off' {
+        $cfg.Snapshots = @{ CleanupFailedRuns = $false }
+        Set-ModVar Snaps @((New-PSnap 'p1' 'pre-maint-20261101-010101' -Current))
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Reverted) | Should -BeNullOrEmpty
+        @($global:GITestCtx.Removed) | Should -BeNullOrEmpty
+        (Steps | Where-Object id -eq 'RevertFailedRun').message | Should -BeLike 'Would revert to pre-maint-20261101-010101*'
+        (Steps | Where-Object id -eq 'RemoveFailedRunSnapshots').message | Should -BeLike 'Would remove 1:*'
+    }
+
+    It 'removes nothing while a push is pending' {
+        Set-ModVar Usage @{ Current = @(); Pending = @('Baseline 26.11.25.0100'); Unresolved = @() }
+        Set-ModVar Snaps @((New-PSnap 'b' 'Baseline 26.11.20.1249' -Current), (New-PSnap 'p1' 'pre-maint-20261101-010101' 'b'))
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Removed) | Should -BeNullOrEmpty
+        (Steps | Where-Object id -eq 'RemoveFailedRunSnapshots').message | Should -BeLike 'Nothing removed: a push is pending*'
+    }
+
+    It 'does not treat its own revert as a user revert when resuming' {
+        Set-ModVar Snaps @((New-PSnap 'b' 'Baseline' -MinutesAgo 600), (New-PSnap 'p1' 'pre-maint-20261101-010101' 'b' -Current))
+        # vCenter's clock: the event lands a few seconds after the step times recorded on this host
+        Set-ModVar Events @([pscustomobject]@{ CreatedTime = (Get-Date).AddSeconds(5); UserName = 'svc'; Info = [pscustomobject]@{ DescriptionId = 'VirtualMachine.revertToSnapshot' } })
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        $global:GITestCtx.Calls.Clear()
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Calls) | Should -Be @('Horizon', 'Reboot', 'Exit', 'Finalize')
+        @($global:GITestCtx.Reverted).Count | Should -Be 1
     }
 
     It 'passes the package timeout to the guest action' {

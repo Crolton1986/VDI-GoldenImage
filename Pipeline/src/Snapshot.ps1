@@ -146,6 +146,7 @@ function ConvertTo-GISnapshotInfo {
             Name     = $Snapshot.Name
             Created  = $Snapshot.Created
             ParentId = if ($Snapshot.ParentSnapshotId) { [string]$Snapshot.ParentSnapshotId } else { $null }
+            IsCurrent = [bool]($Snapshot.PSObject.Properties['IsCurrent'] -and $Snapshot.IsCurrent)
             Raw      = $Snapshot
         }
     }
@@ -417,6 +418,76 @@ function Invoke-GISnapshotLifecycle {
         Warnings      = @($warnings)
         Errors        = @($errors)
     }
+}
+
+#----- Safety snapshots left by failed runs -----
+
+# A run in one of these states will never use its pre-maint safety snapshot again
+$script:GIFailedRunStatuses = @('Failed', 'Rejected', 'RolledBack', 'Cancelled', 'Missing')
+
+function Get-GIFailedRunSnapshots {
+    <#
+    .SYNOPSIS
+      Pure decision logic. Finds pre-maint-<RunId>[-HHmmss] snapshots of runs that failed, were rejected or rolled
+      back, or no longer exist (never the current run's, never a protected name), and the snapshot to revert to.
+    .DESCRIPTION
+      Input snapshots need Id, Name, Created, ParentId and IsCurrent. $RunStatus maps run id -> status ('Missing'
+      when the run file is gone). RevertTo is set only when the VM's current snapshot is a leftover: walking up
+      from it through leftovers, it's the oldest one, which holds the state before that failed run touched the VM.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Snapshots,
+        [Parameter(Mandatory)] [hashtable] $RunStatus,
+        [string] $CurrentRunId = '',
+        [AllowEmptyCollection()] [string[]] $ProtectedNames = @()
+    )
+    $byId = @{}
+    foreach ($s in $Snapshots) { $byId[[string]$s.Id] = $s }
+    $leftover = @{}
+    foreach ($s in $Snapshots) {
+        if ([string]$s.Name -notmatch '^pre-maint-(\d{8}-\d{6})(-\d{6})?$') { continue }
+        $rid = $Matches[1]
+        if ($rid -eq $CurrentRunId -or $ProtectedNames -contains [string]$s.Name) { continue }
+        $status = if ($RunStatus.ContainsKey($rid) -and $RunStatus[$rid]) { [string]$RunStatus[$rid] } else { 'Missing' }
+        if ($script:GIFailedRunStatuses -notcontains $status) { continue }
+        $leftover[[string]$s.Id] = [pscustomobject]@{
+            Id = [string]$s.Id; Name = [string]$s.Name; Created = $s.Created; ParentId = $s.ParentId
+            RunId = $rid; RunStatus = $status; Raw = $(if ($s.PSObject.Properties['Raw']) { $s.Raw } else { $null })
+        }
+    }
+    $revertTo = $null
+    $cur = $Snapshots | Where-Object { $_.PSObject.Properties['IsCurrent'] -and $_.IsCurrent } | Select-Object -First 1
+    $guard = 0
+    while ($cur -and $leftover.ContainsKey([string]$cur.Id) -and $guard -lt 1000) {
+        $revertTo = $leftover[[string]$cur.Id]
+        $cur = if ($cur.ParentId) { $byId[[string]$cur.ParentId] } else { $null }
+        $guard++
+    }
+    [pscustomobject]@{
+        Leftovers = @($leftover.Values | Sort-Object { [datetime]$_.Created })
+        RevertTo  = $revertTo
+    }
+}
+
+function Get-GIFailedRunSnapshotPlan {
+    # Reads the golden VM's snapshots and the run files, then applies Get-GIFailedRunSnapshots.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] $Run,
+        [Parameter(Mandatory)] $VM,
+        [AllowEmptyCollection()] [string[]] $ProtectedNames = @()
+    )
+    $snaps = @(Get-Snapshot -VM $VM -ErrorAction Stop | ConvertTo-GISnapshotInfo)
+    $status = @{}
+    foreach ($s in $snaps) {
+        if ([string]$s.Name -match '^pre-maint-(\d{8}-\d{6})(-\d{6})?$' -and -not $status.ContainsKey($Matches[1])) {
+            $rid = $Matches[1]
+            $status[$rid] = try { [string](Get-GIRun -Config $Config -RunId $rid).status } catch { 'Missing' }
+        }
+    }
+    Get-GIFailedRunSnapshots -Snapshots $snaps -RunStatus $status -CurrentRunId ([string]$Run.runId) -ProtectedNames $ProtectedNames
 }
 
 function ConvertTo-GIRetentionRecord {

@@ -48,6 +48,7 @@
   Snapshots = @{
     NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true
     ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15
+    CleanupFailedRuns = $true   # revert to / remove pre-maint snapshots of failed runs at the start of Maintain
   }
 
   # Production promotion behaviour

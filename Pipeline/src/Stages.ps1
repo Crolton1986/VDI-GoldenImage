@@ -381,7 +381,9 @@ function Get-GIMaintainStepPlan {
     $hasInstallers = [bool](Resolve-GIInstallerSourceDir -Config $Config)
     $plan = [System.Collections.Generic.List[object]]::new()
     $add = { param($Id, $Label, $Resumable, $Applies = $true, $SkipReason = '') $plan.Add([pscustomobject]@{ Id = $Id; Label = $Label; Resumable = $Resumable; Applies = $Applies; SkipReason = $SkipReason }) }
+    & $add 'RevertFailedRun' 'Revert failed run' $true
     & $add 'SafetySnapshot' 'Safety snapshot' $true
+    & $add 'RemoveFailedRunSnapshots' 'Remove failed-run snapshots' $true
     & $add 'PowerOn' 'Power on, wait for guest' $false
     & $add 'CopyScript' 'Copy guest script' $false ([bool](Get-GIConfigValue $Config 'GoldenImage.CopyScript' $true)) 'CopyScript is off'
     & $add 'CopyInstallers' 'Copy installers' $false $hasInstallers 'No installer folder set'
@@ -459,8 +461,15 @@ function Invoke-GIStageMaintain {
     # A revert since the earlier attempt started throws away its work: resume isn't safe
     $prev = @(Get-GIStepList -Run $Run)
     $resumeFrom = $FromStep
-    $earliest = @($prev | Where-Object { $_.startedAt } | ForEach-Object { [datetime]$_.startedAt } | Sort-Object) | Select-Object -First 1
-    if ($earliest -and @($prev | Where-Object { $_.status -eq 'Succeeded' -and $_.resumable -and $_.id -ne 'SafetySnapshot' }).Count) {
+    $snapSteps = @('RevertFailedRun', 'SafetySnapshot', 'RemoveFailedRunSnapshots')
+    $earliest = @($prev | Where-Object { $_.startedAt -and $_.id -ne 'RevertFailedRun' } | ForEach-Object { [datetime]$_.startedAt } | Sort-Object) | Select-Object -First 1
+    # Our own revert to a failed run's snapshot isn't a reason to restart
+    $ownRevert = @($prev | Where-Object { $_.id -eq 'RevertFailedRun' -and $_.status -eq 'Succeeded' -and $_.endedAt -and $_.message -like 'Reverted to*' }) | Select-Object -First 1
+    if ($earliest -and $ownRevert) {
+        $after = ([datetime]$ownRevert.endedAt).AddMinutes(1)
+        if ($earliest -lt $after) { $earliest = $after }
+    }
+    if ($earliest -and @($prev | Where-Object { $_.status -eq 'Succeeded' -and $_.resumable -and $_.id -notin $snapSteps }).Count) {
         try {
             $rev = Get-GIVmRevertEvent -VM $ctx.vm -Since $earliest
             if ($rev) {
@@ -479,9 +488,25 @@ function Invoke-GIStageMaintain {
     if ($startAt) { Write-GILog -Config $Config -RunId $Run.runId -Message "Maintain resuming at step '$((Get-GIStep -Run $Run -Id $startAt).label)'" }
     $step = { param($Id, $Body) Invoke-GIMaintainStep -Config $Config -Run $Run -Id $Id -Action $Body }
 
+    $cleanup = [bool](Get-GIConfigValue $Config 'Snapshots.CleanupFailedRuns' $true)
+
+    & $step 'RevertFailedRun' {
+        $fr = Get-GIFailedRunSnapshotPlan -Config $Config -Run $Run -VM $ctx.vm
+        if (-not $fr.RevertTo) { return "Nothing to revert: the VM isn't on a failed run's safety snapshot" }
+        $target = $fr.RevertTo
+        if (-not $cleanup) { return "Would revert to $($target.Name) (run $($target.RunId) is $($target.RunStatus)); Snapshots.CleanupFailedRuns is off" }
+        $ctx.vm = Get-VM -Id $ctx.vm.Id
+        if ($ctx.vm.PowerState -ne 'PoweredOff') { throw "Golden VM is $($ctx.vm.PowerState); power it off before reverting to $($target.Name)." }
+        Set-VM -VM $ctx.vm -Snapshot $target.Raw -Confirm:$false -ErrorAction Stop | Out-Null
+        $ctx.vm = Get-VM -Id $ctx.vm.Id
+        Write-GILog -Config $Config -RunId $Run.runId -Level Warn -Message "Reverted golden VM to $($target.Name) (run $($target.RunId) is $($target.RunStatus)) so this run starts from the state before that run."
+        "Reverted to $($target.Name) (run $($target.RunId) is $($target.RunStatus))"
+    }
+
     & $step 'SafetySnapshot' {
         $existing = $Run.safetySnapshot
-        $snap = if ($existing) { Get-Snapshot -VM $ctx.vm -Name $existing.name -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        # By id: a name can repeat (older versions took a second pre-maint with the same name on retry)
+        $snap = if ($existing -and $existing.id) { Get-Snapshot -VM $ctx.vm -ErrorAction SilentlyContinue | Where-Object { [string]$_.Id -eq [string]$existing.id } | Select-Object -First 1 }
         # After a revert, the old safety snapshot is only still "before Maintain" if it's the one the VM went back to
         if ($snap -and (-not $ctx.reverted -or $snap.IsCurrent)) { return "Reusing $($existing.name)" }
         $name = if ($snap) { "pre-maint-$($Run.runId)-$((Get-Date).ToString('HHmmss'))" } else { "pre-maint-$($Run.runId)" }
@@ -489,6 +514,31 @@ function Invoke-GIStageMaintain {
         $Run.safetySnapshot = [pscustomobject]@{ id = [string]$safety.Id; name = $safety.Name }
         Save-GIRun -Config $Config -Run $Run
         "Created $($safety.Name)"
+    }
+
+    & $step 'RemoveFailedRunSnapshots' {
+        # Fail closed like retention: no removal while Horizon usage is unknown or a push is pending
+        try { $usage = Get-GISnapshotUsage -Config $Config }
+        catch { return "Nothing removed: couldn't read pool snapshot usage from Horizon ($($_.Exception.Message))" }
+        if (@($usage.Pending).Count) { return "Nothing removed: a push is pending for $(@($usage.Pending) -join ', ')" }
+        $fr = Get-GIFailedRunSnapshotPlan -Config $Config -Run $Run -VM $ctx.vm -ProtectedNames @(@($usage.Current) + @($usage.Pending))
+        $list = @($fr.Leftovers)
+        if (-not $list.Count) { return 'No failed-run safety snapshots' }
+        $names = ($list | ForEach-Object { $_.Name }) -join ', '
+        if (-not $cleanup) { return "Would remove $($list.Count): $names; Snapshots.CleanupFailedRuns is off" }
+        $removed = [System.Collections.Generic.List[string]]::new()
+        foreach ($l in $list) {
+            Set-GIStep -Config $Config -Run $Run -Id 'RemoveFailedRunSnapshots' -Message "Removing $($l.Name)"
+            # No -RemoveChildren: only this snapshot goes; its changes merge into its child
+            Remove-Snapshot -Snapshot $l.Raw -Confirm:$false -ErrorAction Stop
+            $removed.Add($l.Name)
+            $c = Invoke-GIGoldenConsolidation -Config $Config -VM $ctx.vm
+            if (-not $c.Ok) { throw "$($c.Message) after removing '$($l.Name)' (removed so far: $($removed -join ', ')). Consolidate the VM in vCenter." }
+            $broken = @(@((Get-GISnapshotUsage -Config $Config).Unresolved) | Where-Object { $_ -notin @($usage.Unresolved) })
+            if ($broken.Count) { throw "After removing '$($l.Name)', Horizon can no longer resolve the image snapshot for: $($broken -join ', '). Stopped removing snapshots." }
+        }
+        Write-GILog -Config $Config -RunId $Run.runId -Message "Removed failed-run safety snapshots: $($removed -join ', ')"
+        "Removed $($removed.Count): $($removed -join ', ')"
     }
 
     & $step 'PowerOn' {
