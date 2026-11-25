@@ -186,6 +186,9 @@ a{color:var(--link)}
 .chip.run,.badge.st-running,.badge.st-sched{background:var(--run-bg);color:var(--run-fg)}
 .chip.bad,.badge.st-bad{background:var(--bad-bg);color:var(--bad-fg)}
 .stale{opacity:.6;filter:grayscale(1)}
+.invpick{margin-top:6px;max-width:100%}
+details.advanced{margin:14px 0;border:1px solid var(--line);border-radius:8px;padding:8px 12px}details.advanced>summary{cursor:pointer;font-weight:600}
+.conn{font-weight:400;margin-left:6px}
 .chip.idle,.badge.st-skip,.badge.st-pending{background:var(--idle-bg);color:var(--idle-fg)}
 .icon{font-weight:700;margin-right:4px}
 .icon.st-ok{color:var(--ok-fg)}.icon.st-bad{color:var(--bad-fg)}.icon.st-running{color:var(--run-fg)}.icon.st-pending,.icon.st-skip{color:var(--mut)}

@@ -183,6 +183,7 @@ Start-PodeServer -Quiet -Threads 4 {
             $name = Set-GISettingsSecretName -Config $cfg -Section $sk -Key $key -By $user
             Set-GISecretFromForm -Name $name -UserName ([string]$WebEvent.Data['username']) -Password ([string]$WebEvent.Data['password'])
             Write-GIAudit -Config $cfg -User $user -Action 'credential.set' -Target $name -Detail @{ section = $sk; userName = ([string]$WebEvent.Data['username']).Trim() }
+            Set-GIConnectionStatus -Config $cfg -Section $sk -Clear
         } catch {
             $page = New-GISettingsSectionPage -Schema $schema -SectionKey $sk -SectionData (Get-GISettingsSection -Config $cfg -Section $sk) `
                 -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId "settings:$sk") -Notice "Credential not stored: $($_.Exception.Message)" -IsHttps $c.IsHttps

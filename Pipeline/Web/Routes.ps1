@@ -127,7 +127,7 @@ function Send-GIFileRoute {
 
 #----- Settings -----
 
-function Get-GISectionNotice { param($WebEvent) switch ($WebEvent.Query['r']) { 'saved' { 'Saved. Changes apply from the next run.' } 'nochange' { 'Nothing changed.' } 'cred' { 'Credential stored.' } default { '' } } }
+function Get-GISectionNotice { param($WebEvent) switch ($WebEvent.Query['r']) { 'saved' { 'Saved. Changes apply from the next run.' } 'nochange' { 'Nothing changed.' } 'cred' { 'Credential stored.' } 'recheck' { 'Checked the installer folder again.' } default { '' } } }
 
 function Get-GIImageSettingsBody {
     # Body HTML for one per-image section (also used to re-render with errors).
@@ -151,9 +151,11 @@ function Get-GIImageSettingsBody {
     $label = (@(Get-GIImageSettingsSections | Where-Object { $_.Key -eq $Section }) | Select-Object -First 1).Label
     $p = @{ Schema = $schema; SectionKey = $Section; SectionData = $data; Errors = $Errors; Token = $token; Notice = $Notice; IsHttps = [bool]$Context.IsHttps
         FormAction = "/images/$($D.Id)/settings/$Section"; CredAction = "/images/$($D.Id)/settings/$Section/credential"
-        DescSuffix = "These settings apply to $($D.Summary.name) only and take effect from the next run."; BodyOnly = $true }
+        DescSuffix = "These settings apply to $($D.Summary.name) only and take effect from the next run."; BodyOnly = $true; ImageName = [string]$D.Summary.name }
     if (-not $ctx.IsAdmin) { $p.Disabled = $true }
-    return New-GISettingsSectionPage @p
+    $body = New-GISettingsSectionPage @p
+    if ($ctx.IsAdmin -and $schema[$Section]['Test']) { $body += New-GITestConnectionCard -Section $Section -ImageId $D.Id }
+    return $body
 }
 
 function Send-GIImageSettingsRoute {
@@ -251,7 +253,12 @@ function Get-GIGlobalSettingsBody {
     $data = Get-GISettingsSection -Config $cfg -Section $Section
     if ($Values) { foreach ($k in $Values.Keys) { $data.Values[$k] = $Values[$k] } }
     $n = @(Get-GIImageEntries -Config $cfg).Count
-    $p = @{ Schema = $schema; SectionKey = $Section; SectionData = $data; Errors = $Errors; Notice = $Notice; IsHttps = [bool]$Context.IsHttps; BodyOnly = $true
+    $status = ''
+    if ($schema[$Section]['Test']) {
+        $cs = Get-GIConnectionStatus -Config $cfg -Section $Section
+        $status = New-GIConnectionChipHtml -State $cs.State -At $cs.At
+    }
+    $p = @{ Schema = $schema; SectionKey = $Section; SectionData = $data; Errors = $Errors; Notice = $Notice; IsHttps = [bool]$Context.IsHttps; BodyOnly = $true; StatusHtml = $status
         Token = (Get-GIFormToken -Secret $Context.FormSecret -User $user -RunId "settings:$Section")
         DescSuffix = "Used by $(if ($n -eq 1) { 'the golden image' } else { "all $n golden images" }). Changes apply from the next run." }
     if (-not $ctx.IsAdmin) { $p.Disabled = $true }

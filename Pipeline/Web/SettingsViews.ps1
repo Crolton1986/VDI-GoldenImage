@@ -76,11 +76,70 @@ function Get-GIControlHtml {
     }
 }
 
+function Get-GIInventoryPickHtml {
+    <# Hidden until the page script loads vCenter / Horizon names; the text input next to it stays the field, so typing always works. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][ValidateSet('vms', 'pools')][string]$Kind, [string]$Label)
+    $what = if ($Kind -eq 'vms') { 'vCenter' } else { 'Horizon' }
+    "<select class=""invpick"" data-inv-pick=""$Kind"" hidden aria-label=""$(ConvertTo-GIHtml "$Label, choose from $what")""></select>"
+}
+
+function Get-GIInventoryScript {
+    <# Fills every select[data-inv-pick] from /api/inventory. Items used by another golden image are listed but disabled. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    @'
+<script>
+document.addEventListener('DOMContentLoaded',function(){var picks=[].slice.call(document.querySelectorAll('select[data-inv-pick]'));var st=document.getElementById('inv-status');
+if(!picks.length||!window.GI){return}
+var form=document.getElementById('settings-form'),self=form?form.getAttribute('data-image-name')||'':'';
+function say(t){if(st){st.textContent=t}}
+function fill(sel,list,input){sel.textContent='';var o=document.createElement('option');o.value='';o.textContent='Choose from the list...';sel.appendChild(o);
+list.forEach(function(it){var other=it.usedBy&&it.usedBy!==self,op=document.createElement('option');op.value=it.name;op.textContent=it.name+(other?' (used by '+it.usedBy+')':'');if(other){op.disabled=true}sel.appendChild(op)});
+if(input&&input.value){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===input.value&&!sel.options[i].disabled){sel.selectedIndex=i}}}
+sel.hidden=list.length===0}
+document.addEventListener('change',function(e){var s=e.target;if(!s||!s.matches||!s.matches('select[data-inv-pick]')||!s.value){return}
+var input=s.parentNode.querySelector('input[data-inv]');if(input){input.value=s.value;input.dispatchEvent(new Event('input',{bubbles:true}))}});
+say('Loading names from vCenter and Horizon...');
+window.GI.getJson('/api/inventory').then(function(r){
+if(!r.ok){say('Could not load names from vCenter and Horizon ('+(r.error||'no answer')+'). Type the name instead.');return}
+var inv=r.data,errs=inv.errors||[];
+picks.forEach(function(sel){var list=inv[sel.getAttribute('data-inv-pick')]||[];fill(sel,list,sel.parentNode.querySelector('input[data-inv]'))});
+say(errs.length?errs.join(' ')+' Type the name for anything that is not listed.':'Names loaded. Items used by another golden image are disabled.')})});
+</script>
+'@
+}
+
+function Get-GIPackageStepsText {
+    <# One package is one Maintain step ("Install <name>"), after Windows Update. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([int]$Count)
+    if ($Count -eq 0) { return 'No packages ticked: the run installs nothing after Windows Update.' }
+    "$Count package$(if ($Count -ne 1) { 's' }) ticked: the run gets $Count install step$(if ($Count -ne 1) { 's' }) after Windows Update."
+}
+
+function Get-GIPackageStepsScript {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    @'
+<script>
+(function(){var out=document.getElementById('pkg-steps');if(!out){return}
+document.addEventListener('change',function(e){var c=e.target;if(!c||!c.matches||!c.matches('input[data-pkg-name]')){return}
+var n=document.querySelectorAll('input[data-pkg-name]:checked').length,nm=c.getAttribute('data-pkg-name');
+out.textContent=(c.checked?'Ticking '+nm+' adds 1 step (Install '+nm+'). ':'Unticking '+nm+' removes 1 step. ')+(n===0?'No install steps left.':n+(n===1?' install step':' install steps')+' after Windows Update.')})})();
+</script>
+'@
+}
+
 function Get-GIPackagesFieldHtml {
     <# Checkbox table for the 'packages' field. $Installers is Get-GIInstallerStatus output; without it only the checkboxes render. #>
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)]$Field, $Value, $Installers = $null)
+    param([Parameter(Mandatory)]$Field, $Value, $Installers = $null, [string]$RecheckHref = '')
     $fk = [string]$Field.Key
     $selected = @(@($Value) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
     $rowsByAction = @{}
@@ -96,7 +155,7 @@ function Get-GIPackagesFieldHtml {
         if ($selected -ccontains $a) { $chk = ' checked' }
         $info = if ($rowsByAction.ContainsKey($a)) { $rowsByAction[$a] } else { $null }
         $name = if ($info) { [string]$info.Name } else { $a }
-        $row = "<tr><td><input type=""checkbox"" id=""$id"" name=""$(ConvertTo-GIHtml $fk)"" value=""$(ConvertTo-GIHtml $a)""$chk></td>"
+        $row = "<tr><td><input type=""checkbox"" id=""$id"" name=""$(ConvertTo-GIHtml $fk)"" value=""$(ConvertTo-GIHtml $a)"" data-pkg-name=""$(ConvertTo-GIHtml $name)""$chk></td>"
         $row += "<td><label for=""$id"">$(ConvertTo-GIHtml $name)</label><div class=""help"">$(ConvertTo-GIHtml $a)$(if ($info) { " &middot; <code>$(ConvertTo-GIHtml $info.Mask)</code>" })</div></td>"
         if ($showStatus) {
             $file = '<span class="muted">-</span>'
@@ -109,18 +168,20 @@ function Get-GIPackagesFieldHtml {
             }
             $state = if ($info) { [string]$info.State } else { 'NoFolder' }
             $badge = switch ($state) {
-                'Found' { '<span class="badge st-ok">Found</span>' }
-                'Download' { '<span class="badge st-sched">Downloads automatically</span>' }
+                'Found' { New-GIChip -Text 'Found' -Variant ok }
+                'Download' { New-GIChip -Text 'Downloads automatically' -Variant idle }
                 'Missing' {
-                    if ($selected -ccontains $a) { '<span class="badge st-bad">Missing</span>' } else { '<span class="badge st-pending">Missing</span>' }
+                    if ($selected -ccontains $a) { New-GIChip -Text 'Missing' -Variant bad } else { New-GIChip -Text 'Missing' -Variant idle }
                 }
-                default { '<span class="badge st-skip">Not checked</span>' }
+                default { New-GIChip -Text 'Not checked' -Variant idle }
             }
             $row += "<td>$file</td><td>$badge</td>"
         }
         "$row</tr>"
     }
-    $h = "<table class=""edit pkgs""><thead>$head</thead><tbody>$(@($body) -join '')</tbody></table>"
+    $n = $selected.Count
+    $h = "<p class=""help"" id=""pkg-steps"" role=""status"" aria-live=""polite"">$(ConvertTo-GIHtml (Get-GIPackageStepsText -Count $n))</p>"
+    $h += "<table class=""edit pkgs""><thead>$head</thead><tbody>$(@($body) -join '')</tbody></table>"
     if ($showStatus) {
         $folder = [string](Get-GIValue $Installers 'Folder' '')
         $ferr = Get-GIValue $Installers 'FolderError' $null
@@ -128,12 +189,13 @@ function Get-GIPackagesFieldHtml {
         elseif ($folder) {
             $miss = @(@(Get-GIValue $Installers 'Packages' @()) | Where-Object { $_.Selected -and $_.State -eq 'Missing' })
             if ($miss.Count) { $h += "<div class=""testres fail"" role=""status"">$($miss.Count) ticked package(s) have no installer in $(ConvertTo-GIHtml $folder). Preflight will stop the run until you add them or untick them.</div>" }
-            else { $h += "<div class=""help"">Checked $(ConvertTo-GIHtml $folder) just now.</div>" }
+            else { $h += "<div class=""help"">Checked $(ConvertTo-GIHtml $folder) at $((Get-Date).ToString('HH:mm')).</div>" }
         } else {
             $h += '<div class="help">No installer folder set, so the pipeline can''t check installers. They must already be in the Install folder inside the golden VM.</div>'
         }
+        if ($RecheckHref) { $h += "<p><a class=""linkbtn"" href=""$(ConvertTo-GIHtml $RecheckHref)"">Check again</a> <span class=""help"">Reads the folder again. Unsaved changes on this page are lost.</span></p>" }
     }
-    return $h
+    return $h + (Get-GIPackageStepsScript)
 }
 
 function Get-GITableFieldHtml {
@@ -156,7 +218,10 @@ function Get-GITableFieldHtml {
             $ck = [string]$c.Key
             $lab = ConvertTo-GIHtml ("$(Get-GIValue $c 'Label' $ck), row $($i + 1)")
             $extra = ' aria-label="' + $lab + '"'
+            $inv = [string](Get-GIValue $c 'Inventory' '')
+            if ($inv) { $extra += " data-inv=""$(ConvertTo-GIHtml $inv)""" }
             $ctl = Get-GIControlHtml -Field $c -Name ('{0}[{1}].{2}' -f $key, $i, $ck) -Value (Get-GIValue $row $ck) -IdPrefix 'c' -Extra $extra
+            if ($inv) { $ctl += Get-GIInventoryPickHtml -Kind $inv -Label ([string](Get-GIValue $c 'Label' $ck)) }
             $cells += "<td>$ctl</td>"
         }
         $rm = ConvertTo-GIHtml ('{0}[{1}]._remove' -f $key, $i)
@@ -231,7 +296,9 @@ function New-GISettingsSectionPage {
         [string]$CredAction = '',          # default /settings/<section>/credential
         [switch]$Disabled,                 # Viewer and Approver: fields disabled, no save bar, no test or credential forms
         [switch]$BodyOnly,                 # return the section card for embedding in a page
-        [string]$DescSuffix = ''
+        [string]$DescSuffix = '',
+        [string]$ImageName = '',           # lets the inventory pickers tell this image's own VM and pools from other images'
+        [string]$StatusHtml = ''           # chip shown beside the title (connection state)
     )
     $section = Get-GISchemaSection $Schema $SectionKey
     $sk = ConvertTo-GIHtml $SectionKey
@@ -244,7 +311,7 @@ function New-GISettingsSectionPage {
     $title = ConvertTo-GIHtml (Get-GIValue $section 'Title' $SectionKey)
     $fields = @(Get-GIValue $section 'Fields' @())
 
-    $h = "<h2>$title</h2>"
+    $h = "<h2>$title$(if ($StatusHtml) { ' ' + $StatusHtml })</h2>"
     $desc = Get-GIValue $section 'Description'
     if ($desc) { $h += "<p class=""muted"">$(ConvertTo-GIHtml $desc)$(if ($DescSuffix) { ' ' + (ConvertTo-GIHtml $DescSuffix) })</p>" }
     if ($Notice) { $h += "<div class=""notice"" role=""status"">$(ConvertTo-GIHtml $Notice)</div>" }
@@ -283,10 +350,14 @@ function New-GISettingsSectionPage {
         $secretBlocks = ''
  $formStart = $h.Length
         $act = if ($FormAction) { ConvertTo-GIHtml $FormAction } else { "/settings/$sk" }
-        $h += "<form method=""post"" action=""$act"" class=""settings-form"" id=""settings-form""$(if (-not $Disabled) { ' data-savebar' })>$(Get-GITokenInput $Token)"
+        $imgAttr = ''
+        if ($ImageName) { $imgAttr = " data-image-name=""$(ConvertTo-GIHtml $ImageName)""" }
+        $h += "<form method=""post"" action=""$act"" class=""settings-form"" id=""settings-form""$(if (-not $Disabled) { ' data-savebar' })$imgAttr>$(Get-GITokenInput $Token)"
+        $adv = ''; $advOpen = $false; $needInv = $false
         foreach ($f in $fields) {
             $fk = [string]$f.Key
             $type = [string](Get-GIValue $f 'Type' 'string')
+            $mark = $h.Length
             if ($type -eq 'secret') {
                 if (-not $Disabled) { $secretBlocks += Get-GISecretBlockHtml -Field $f -Value (Get-GIValue $values $fk $null) -SectionKey $SectionKey -Token $Token -IsHttps $IsHttps -Action $CredAction }
                 else { $st = Get-GIValue (Get-GIValue $values $fk $null) 'IsSet' $false; $h += "<div class=""field""><div class=""lbl"">$(ConvertTo-GIHtml (Get-GIValue $f 'Label' $fk))</div><span class=""chip $(if ($st) { 'ok' } else { 'idle' })"">$(if ($st) { 'Saved' } else { 'Not set' })</span></div>" }
@@ -323,10 +394,18 @@ function New-GISettingsSectionPage {
                     $h += "<div class=""lbl"">$label</div>$(Get-GITableFieldHtml -Field $f -Value $v)"
                 }
                 'packages' {
-                    $h += "<div class=""lbl"">$label</div>$(Get-GIPackagesFieldHtml -Field $f -Value $v -Installers (Get-GIValue $SectionData 'Installers' $null))"
+                    $h += "<div class=""lbl"">$label</div>$(Get-GIPackagesFieldHtml -Field $f -Value $v -Installers (Get-GIValue $SectionData 'Installers' $null) -RecheckHref $(if ($FormAction) { $FormAction } else { "/settings/$SectionKey" }))"
                 }
                 default {
-                    $h += "<label for=""$fid"">$label</label>$(Get-GIControlHtml -Field $f -Name $fk -Value $v)"
+                    $inv = [string](Get-GIValue $f 'Inventory' '')
+                    if ($inv) {
+                        $needInv = $true
+                        $invAttr = " data-inv=""$(ConvertTo-GIHtml $inv)"""
+                        $ctl = Get-GIControlHtml -Field $f -Name $fk -Value $v -Extra $invAttr
+                        $h += "<label for=""$fid"">$label</label>$ctl$(Get-GIInventoryPickHtml -Kind $inv -Label ([string](Get-GIValue $f 'Label' $fk)))"
+                    } else {
+                        $h += "<label for=""$fid"">$label</label>$(Get-GIControlHtml -Field $f -Name $fk -Value $v)"
+                    }
                 }
             }
             if ($hasErr) { $h += "<span class=""err ferr"" role=""alert"">$(ConvertTo-GIHtml $Errors[$fk])</span>" }
@@ -335,13 +414,20 @@ function New-GISettingsSectionPage {
             $warn = Get-GIValue $f 'Warning'
             if ($warn) { $h += "<div class=""warn"">Warning: $(ConvertTo-GIHtml $warn)</div>" }
             $h += '</div>'
+            if ((Get-GIValue $f 'Group' '') -eq 'Advanced') {
+                $adv += $h.Substring($mark); $h = $h.Substring(0, $mark)
+                if ($hasErr) { $advOpen = $true }
+            }
+            if ($type -eq 'table' -and (@($f.Columns | Where-Object { $_.Inventory }).Count)) { $needInv = $true }
         }
+        if ($adv) { $h += "<details class=""advanced""$(if ($advOpen) { ' open' })><summary>Advanced</summary>$adv</details>" }
         $h += '</form>'
         if ($Disabled) {
             $h = $h.Substring(0, $formStart) + ($h.Substring($formStart) -replace '<(input|select|textarea|button)(?![^>]*\bdisabled\b)([ >])', '<$1 disabled$2')
         } else { $h += New-GISaveBar -FormId 'settings-form' }
         $h += $secretBlocks
         if (@($fields | Where-Object { $_.Type -eq 'table' }).Count -gt 0) { $h += Get-GIAddRowScript }
+        if ($needInv -and -not $Disabled) { $h += '<p class="help" id="inv-status" role="status" aria-live="polite"></p>' + (Get-GIInventoryScript) }
     }
 
     if ((Get-GIValue $section 'Test' $null) -and -not $Disabled -and -not $FormAction -and -not $BodyOnly) {

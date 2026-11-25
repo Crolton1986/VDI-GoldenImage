@@ -199,6 +199,40 @@ Describe 'Image API' {
             $got.o.vCenter.Keys | Should -Not -Contain 'CredentialSecret'
             (Cfg).vCenter.Server | Should -Be 'vcsa01.domain.local'
         }
+        It 'remembers only the result and time of a global connection test, and forgets it when the section is saved' {
+            $runner = { param($cp, $s, $o) @{ ok = $false; detail = 'password Hunter2 rejected'; seconds = 1 } }
+            $null = Api POST '/api/settings/vCenter/test' @{ Server = 'vc1' } -Options @{ TestRunner = $runner }
+            (Get-GIConnectionStatus -Config (Cfg) -Section vCenter).State | Should -Be 'Failed'
+            (Get-GIConnectionStatus -Config (Cfg) -Section Horizon).State | Should -Be 'NotTested'
+            (Get-Content (Get-GIConnectionStatePath -Config (Cfg)) -Raw) | Should -Not -Match 'Hunter2'
+            $ok = { param($cp, $s, $o) @{ ok = $true; detail = 'fine'; seconds = 1 } }
+            $null = Api POST '/api/settings/vCenter/test' @{ Server = 'vc1' } -Options @{ TestRunner = $ok }
+            (Get-GIConnectionStatus -Config (Cfg) -Section vCenter).State | Should -Be 'Connected'
+            (Api POST '/api/settings/vCenter' @{ Server = 'vc-new.example.com' }).Code | Should -Be 200
+            (Get-GIConnectionStatus -Config (Cfg) -Section vCenter).State | Should -Be 'NotTested'
+        }
+        It 'tests the Guest VM and Pools sections of one image with the unsaved form values' {
+            $got = @{}
+            $runner = { param($cp, $s, $o, $i) $got.o = $o; $got.s = $s; $got.i = $i; @{ ok = $true; detail = 'fine'; seconds = 1 } }.GetNewClosure()
+            $r = Api POST '/api/images/w11-gi-01/settings/GoldenImage/test' @{ VmName = 'OTHER-VM'; ScriptPathInGuest = 'C:\x.ps1'; GuestWorkDir = 'C:\w'; FinalizeAction = 'Finalize'; PowerOffTimeoutMin = '30'; GuestCredentialSecret = 'must-not-pass' } -Options @{ TestRunner = $runner }
+            $r.Code | Should -Be 200; $r.Body.ok | Should -BeTrue
+            $got.s | Should -Be 'GoldenImage'; $got.i | Should -Be 'w11-gi-01'
+            $got.o.GoldenImage.VmName | Should -Be 'OTHER-VM'
+            $got.o.GoldenImage.Keys | Should -Not -Contain 'GuestCredentialSecret'
+            (Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01').GoldenImage.VmName | Should -Not -Be 'OTHER-VM'   # nothing saved
+            $p = Api POST '/api/images/w11-gi-01/settings/Pools/test' @{ 'Test.Name' = 'TST-NEW'; 'Test.LogoffPolicy' = 'FORCE_LOGOFF'; 'Production[0].Name' = 'PRD-NEW'; 'Production[0].LogoffPolicy' = 'WAIT_FOR_LOGOFF'; PushTimeoutMin = '120' } -Options @{ TestRunner = $runner }
+            $p.Code | Should -Be 200
+            $got.o.Pools.Test.Name | Should -Be 'TST-NEW'
+            @($got.o.Pools.Production)[0].Name | Should -Be 'PRD-NEW'
+        }
+        It 'refuses the image test for Viewers and Approvers, for sections without a test, and for bad values' {
+            $ok = { param($cp, $s, $o, $i) @{ ok = $true; detail = 'x'; seconds = 1 } }
+            (Api POST '/api/images/w11-gi-01/settings/Pools/test' @{} -Role Viewer -Options @{ TestRunner = $ok }).Code | Should -Be 403
+            (Api POST '/api/images/w11-gi-01/settings/Pools/test' @{} -Role Approver -Options @{ TestRunner = $ok }).Code | Should -Be 403
+            (Api POST '/api/images/w11-gi-01/settings/Snapshots/test' @{} -Options @{ TestRunner = $ok }).Code | Should -Be 404
+            (Api POST '/api/images/nope/settings/Pools/test' @{} -Options @{ TestRunner = $ok }).Code | Should -Be 404
+            (Api POST '/api/images/w11-gi-01/settings/GoldenImage/test' @{ VmName = ''; PowerOffTimeoutMin = '1' } -Options @{ TestRunner = $ok }).Code | Should -Be 400
+        }
         It 'turns an unexpected failure into a 500 with an error id and no stack trace' {
             Mock Get-GIImageSummary { throw 'boom at C:\secret\path' } -ModuleName VDI-GIPipeline
             $r = Invoke-GIApiRequest -Config (Cfg) -Method GET -Path '/api/images' -Role Viewer

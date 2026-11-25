@@ -94,11 +94,36 @@ function Get-GIGlobalSettingsSections {
     )
 }
 
+function New-GIConnectionChipHtml {
+    <# Connected / Failed / Not tested, with when it was last tested. The text always says the state; colour is extra. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([ValidateSet('Connected', 'Failed', 'NotTested')][string]$State = 'NotTested', [AllowNull()][string]$At = '')
+    $variant = switch ($State) { 'Connected' { 'ok' } 'Failed' { 'bad' } default { 'idle' } }
+    $text = if ($State -eq 'NotTested') { 'Not tested' } else { $State }
+    $when = ''
+    if ($At) { try { $when = "Tested $(([datetimeoffset]::Parse($At)).LocalDateTime.ToString('yyyy-MM-dd HH:mm'))" } catch { $when = '' } }
+    "<span class=""conn""><span class=""chip $variant"" data-conn-chip>$(ConvertTo-GIHtml $text)</span> <span class=""muted small"" data-conn-time>$(ConvertTo-GIHtml $when)</span></span>"
+}
+
+function New-GIConnectionChipHtml {
+    <# Connected / Failed / Not tested, with when it was last tested. The text always says the state; colour is extra. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([ValidateSet('Connected', 'Failed', 'NotTested')][string]$State = 'NotTested', [AllowNull()][string]$At = '')
+    $variant = switch ($State) { 'Connected' { 'ok' } 'Failed' { 'bad' } default { 'idle' } }
+    $text = if ($State -eq 'NotTested') { 'Not tested' } else { $State }
+    $when = ''
+    if ($At) { try { $when = "Tested $(([datetimeoffset]::Parse($At)).LocalDateTime.ToString('yyyy-MM-dd HH:mm'))" } catch { $when = '' } }
+    "<span class=""conn""><span class=""chip $variant"" data-conn-chip>$(ConvertTo-GIHtml $text)</span> <span class=""muted small"" data-conn-time>$(ConvertTo-GIHtml $when)</span></span>"
+}
+
 function New-GITestConnectionCard {
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)][string]$Section)
-    New-GICard -Title 'Test connection' -BodyHtml "<p class=""muted"">Tests the values currently in the form, including unsaved ones. Nothing is saved.</p><button type=""button"" class=""btn"" data-test-section=""$(ConvertTo-GIHtml $Section)"">Test connection</button><div id=""test-result"" role=""status"" aria-live=""polite""></div>"
+    param([Parameter(Mandatory)][string]$Section, [string]$ImageId = '')
+    $url = if ($ImageId) { " data-test-url=""/api/images/$(ConvertTo-GIHtml $ImageId)/settings/$(ConvertTo-GIHtml $Section)/test""" } else { '' }
+    New-GICard -Title 'Test connection' -BodyHtml "<p class=""muted"">Tests the values currently in the form, including unsaved ones. Nothing is saved.</p><button type=""button"" class=""btn"" data-test-section=""$(ConvertTo-GIHtml $Section)""$url>Test connection</button><div id=""test-result"" role=""status"" aria-live=""polite""></div>"
 }
 
 function New-GIDashboardSettingsBody {

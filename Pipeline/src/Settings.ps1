@@ -45,16 +45,17 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
-            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /. Test connection tries the other known path on a 404 and tells you which one worked.' }
-            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/' }
-            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/' }
+            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'API paths differ between App Volumes releases. Must start with /. Test connection tries the other known path on a 404 and tells you which one worked.' }
+            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced' }
+            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced' }
         )
     }
     GoldenImage = @{
         Title = 'Golden image'; ConfigPath = 'GoldenImage'; Test = 'GoldenImage'; ReadOnly = $false
         Description = 'The golden image VM and how the pipeline reaches it. Pick the maintained software under Packages.'
         Fields = @(
-            @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Required = $true }
+            @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Required = $true; Inventory = 'vms'
+               Help = 'Choose from the VMs in vCenter, or type the name if the list does not load.' }
             @{ Key = 'GuestCredentialSecret'; Label = 'Guest administrator'; Type = 'secret'; Help = 'Local administrator inside the golden image.' }
             @{ Key = 'ScriptPathInGuest'; Label = 'Script path in guest'; Type = 'string'; Required = $true }
             @{ Key = 'GuestWorkDir'; Label = 'Guest work folder'; Type = 'string'; Default = 'C:\ProgramData\VDI\Pipeline'; Required = $true }
@@ -87,12 +88,12 @@ $script:GISettingsSchema = [ordered]@{
         Title = 'Pools'; ConfigPath = 'Pools'; Test = 'Pools'; ReadOnly = $false
         Description = 'The test pool receives every new snapshot; production pools only after approval.'
         Fields = @(
-            @{ Key = 'Test.Name'; Label = 'Test pool name'; Type = 'string'; Required = $true }
+            @{ Key = 'Test.Name'; Label = 'Test pool name'; Type = 'string'; Required = $true; Inventory = 'pools' }
             @{ Key = 'Test.LogoffPolicy'; Label = 'Test pool logoff policy'; Type = 'enum'; Values = @('FORCE_LOGOFF', 'WAIT_FOR_LOGOFF'); Required = $true; Default = 'FORCE_LOGOFF' }
             @{ Key = 'Production'; Label = 'Production pools'; Type = 'table'; Required = $true; UniqueBy = 'Name'; DistinctFrom = 'Test.Name'
                Help = 'Names must be unique and different from the test pool.'
                Columns = @(
-                   @{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Required = $true }
+                   @{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Required = $true; Inventory = 'pools' }
                    @{ Key = 'LogoffPolicy'; Label = 'Logoff policy'; Type = 'enum'; Values = @('WAIT_FOR_LOGOFF', 'FORCE_LOGOFF'); Required = $true; Default = 'WAIT_FOR_LOGOFF' }
                ) }
             @{ Key = 'PushTimeoutMin'; Label = 'Push timeout (min)'; Type = 'int'; Min = 10; Max = 1440; Required = $true }
@@ -551,6 +552,51 @@ function Update-GISettingsOverlay {
     return $path
 }
 
+#----- Connection test results (shown as a chip on each global section) -----
+
+function Get-GIConnectionStatePath {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    $dir = if ($Config.Paths.ContainsKey('RootState') -and $Config.Paths.RootState) { $Config.Paths.RootState } else { $Config.Paths.State }
+    Join-Path $dir 'connection-tests.json'
+}
+
+function Get-GIConnectionStatus {
+    <# @{ State = Connected | Failed | NotTested; At } for one global section. Only the result and the time are kept, never the test detail. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Section)
+    $none = @{ State = 'NotTested'; At = $null }
+    $path = Get-GIConnectionStatePath -Config $Config
+    if (-not (Test-Path -LiteralPath $path)) { return $none }
+    try {
+        $all = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if ($all -is [System.Collections.IDictionary] -and $all.Contains($Section) -and $all[$Section] -is [System.Collections.IDictionary]) {
+            $e = $all[$Section]
+            return @{ State = $(if ($e['ok'] -eq $true) { 'Connected' } else { 'Failed' }); At = [string]$e['at'] }
+        }
+    } catch { Write-Verbose "connection-tests.json unreadable: $($_.Exception.Message)" }
+    return $none
+}
+
+function Set-GIConnectionStatus {
+    <# Records a test result for a section, or forgets it (-Clear) when the section's settings changed. Never throws. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Section, [bool]$Ok = $false, [switch]$Clear)
+    try {
+        $path = Get-GIConnectionStatePath -Config $Config
+        $all = @{}
+        if (Test-Path -LiteralPath $path) {
+            try { $r = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop; if ($r -is [System.Collections.IDictionary]) { $all = $r } } catch { $all = @{} }
+        }
+        if ($Clear) { if (-not $all.ContainsKey($Section)) { return }; $null = $all.Remove($Section) }
+        else { $all[$Section] = @{ ok = $Ok; at = (Get-Date).ToString('o') } }
+        $dir = Split-Path -Parent $path
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $tmp = "$path.tmp"
+        ConvertTo-Json -InputObject $all -Depth 4 | Set-Content -LiteralPath $tmp -Encoding utf8
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    } catch { Write-Warning "Could not record the connection test result: $($_.Exception.Message)" }
+}
+
 function Save-GISettingsSection {
     <#
     .SYNOPSIS
@@ -587,6 +633,7 @@ function Save-GISettingsSection {
     if ($set.Count -gt 0) {
         $path = Update-GISettingsOverlay -Config $Config -Set @($set)
         Write-GIAudit -Config $Config -User $By -Action 'settings.save' -Target $Section -Detail @{ changes = @($diff) }
+        Set-GIConnectionStatus -Config $Config -Section $Section -Clear   # new values: the last test no longer applies
     }
     return @{ Section = $Section; Changed = @($diff | ForEach-Object { $_.key }); Path = $path }
 }

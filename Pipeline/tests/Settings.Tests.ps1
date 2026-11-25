@@ -311,6 +311,36 @@ Describe 'Save-GISettingsSection' {
     }
 }
 
+Describe 'Connection test results' {
+    BeforeEach { $script:cp = New-SettingsConfig; $script:cc = Get-GIConfig -Path $script:cp }
+    It 'reads Not tested before anything was recorded' {
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+    }
+    It 'records ok and failed per section with a time, and forgets one section' {
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        Set-GIConnectionStatus -Config $cc -Section Horizon -Ok $false
+        $v = Get-GIConnectionStatus -Config $cc -Section vCenter
+        $v.State | Should -Be 'Connected'; ([datetimeoffset]::Parse($v.At)) | Should -BeOfType [datetimeoffset]
+        (Get-GIConnectionStatus -Config $cc -Section Horizon).State | Should -Be 'Failed'
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Clear
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+        (Get-GIConnectionStatus -Config $cc -Section Horizon).State | Should -Be 'Failed'
+    }
+    It 'treats a damaged file as Not tested and recovers on the next write' {
+        Set-Content -LiteralPath (Get-GIConnectionStatePath -Config $cc) -Value '{ nope'
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'Connected'
+    }
+    It 'is cleared when a section changes, and kept when nothing changed' {
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        $null = Save-GISettingsSection -Config $cc -Section vCenter -Values @{ Server = (Get-GIConfig -Path $cp).vCenter.Server }
+        (Get-GIConnectionStatus -Config (Get-GIConfig -Path $cp) -Section vCenter).State | Should -Be 'Connected'
+        $null = Save-GISettingsSection -Config $cc -Section vCenter -Values @{ Server = 'changed.example.com' }
+        (Get-GIConnectionStatus -Config (Get-GIConfig -Path $cp) -Section vCenter).State | Should -Be 'NotTested'
+    }
+}
+
 Describe 'Set-GISettingsSecretName' {
     It 'writes the DefaultName once when the key is absent, and keeps an existing name' {
         $p = New-SettingsConfig

@@ -29,6 +29,7 @@ function Get-GIApiRouteTable {
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/pools/(?<pool>[^/]+)/rollback$';        R = 'Admin';    H = 'Invoke-GIApiRollback' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/settings/(?<section>[^/]+)$';           R = 'Viewer';   H = 'Get-GIApiImageSettings' }
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/settings/(?<section>[^/]+)$';           R = 'Admin';    H = 'Save-GIApiImageSettings' }
+        @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/settings/(?<section>[^/]+)/test$';      R = 'Admin';    H = 'Test-GIApiImageSettings' }
         @{ M = 'GET';    P = '^/settings/(?<section>[^/]+)$';                               R = 'Viewer';   H = 'Get-GIApiGlobalSettings' }
         @{ M = 'POST';   P = '^/settings/(?<section>[^/]+)$';                               R = 'Admin';    H = 'Save-GIApiGlobalSettings' }
         @{ M = 'POST';   P = '^/settings/(?<section>[^/]+)/test$';                          R = 'Admin';    H = 'Test-GIApiSettings' }
@@ -437,7 +438,33 @@ function Test-GIApiSettings {
     }
     $run = if (Get-GIOpt $Req 'TestRunner') { Get-GIOpt $Req 'TestRunner' } else { { param($cp, $s, $o) Invoke-GIConnectionTest -ConfigPath $cp -System $s -Overrides $o } }
     $res = & $run (Get-GIOpt $Req 'ConfigPath') $sec $over
+    Set-GIConnectionStatus -Config $Req.Config -Section $sec -Ok ([bool]$res.ok)
     Write-GIApiAudit -Req $Req -Action 'connection.test' -Target $sec -Detail @{ ok = [bool]$res.ok } -Result $(if ($res.ok) { 'OK' } else { 'Failed' })
+    @{ Code = 200; Body = [ordered]@{ ok = [bool]$res.ok; detail = [string]$res.detail; seconds = $res.seconds } }
+}
+
+function Test-GIApiImageSettings {
+    <# Tests the Guest VM or Pools section of one image with the values sent (the page's form, unsaved included). Nothing is saved. #>
+    param($Req)
+    $img = Resolve-GIApiImage $Req; if ($img.Error) { return $img.Error }
+    $sec = [string]$Req.Args['section']
+    if ($sec -notin 'GoldenImage', 'Pools') { return (New-GIApiError 404 'This section has no connection test') }
+    $def = Get-GISettingsSectionDef $sec
+    $form = @{}
+    if ($Req.Body -is [System.Collections.IDictionary]) { foreach ($k in $Req.Body.Keys) { if ($k -ne 'token') { $form[$k] = $Req.Body[$k] } } }
+    $conv = ConvertFrom-GISettingsForm -Section $sec -Form $form
+    $errors = @{}; foreach ($k in $conv.Errors.Keys) { $errors[$k] = $conv.Errors[$k] }
+    $checked = Test-GISettingsSection -Section $sec -Values $conv.Values
+    foreach ($k in $checked.Keys) { if (-not $errors.ContainsKey($k)) { $errors[$k] = $checked[$k] } }
+    if ($errors.Count) { return (New-GIApiError 400 ((@($errors.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name): $($_.Value)" })) -join '; ')) }
+    $over = @{}
+    foreach ($f in $def.Fields) {
+        if ($f.Type -eq 'secret' -or -not $conv.Values.Contains($f.Key)) { continue }
+        Set-GISettingsNode $over @((Get-GISettingsFieldPath $def $f)) (ConvertTo-GISettingsFieldValue $f $conv.Values[$f.Key] $true)
+    }
+    $run = if (Get-GIOpt $Req 'TestRunner') { Get-GIOpt $Req 'TestRunner' } else { { param($cp, $s, $o, $i) Invoke-GIConnectionTest -ConfigPath $cp -System $s -Overrides $o -ImageId $i } }
+    $res = & $run (Get-GIOpt $Req 'ConfigPath') $sec $over $img.Id
+    Write-GIApiAudit -Req $Req -Action 'connection.test' -Target $sec -Detail @{ ok = [bool]$res.ok; image = $img.Id } -Result $(if ($res.ok) { 'OK' } else { 'Failed' }) -ImageConfig $img.Config
     @{ Code = 200; Body = [ordered]@{ ok = [bool]$res.ok; detail = [string]$res.detail; seconds = $res.seconds } }
 }
 
