@@ -247,7 +247,6 @@ table.edit input[type=text],table.edit select,table.edit input[type=number]{widt
 @keyframes gipulse{50%{opacity:.5}}
 .bars{display:flex;gap:4px}.bars span{flex:1;height:6px;border-radius:3px;background:var(--bar-pending)}
 .bars .done{background:var(--bar-done)}.bars .running{background:var(--bar-run)}.bars .waiting{background:var(--bar-wait)}.bars .failed{background:var(--bar-fail)}
-.logbox{font-family:var(--mono);font-size:12px;background:var(--hover);border:1px solid var(--line);border-radius:6px;padding:8px;max-height:320px;overflow:auto;white-space:pre-wrap}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:var(--bar-run)}.setup-step.s-done{border-left-color:var(--bar-done)}.setup-step.s-failed{border-left-color:var(--bar-fail)}
 .setup-step h2{margin:0 0 4px;font-size:16px}.setup-step .num{display:inline-block;min-width:22px;color:var(--mut)}
@@ -261,9 +260,9 @@ pre.detail{background:var(--hover);border:1px solid var(--line);border-radius:4p
 .waits{color:var(--mut);font-style:italic}
 tr.steplogrow>td{padding-top:0}
 details.steplog>summary{cursor:pointer;color:var(--mut);font-size:12px}
-.logbox{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:4px 8px;margin:4px 0;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.logbox{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(--hover);border:1px solid var(--line);border-radius:4px;padding:4px 8px;margin:4px 0;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .logbox .ll{margin:0}.logbox .lt{color:var(--mut);margin-right:8px}
-.logbox .lv-out{color:var(--mut)}.logbox .lv-info{color:var(--fg)}.logbox .lv-warn{color:#8a5a00}.logbox .lv-error{color:#c0392b;font-weight:600}
+.logbox .lv-out{color:var(--mut)}.logbox .lv-info{color:var(--fg)}.logbox .lv-warn{color:var(--warn-fg)}.logbox .lv-error{color:var(--bad-fg);font-weight:600}
 '@
 }
 
