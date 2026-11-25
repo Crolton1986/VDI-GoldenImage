@@ -614,8 +614,8 @@ Functions (pure ones marked *, testable without PowerCLI):
 | Function | Behavior |
 |---|---|
 | `New-GIWatcherPlan -Config -Run -AttemptId` * | plan object for the run's guest steps that are not Succeeded/Skipped |
-| `Get-GIWatcherStepIds` * | `EnableUpdates, WindowsUpdate, Pkg:*` membership test (`Test-GIWatcherStep -Id`) |
-| `Start-GIGuestWatcher -Config -Run -VM -Credential -AttemptId [-ResetSteps]` | copies `guest/Invoke-GIWatcher.ps1`, `GIWatcher.Core.ps1`, `Invoke-GIFixRunner.ps1`, `Invoke-GIWindowsUpdate.ps1` to `<W>\watcher\`, `guest/fixes/*.ps1` to `<W>\fixes\` (folder emptied first), writes plan.json (new launchId), with `-ResetSteps` deletes `<W>\steps\`; registers scheduled task `VDI-GI-Watcher` (SYSTEM, RunLevel Highest, no trigger, `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <W>\watcher\Invoke-GIWatcher.ps1 -WorkDir <W>`, ExecutionTimeLimit 0) with `-Force`, starts it. Returns `@{ LaunchId; BootTime }` |
+| `Get-GIWatcherStepIds -Run [-All]` * | ids of the run's guest steps; membership via `Test-GIWatcherStep -Id`, defined in src/WatcherLog.ps1 |
+| `Start-GIGuestWatcher -Config -Run -VM -Credential -AttemptId [-ResetSteps]` | copies `guest/Invoke-GIWatcher.ps1`, `GIWatcher.Core.ps1`, `Invoke-GIFixRunner.ps1`, `Invoke-GIWindowsUpdate.ps1` to `<W>\watcher\`, `guest/fixes/*.ps1` to `<W>\fixes\` (folder emptied first), writes plan.json (new launchId), with `-ResetSteps` deletes `<W>\steps\`; registers scheduled task `VDI-GI-Watcher` (SYSTEM, RunLevel Highest, priority 4, no trigger, `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <W>\watcher\Invoke-GIWatcher.ps1 -WorkDir <W>`, ExecutionTimeLimit 0) with `-Force`, starts it. Returns `@{ LaunchId; BootTime }` |
 | `Get-GIWatcherPollScript -WorkDir -LogOffset -IncludeSteps` * | the guest script text for one tick |
 | `ConvertFrom-GIWatcherPoll -Text` * | parses tick output: `@{ Now; BootTime; Watcher; PidAlive; TaskState; Steps; Log = @{ Offset; Size; Bytes } }` |
 | `Split-GIWatcherLogChunk -Bytes -Offset` * | consumes complete lines only: `@{ Lines = string[]; NextOffset }`; bytes after the last `\n` are left for the next tick |

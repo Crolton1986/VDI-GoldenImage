@@ -185,6 +185,23 @@ Describe 'Maintain steps' {
         (Get-GIRun -Config $cfg -RunId $run.runId).stages.Maintain.steps.Count | Should -Be 7
     }
 
+    It 'Set-GIStep stores attempt and fixes only when given, and a resume keeps them' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Status Running -Message 'm'
+        (Get-GIStep -Run $run -Id 'Pkg:VmTools').PSObject.Properties['attempt'] | Should -BeNullOrEmpty
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Attempt 2 -Fixes @([pscustomobject]@{ id = 'FixA'; outcome = 'Applied' })
+        $s = Get-GIStep -Run $run -Id 'Pkg:VmTools'
+        $s.attempt | Should -Be 2
+        $s.fixes[0].id | Should -Be 'FixA'
+        $s.message | Should -Be 'm'
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Status Succeeded -Message 'ok'
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan) -ResumeFrom 'Pkg:Horizon'
+        $r = Get-GIStep -Run $run -Id 'Pkg:VmTools'
+        $r.status | Should -Be 'Succeeded'
+        $r.attempt | Should -Be 2
+        $r.fixes[0].id | Should -Be 'FixA'
+    }
+
     It 'returns nothing for a run without steps' {
         @(Get-GIStepList -Run $run).Count | Should -Be 0
     }

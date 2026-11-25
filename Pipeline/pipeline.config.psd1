@@ -26,6 +26,9 @@
     FinalizeAction    = 'Finalize'
     PowerOffTimeoutMin = 90
     ActionTimeoutMin  = 60    # minutes per package install before it's stopped and the step fails
+    GuestWorkDir      = 'C:\ProgramData\VDI\Pipeline'   # pipeline-owned guest folder; deleted by CleanupGuest
+    Watcher = @{ LogPollSec = 10; IdlePollSec = 60; StatusPollSec = 60; WatchingWindowSec = 30
+                 StaleHeartbeatSec = 180; MaxRelaunches = 3; MaxStepAttempts = 4; FixTimeoutSec = 600 }
   }
 
   # Test pool receives every new snapshot; production pools only after approval

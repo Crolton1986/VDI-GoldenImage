@@ -219,6 +219,8 @@ function Initialize-GIMaintainSteps {
         } elseif ($resume -and $p.Resumable -and $i -lt $cut -and $old -and $old.status -eq 'Succeeded') {
             $row.status = 'Succeeded'; $row.startedAt = $old.startedAt; $row.endedAt = $old.endedAt
             $row.message = ([string]$old.message -replace ' \(earlier attempt\)$', '') + ' (earlier attempt)'
+            if ($old.PSObject.Properties['attempt']) { $row.attempt = $old.attempt }
+            if ($old.PSObject.Properties['fixes']) { $row.fixes = $old.fixes }
         }
         [pscustomobject]$row
     }
@@ -241,7 +243,9 @@ function Set-GIStep {
         [Parameter(Mandatory)]$Run,
         [Parameter(Mandatory)][string]$Id,
         [ValidateSet('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')][string]$Status,
-        [AllowEmptyString()][string]$Message
+        [AllowEmptyString()][string]$Message,
+        [int]$Attempt,
+        [AllowEmptyCollection()][object[]]$Fixes
     )
     $step = Get-GIStep -Run $Run -Id $Id
     if (-not $step) { throw "Unknown Maintain step '$Id'." }
@@ -255,6 +259,8 @@ function Set-GIStep {
         }
     }
     if ($PSBoundParameters.ContainsKey('Message')) { $step.message = $Message }
+    if ($PSBoundParameters.ContainsKey('Attempt')) { Add-Member -InputObject $step -NotePropertyName attempt -NotePropertyValue $Attempt -Force }
+    if ($PSBoundParameters.ContainsKey('Fixes')) { Add-Member -InputObject $step -NotePropertyName fixes -NotePropertyValue @($Fixes) -Force }
     $Run.progress = if ($step.message -and $step.status -eq 'Running') { "$($step.label): $($step.message)" } else { [string]$step.label }
     Save-GIRun -Config $Config -Run $Run
 }

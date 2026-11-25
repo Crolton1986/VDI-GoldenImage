@@ -193,20 +193,16 @@ function Restart-GIGuest {
 function Invoke-GIGuestAction {
     <#
     .SYNOPSIS
-      Runs VDI-GoldenImage.ps1 -Action <Action> -Unattended in the guest and returns its parsed result file.
+      Runs VDI-GoldenImage.ps1 -Action <Action> -Unattended in the guest (synchronously) and returns its parsed result file.
     .DESCRIPTION
-      With -TimeoutMin the action runs detached in the guest and is polled every 30 s (Wait-GIGuestScriptAsync);
-      -OnWait gets the elapsed minutes.
-      When the time runs out, installer processes in the guest are stopped and the action fails.
+      Used for Manifest and Finalize. Long-running actions (updates, packages) run in the guest watcher instead.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Config,
         [Parameter(Mandatory)] $VM,
         [Parameter(Mandatory)] [pscredential] $Credential,
-        [Parameter(Mandatory)] [string] $Action,
-        [int] $TimeoutMin = 0,
-        [scriptblock] $OnWait
+        [Parameter(Mandatory)] [string] $Action
     )
     $script = $Config.GoldenImage.ScriptPathInGuest
     $work   = Get-GIConfigValue $Config 'GoldenImage.GuestWorkDir' 'C:\ProgramData\VDI\Pipeline'
@@ -217,11 +213,7 @@ Remove-Item '$res' -ErrorAction SilentlyContinue
 & '$script' -Action $Action -Unattended -ResultFile '$res'
 exit `$LASTEXITCODE
 "@
-    if ($TimeoutMin -gt 0) {
-        $r = Wait-GIGuestScriptAsync -Config $Config -VM $VM -Credential $Credential -Action $Action -ResultFile $res -TimeoutMin $TimeoutMin -OnWait $OnWait
-    } else {
-        $r = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $text
-    }
+    $r = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $text
     $json = (Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText "if(Test-Path '$res'){ Get-Content '$res' -Raw }").ScriptOutput
     $parsed = if ($json -and $json.Trim()) { $json | ConvertFrom-Json } else { $null }
     if ($r.ExitCode -ne 0) {
@@ -229,165 +221,6 @@ exit `$LASTEXITCODE
         throw "In-guest action '$Action' exited $($r.ExitCode): $errs"
     }
     return $parsed
-}
-
-function Wait-GIGuestScriptAsync {
-    <#
-    .SYNOPSIS
-      Runs VDI-GoldenImage.ps1 -Action <Action> detached in the guest and polls for its exit code, with a deadline.
-    .DESCRIPTION
-      A wrapper script in the guest work folder runs the action and writes its exit code to exit-<Action>.txt.
-      It's started with Start-Process, so the guest operation returns at once; every 30 s a short guest call
-      checks whether the wrapper is still alive and whether the exit file exists. No PowerCLI task objects are
-      involved (Invoke-VMScript -RunAsync returns client-side tasks that Get-Task can't look up).
-      On timeout, installers started from the guest Install folder and msiexec are stopped; if the wrapper hasn't
-      finished two minutes later, its process tree is stopped too. Returns @{ ExitCode; ScriptOutput }.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)] [hashtable] $Config,
-        [Parameter(Mandatory)] $VM,
-        [Parameter(Mandatory)] [pscredential] $Credential,
-        [Parameter(Mandatory)] [string] $Action,
-        [Parameter(Mandatory)] [string] $ResultFile,
-        [Parameter(Mandatory)] [int] $TimeoutMin,
-        [scriptblock] $OnWait
-    )
-    $script   = $Config.GoldenImage.ScriptPathInGuest
-    $work     = Get-GIConfigValue $Config 'GoldenImage.GuestWorkDir' 'C:\ProgramData\VDI\Pipeline'
-    $wrapper  = "$work\run-$Action.ps1"
-    $exitFile = "$work\exit-$Action.txt"
-    $guestDir = Split-Path $script -Parent
-    $install  = "$guestDir\Install"
-    $logs     = "$guestDir\Logs"
-
-    $startText = @"
-New-Item -ItemType Directory -Path '$work' -Force | Out-Null
-Remove-Item -LiteralPath '$ResultFile', '$exitFile' -ErrorAction SilentlyContinue
-Set-Content -LiteralPath '$wrapper' -Encoding UTF8 -Value @'
-& '$script' -Action $Action -Unattended -ResultFile '$ResultFile'
-`$code = if (`$null -eq `$LASTEXITCODE) { 0 } else { `$LASTEXITCODE }
-Set-Content -LiteralPath '$exitFile' -Value `$code
-'@
-`$p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "$wrapper"' -WindowStyle Hidden -PassThru
-`$p.Id
-"@
-    $started = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $startText
-    $procId = 0
-    if (-not [int]::TryParse(([string]$started.ScriptOutput).Trim(), [ref]$procId) -or $procId -le 0) {
-        throw "In-guest action '$Action' could not be started: $(([string]$started.ScriptOutput).Trim())"
-    }
-
-    # Alive is checked before the exit file: the wrapper writes the file and then exits, so "not alive and no
-    # file" can only mean it died without finishing
-    $pollText = "`$a = [bool](Get-Process -Id $procId -ErrorAction SilentlyContinue); `$d = Test-Path -LiteralPath '$exitFile'; " +
-                "`$c = if (`$d) { ([string](Get-Content -LiteralPath '$exitFile' -Raw)).Trim() } else { '' }; " +
-                "@{ alive = `$a; done = `$d; exit = `$c } | ConvertTo-Json -Compress"
-    $stopInstallers = "Get-Process | Where-Object { `$_.Path -like '$install\*' } | Stop-Process -Force -ErrorAction SilentlyContinue; " +
-                      "Get-Process msiexec -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
-    $stopTree = "function Stop-Tree([int]`$id) { Get-CimInstance Win32_Process -Filter `"ParentProcessId=`$id`" | ForEach-Object { Stop-Tree `$_.ProcessId }; " +
-                "Stop-Process -Id `$id -Force -ErrorAction SilentlyContinue }; Stop-Tree $procId"
-
-    $start = Get-Date
-    $deadline = $start.AddMinutes($TimeoutMin)
-    $timedOut = $false
-    $failures = 0
-    while ($true) {
-        $state = $null
-        try {
-            $state = ([string](Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $pollText).ScriptOutput).Trim() | ConvertFrom-Json
-            $failures = 0
-        } catch {
-            # Guest operations can fail briefly (Tools restarting during an agent install)
-            $failures++
-            Write-Verbose "Polling in-guest action '$Action' failed ($failures): $($_.Exception.Message)"
-            if ($failures -ge 5) { throw "Lost contact with in-guest action '$Action' (5 failed checks in a row): $($_.Exception.Message)" }
-        }
-        if ($state -and $state.done) {
-            if ($timedOut) { break }
-            $code = 0
-            if (-not [int]::TryParse([string]$state.exit, [ref]$code)) { $code = 1 }
-            return [pscustomobject]@{ ExitCode = $code; ScriptOutput = '' }
-        }
-        if ($state -and -not $state.alive) {
-            if ($timedOut) { break }
-            throw "In-guest action '$Action' ended without writing an exit code (the guest script crashed or the guest rebooted). See the logs in $logs."
-        }
-        if (-not $timedOut -and (Get-Date) -gt $deadline) {
-            $timedOut = $true
-            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $stopInstallers | Out-Null } catch { Write-Verbose "Stopping installers: $($_.Exception.Message)" }
-            # Give the guest script a couple of minutes to notice and write its result
-            $deadline = (Get-Date).AddMinutes(2)
-            continue
-        }
-        if ($timedOut -and (Get-Date) -gt $deadline) {
-            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $stopTree | Out-Null } catch { Write-Verbose "Stopping guest script: $($_.Exception.Message)" }
-            break
-        }
-        if ($OnWait -and -not $timedOut) { & $OnWait ([int][math]::Floor(((Get-Date) - $start).TotalMinutes)) }
-        Start-Sleep -Seconds 30
-    }
-    throw "In-guest action '$Action' did not finish within $TimeoutMin minutes; installer processes were stopped. See the install logs in $logs."
-}
-
-function Invoke-GIGuestWindowsUpdate {
-    <#
-    .SYNOPSIS
-      Repeats Windows Update passes (scheduled task as SYSTEM) with reboots until nothing is left or MaxPasses is hit.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)] [hashtable] $Config,
-        [Parameter(Mandatory)] $Run,
-        [Parameter(Mandatory)] $VM,
-        [Parameter(Mandatory)] [pscredential] $Credential
-    )
-    $work     = Get-GIConfigValue $Config 'GoldenImage.GuestWorkDir' 'C:\ProgramData\VDI\Pipeline'
-    $maxPass  = [int](Get-GIConfigValue $Config 'GoldenImage.WindowsUpdate.MaxPasses' 5)
-    $passMin  = [int](Get-GIConfigValue $Config 'GoldenImage.WindowsUpdate.PassTimeoutMin' 120)
-    $wuScript = Join-Path $Config.Root 'guest/Invoke-GIWindowsUpdate.ps1'
-    $res      = "$work\wu-result.json"
-    $task     = 'VDI-GI-WindowsUpdate'
-
-    Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText "New-Item -ItemType Directory -Path '$work' -Force | Out-Null" | Out-Null
-    Copy-VMGuestFile -Source $wuScript -Destination "$work\" -VM $VM -LocalToGuest -GuestCredential $Credential -Force -ErrorAction Stop
-
-    $summary = [System.Collections.Generic.List[object]]::new()
-    for ($pass = 1; $pass -le $maxPass; $pass++) {
-        Set-GIProgress -Config $Config -Run $Run -Message "Windows Update pass $pass of ${maxPass}: searching and installing"
-        $start = @"
-Remove-Item '$res' -ErrorAction SilentlyContinue
-`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "$work\Invoke-GIWindowsUpdate.ps1" -ResultFile "$res"'
-Register-ScheduledTask -TaskName '$task' -Action `$a -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
-Start-ScheduledTask -TaskName '$task'
-"@
-        Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $start | Out-Null
-
-        $deadline = (Get-Date).AddMinutes($passMin)
-        $result = $null
-        while (-not $result) {
-            if ((Get-Date) -gt $deadline) { throw "Windows Update pass $pass did not finish within $passMin minutes." }
-            Start-Sleep -Seconds 60
-            try {
-                $out = (Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText "if(Test-Path '$res'){ Get-Content '$res' -Raw }").ScriptOutput
-                if ($out -and $out.Trim()) { $result = $out | ConvertFrom-Json }
-            } catch { Write-Verbose "Polling WU result: $($_.Exception.Message)" }
-        }
-        $summary.Add([pscustomobject]@{ pass = $pass; found = $result.found; installed = $result.installed; failed = $result.failed; reboot = $result.rebootRequired })
-        Write-GILog -Config $Config -RunId $Run.runId -Message "WU pass ${pass}: found=$($result.found) installed=$($result.installed) failed=$($result.failed) reboot=$($result.rebootRequired)"
-        if ($result.error) { throw "Windows Update pass $pass error: $($result.error)" }
-
-        if ($result.rebootRequired) {
-            Set-GIProgress -Config $Config -Run $Run -Message "Windows Update pass ${pass}: $($result.installed) installed, rebooting"
-            Restart-GIGuest -VM $VM -Credential $Credential
-        }
-        if ($result.found -eq 0 -and -not $result.rebootRequired) { break }
-    }
-    Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText "Unregister-ScheduledTask -TaskName '$task' -Confirm:`$false -ErrorAction SilentlyContinue" | Out-Null
-
-    $last = $summary | Select-Object -Last 1
-    $remaining = if ($last -and $last.found -gt 0) { "Updates still pending after $maxPass passes." } else { '' }
-    return @{ Passes = @($summary); Warning = $remaining }
 }
 
 #----- Stage: Preflight -----
@@ -443,6 +276,7 @@ function Get-GIMaintainStepPlan {
     & $add 'PowerOn' 'Power on, wait for guest' $false
     & $add 'CopyScript' 'Copy guest script' $false ([bool](Get-GIConfigValue $Config 'GoldenImage.CopyScript' $true)) 'CopyScript is off'
     & $add 'CopyInstallers' 'Copy installers' $false $hasInstallers 'No installer folder set'
+    & $add 'StartWatcher' 'Start guest watcher' $false
     & $add 'EnableUpdates' 'Enable updates (-Action Update)' $true
     & $add 'WindowsUpdate' 'Windows Update' $true $wuOn 'Windows Update is turned off'
     foreach ($a in $actions) {
@@ -451,6 +285,7 @@ function Get-GIMaintainStepPlan {
     }
     & $add 'Reboot' 'Reboot after installs' $false ($actions.Count -gt 0) 'No packages selected'
     & $add 'Manifest' 'Read installed versions' $false
+    & $add 'CleanupGuest' 'Clean up guest' $false
     & $add 'Finalize' "Finalize (-Action $($gi.FinalizeAction))" $false
     & $add 'PowerOff' 'Wait for power off' $false
     return $plan.ToArray()
@@ -622,27 +457,33 @@ function Invoke-GIStageMaintain {
         "$(@($sync.Copied).Count) copied, $(@($sync.Skipped).Count) unchanged"
     }
 
-    & $step 'EnableUpdates' {
-        Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action 'Update' | Out-Null
-        'Done'
-    }
-
-    & $step 'WindowsUpdate' {
-        $wu = Invoke-GIGuestWindowsUpdate -Config $Config -Run $Run -VM $ctx.vm -Credential $cred
-        $ctx.data.windowsUpdate = $wu.Passes
-        if ($wu.Warning) { $ctx.data.warnings = @($wu.Warning); Write-GILog -Config $Config -RunId $Run.runId -Message $wu.Warning -Level Warn }
-        $installed = (@($wu.Passes) | Measure-Object -Property installed -Sum).Sum
-        "$(@($wu.Passes).Count) pass(es), $([int]$installed) update(s) installed$(if ($wu.Warning) { "; $($wu.Warning)" })"
-    }
-
-    $timeout = [int](Get-GIConfigValue $Config 'GoldenImage.ActionTimeoutMin' 60)
-    foreach ($a in @($gi.Actions | Where-Object { $_ })) {
-        $id = "Pkg:$a"
-        & $step $id {
-            $onWait = { param($min) Set-GIStep -Config $Config -Run $Run -Id $id -Message "Running $min min (timeout $timeout min)" }.GetNewClosure()
-            $r = Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action $a -TimeoutMin $timeout -OnWait $onWait
-            $ver = if ($r -and $r.PSObject.Properties['versions'] -and $r.versions -and $r.versions.PSObject.Properties[[string]$a]) { [string]$r.versions.$a } else { '' }
-            if ($ver) { "Installed version $ver" } else { 'Done' }
+    $guestIds = @(Get-GIWatcherStepIds -Run $Run)
+    if (-not $guestIds.Count) {
+        Set-GIStep -Config $Config -Run $Run -Id 'StartWatcher' -Status Skipped -Message 'No guest steps'
+    } else {
+        # New attempt id per Maintain attempt; steps are reset when Maintain starts fresh or restarts before the watcher step
+        $attemptId = [guid]::NewGuid().ToString()
+        $fresh = (-not $startAt) -or ($resumeFrom -in $snapSteps)
+        & $step 'StartWatcher' {
+            $p = @{ Config = $Config; Run = $Run; VM = $ctx.vm; Credential = $cred; AttemptId = $attemptId }
+            if ($fresh) { $p.ResetSteps = $true }
+            $l = Start-GIGuestWatcher @p
+            $old = Get-GIWatcherState -Run $Run
+            Set-GIWatcherState -Config $Config -Run $Run -State @{
+                logOffset = $(if ($fresh) { 0 } else { $old.logOffset }); launchId = $l.LaunchId; attemptId = $attemptId; bootTime = $l.BootTime; relaunches = 0 }
+            "Watcher started for $($guestIds.Count) step(s)"
+        }
+        $done = @(Wait-GIGuestWatcher -Config $Config -Run $Run -VM $ctx.vm -Credential $cred -AttemptId $attemptId)
+        $wuStep = $done | Where-Object { $_ -and $_.id -ceq 'WindowsUpdate' } | Select-Object -First 1
+        if ($wuStep) {
+            $passes = Get-GIWatcherProp (Get-GIWatcherProp $wuStep 'data') 'passes'
+            if ($null -ne $passes) { $ctx.data.windowsUpdate = @($passes) }
+            $wuMsg = [string](Get-GIWatcherProp $wuStep 'message' '')
+            if ($wuMsg -match 'still pending') {
+                $warn = if ($wuMsg -match 'Updates still pending after \d+ passes\.') { $Matches[0] } else { $wuMsg }
+                $ctx.data.warnings = @($warn)
+                Write-GILog -Config $Config -RunId $Run.runId -Message $warn -Level Warn
+            }
         }
     }
     $ctx.data.actions = @(@(Get-GIStepList -Run $Run) | Where-Object { $_.id -like 'Pkg:*' -and $_.status -eq 'Succeeded' } | ForEach-Object { $_.id.Substring(4) })
@@ -661,6 +502,11 @@ function Invoke-GIStageMaintain {
         }
         $ctx.data.manifest = $manifest
         ($manifest.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name) $($_.Value)" }) -join ', '
+    }
+
+    & $step 'CleanupGuest' {
+        Remove-GIGuestWatcher -Config $Config -Run $Run -VM $ctx.vm -Credential $cred
+        'Guest watcher files removed'
     }
 
     & $step 'Finalize' {
