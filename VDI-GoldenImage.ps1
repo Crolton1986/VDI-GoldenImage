@@ -97,6 +97,7 @@ param (
 
 # Errors reported via 'MsgFce -Output error' (used for exit code and result file)
 $script:ScriptErrors = New-Object 'System.Collections.Generic.List[string]'
+$script:RebootRequired = $false   # set when an installer exits 3010/1641
 
 #----------------[ Settings ]----------------
 $VAR = @{
@@ -823,7 +824,10 @@ function Invoke-VdiSoftwareInstall{
                         MsgFce "ERROR: $($SwSettings.Name) installer exited with code $exitCode.$logHint" -Output error
                         return
                     }
-                    if($exitCode -in 3010, 1641){ MsgFce "INFO: $($SwSettings.Name) installed; a reboot is required to finish (exit code $exitCode)." }
+                    if($exitCode -in 3010, 1641){
+                        $script:RebootRequired = $true
+                        MsgFce "INFO: $($SwSettings.Name) installed; a reboot is required to finish (exit code $exitCode)."
+                    }
                     MsgFce "INFO: $($SwSettings.Name) installation finished."
                     if($PostInstallAction){
                         MsgFce "INFO: Running post-installation tasks..."
@@ -1496,6 +1500,7 @@ if($ResultFile){
             action     = [string] $Action
             success    = ($script:ScriptErrors.Count -eq 0)
             errors     = @($script:ScriptErrors)
+            rebootRequired = [bool] $script:RebootRequired
             finishedAt = (Get-Date).ToString("o")
             versions   = $versions
         }
