@@ -12,10 +12,14 @@ function Set-GINavContext {
     if ($Context['SetupMode']) {
         try { $complete = [bool](Test-GISetupComplete -Config (Get-GIDashboardConfig $Context)) } catch { $complete = $false }
     }
+    $isAdmin = [bool](Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent)
+    $isApprover = [bool](Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent)
     $global:GINavContext = @{
         Path          = if ($WebEvent) { [string]$WebEvent.Path } else { '' }
-        IsAdmin       = [bool](Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent)
-        IsApprover    = [bool](Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent)
+        IsAdmin       = $isAdmin
+        IsApprover    = $isApprover
+        UserName      = Get-GIDashboardUser -Context $Context -WebEvent $WebEvent
+        Role          = if ($isAdmin) { 'Admin' } elseif ($isApprover) { 'Approver' } else { 'Viewer' }
         SetupMode     = [bool]$Context['SetupMode']
         SetupComplete = $complete
     }

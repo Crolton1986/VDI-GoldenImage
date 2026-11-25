@@ -91,12 +91,14 @@ $viewsPath = $ctx.ViewsPath
 $settingsViewsPath = $ctx.SettingsViewsPath
 $setupViewsPath = $ctx.SetupViewsPath
 $navContextPath = Join-Path $webRoot 'NavContext.ps1'
+$componentsPath = Join-Path $webRoot 'Components.ps1'
 
 Start-PodeServer -Quiet {
     # Make the context, module and view functions available in every route runspace.
     Set-PodeState -Name 'GIContext' -Value $ctx | Out-Null
     Import-PodeModule -Path $manifest
     Use-PodeScript -Path $viewsPath
+    Use-PodeScript -Path $componentsPath
     Use-PodeScript -Path $settingsViewsPath
     Use-PodeScript -Path $setupViewsPath
     Use-PodeScript -Path $navContextPath
@@ -418,8 +420,7 @@ Start-PodeServer -Quiet {
     Add-PodeRoute -Method Get -Path '/audit' @auth -ScriptBlock {
         $c = (Get-PodeState -Name 'GIContext')
         Set-GINavContext -Context $c -WebEvent $WebEvent
-        if (-not (Test-GIDashboardAdmin -Context $c -WebEvent $WebEvent)) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message 'The audit log is for the admin group.') -StatusCode 403; return }
-        Write-PodeHtmlResponse -Value (New-GIAuditPage -Entries @(Get-GIAudit -Config (Get-GIDashboardConfig $c) -Last 200))
+                Write-PodeHtmlResponse -Value (New-GIAuditPage -Entries @(Get-GIAudit -Config (Get-GIDashboardConfig $c) -Last 200))
     }
 
 

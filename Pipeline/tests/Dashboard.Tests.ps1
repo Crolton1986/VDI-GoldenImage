@@ -1,6 +1,7 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'src' 'State.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
     $script:stages = @('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate', 'Approval', 'Promote', 'PostCheck')
 }
 

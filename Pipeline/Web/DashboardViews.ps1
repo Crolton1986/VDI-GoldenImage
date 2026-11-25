@@ -120,93 +120,143 @@ function Format-GIDuration {
 }
 
 function Get-GICss {
+    # The only place hex colors may appear: the token block. Every other rule uses var(--token).
     @'
-:root{--bg:#f4f6f8;--fg:#1d2733;--card:#fff;--line:#d9dfe5;--mut:#5d6b7a;--link:#0b5cad}
+:root{--bg:#f4f6f8;--fg:#1d2733;--card:#fff;--line:#d9dfe5;--mut:#5d6b7a;--link:#0b5cad;--pri:#0b5cad;--navy:#1d2733;--navy-2:#33414f;--on-dark:#fff;
+--ok-fg:#14612b;--ok-bg:#e3f5e8;--warn-fg:#7a4300;--warn-bg:#fff1d6;--run-fg:#0b4a8f;--run-bg:#e3effb;--bad-fg:#8f1d14;--bad-bg:#fde8e6;--idle-fg:#3f4d5b;--idle-bg:#eef1f4;
+--sel-bg:#e8f1fb;--hover:#eef2f6;--field-line:#b9c3ce;--skel:#e6eaee;--danger:#b3261e;--bar-done:#1a7f37;--bar-run:#0b5cad;--bar-wait:#c77700;--bar-fail:#b3261e;--bar-pending:#d9dfe5;
+--shadow:rgba(0,0,0,.25);--scrim:rgba(0,0,0,.45);--font:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,Consolas,monospace}
 *{box-sizing:border-box}
-body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
-header.topbar{background:#1d2733;color:#fff;padding:10px 16px;display:flex;gap:12px;align-items:center}
-header.topbar h1{font-size:17px;margin:0}
-.layout{display:grid;grid-template-columns:240px minmax(0,1fr);align-items:start}
+body{margin:0;font:14px/1.45 var(--font);background:var(--bg);color:var(--fg)}
+header.topbar{background:var(--navy);color:var(--on-dark);height:56px;padding:0 20px;display:flex;gap:12px;align-items:center}
+.apptitle{font-size:18px;font-weight:600;flex:1}
+.userbox{display:flex;gap:10px;align-items:center;font-size:13px}
+.rolepill{background:var(--navy-2);color:var(--on-dark);font-size:12px;padding:2px 10px;border-radius:999px}
+.layout{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start}
 body.nav-collapsed .layout{grid-template-columns:56px minmax(0,1fr)}
-main{padding:12px 16px;max-width:1200px;width:100%;margin:0 auto}
-.sidenav{position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--card);border-right:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column}
-.sidenav button.navcollapse{display:flex;align-items:center;gap:12px;width:100%;margin:0 0 6px;padding:8px 18px;border:0;border-radius:0;background:none;color:var(--mut);text-align:left}
-.sidenav button.navcollapse:hover{background:#eef2f6;color:var(--fg)}
+main{padding:24px 32px;max-width:1180px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+main>*{margin-top:0;margin-bottom:0}
+main>button,main>.btn{align-self:flex-start}
+main h1{font-size:22px;font-weight:600;margin:0}
+.sidenav{position:sticky;top:0;height:calc(100vh - 56px);overflow-y:auto;background:var(--card);border-right:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column}
+.sidenav button.navcollapse{display:flex;align-items:center;gap:12px;width:100%;height:40px;margin:0 0 6px;padding:0 18px;border:0;border-radius:0;background:none;color:var(--mut);text-align:left}
+.sidenav button.navcollapse:hover{background:var(--hover);color:var(--fg)}
 .sidenav button.navcollapse .ico{transition:transform .15s}
 body.nav-collapsed .navcollapse .ico{transform:rotate(180deg)}
-.navitem{display:flex;align-items:center;gap:12px;padding:9px 18px;color:var(--fg);text-decoration:none;border-left:4px solid transparent;padding-left:14px}
-.navitem .ico,.navchild .ico{flex:none}
+.navitem{display:flex;align-items:center;gap:12px;min-height:40px;padding:0 18px 0 15px;color:var(--fg);text-decoration:none;border-left:3px solid transparent}
+.navitem.muted{color:var(--mut)}
+.navitem .ico{flex:none}
 .navitem .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-a.navitem:hover,.navchild:hover{background:#eef2f6}
-.navitem.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
-.navitem.disabled,.navchild.disabled{color:var(--mut);opacity:.55;cursor:not-allowed}
+a.navitem:hover{background:var(--hover)}
+.navitem.active{background:var(--sel-bg);border-left-color:var(--link);font-weight:600;color:var(--link)}
+.navdivider{border:0;border-top:1px solid var(--line);margin:8px 0;width:100%}
+.navitem.disabled{color:var(--mut);opacity:.55;cursor:not-allowed}
 .navlock{display:inline-flex;margin-left:auto}.navlock .ico{width:14px;height:14px}
-.navsub{margin:0}
-.navsub summary{cursor:pointer;padding:3px 18px 3px 54px;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
-.navchild{display:block;padding:6px 18px 6px 54px;color:var(--fg);text-decoration:none;border-left:4px solid transparent}
-.navchild.active{background:#e6f0fb;border-left-color:var(--link);font-weight:600}
-.sidenav a:focus-visible,.sidenav button:focus-visible,.sidenav summary:focus-visible,.navtoggle-mobile:focus-visible{outline:2px solid var(--link);outline-offset:-2px}
-.navtoggle-mobile{display:none;padding:4px 6px;background:none;border:1px solid #cfe3ff;color:#fff}
-.navtoggle-mobile:focus-visible{outline-color:#cfe3ff}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sidenav a:focus-visible,.sidenav button:focus-visible,.navtoggle-mobile:focus-visible{outline-offset:-2px}
+header.topbar :focus-visible{outline-color:var(--on-dark)}
+.navtoggle-mobile{display:none;min-height:40px;min-width:40px;padding:4px 6px;background:none;border:1px solid var(--on-dark);color:var(--on-dark);align-items:center;justify-content:center}
 .navbackdrop{display:none}
-body.nav-collapsed .sidenav .label,body.nav-collapsed .navsub,body.nav-collapsed .navlock{display:none}
+body.nav-collapsed .sidenav .label,body.nav-collapsed .navlock{display:none}
 body.nav-collapsed .navitem{padding-right:0;justify-content:flex-start}
-@media (max-width:760px){
+@media (max-width:900px){
 .layout{display:block}
 body.nav-collapsed .layout{display:block}
+main{padding:16px}
 .navtoggle-mobile{display:inline-flex}
-.sidenav{position:fixed;top:0;left:0;bottom:0;width:260px;max-width:85vw;height:auto;z-index:30;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 12px rgba(0,0,0,.25)}
+.sidenav{position:fixed;top:0;left:0;bottom:0;width:260px;max-width:85vw;height:auto;z-index:30;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 12px var(--shadow)}
 body.nav-open .sidenav{transform:none}
-body.nav-open .navbackdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:20}
+body.nav-open .navbackdrop{display:block;position:fixed;inset:0;background:var(--scrim);z-index:20}
 .sidenav button.navcollapse{display:none}
-body.nav-collapsed .sidenav .label,body.nav-collapsed .navsub,body.nav-collapsed .navlock{display:revert}
-body.nav-collapsed .sidenav .navsub{display:block}
+body.nav-collapsed .sidenav .label,body.nav-collapsed .navlock{display:revert}
+.grid2,.grid3{grid-template-columns:1fr}
+.subnav-layout{grid-template-columns:1fr}
 }
-@media (prefers-reduced-motion:reduce){.sidenav,.navcollapse .ico{transition:none}}
-h2{font-size:16px;margin:22px 0 8px}
-section.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:10px 0;overflow-x:auto}
-section.attn{border-left:5px solid #d98200;background:#fff8ec}
-table{border-collapse:collapse;width:100%}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+@media (prefers-reduced-motion:reduce){.sidenav,.navcollapse .ico{transition:none}.skeleton{animation:none}.spinner{animation:none}}
+h2{font-size:16px;font-weight:600;margin:0}
+section.card,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;overflow-x:auto}
+section.attn{border-left:5px solid var(--bar-wait);background:var(--warn-bg)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:600}
 a{color:var(--link)}
-.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
-.badge.st-ok{background:#1e8a44}.badge.st-bad{background:#c0392b}.badge.st-running{background:#1b6fd1}
-.badge.st-wait{background:#d98200}.badge.st-sched{background:#7a4bc4}.badge.st-warn{background:#8a6d1e}
-.badge.st-skip{background:#7d8894}.badge.st-pending{background:#9aa5b1}
+.badge,.chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.4}
+.chip.ok,.badge.st-ok{background:var(--ok-bg);color:var(--ok-fg)}
+.chip.warn,.badge.st-wait,.badge.st-warn{background:var(--warn-bg);color:var(--warn-fg)}
+.chip.run,.badge.st-running,.badge.st-sched{background:var(--run-bg);color:var(--run-fg)}
+.chip.bad,.badge.st-bad{background:var(--bad-bg);color:var(--bad-fg)}
+.chip.idle,.badge.st-skip,.badge.st-pending{background:var(--idle-bg);color:var(--idle-fg)}
 .icon{font-weight:700;margin-right:4px}
-.icon.st-ok{color:#1e8a44}.icon.st-bad{color:#c0392b}.icon.st-running{color:#1b6fd1}.icon.st-pending,.icon.st-skip{color:#9aa5b1}
-tr.cat td{background:#eef2f6;font-weight:600}
-.err{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;white-space:pre-wrap}
+.icon.st-ok{color:var(--ok-fg)}.icon.st-bad{color:var(--bad-fg)}.icon.st-running{color:var(--run-fg)}.icon.st-pending,.icon.st-skip{color:var(--mut)}
+tr.cat td{background:var(--hover);font-weight:600}
+.err{border-left:5px solid var(--bar-fail);background:var(--bad-bg);padding:8px 12px;white-space:pre-wrap}
 .muted{color:var(--mut)}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px}
 .kv dt{color:var(--mut)}.kv dd{margin:0}
 .links a{margin-right:14px}
-code,pre{font-family:ui-monospace,Consolas,monospace}
-.ferr{border:0;background:none;padding:0;color:#c0392b;white-space:normal;display:block;font-size:13px}
-.field{margin:12px 0}.field>label,.field>.lbl{display:block;font-weight:600;margin-bottom:3px}
-.field .help{color:var(--mut);font-size:12px;margin-top:2px}
-.field .warn{color:#8a5a00;font-size:12px;margin-top:2px}
-input[type=text],input[type=number],input[type=password],input[type=time],select,textarea{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:4px;max-width:100%}
+code,pre,.mono{font-family:var(--mono)}
+.ferr{border:0;background:none;padding:0;color:var(--bad-fg);white-space:normal;display:block;font-size:13px}
+.field{margin:12px 0}.field>label,.field>.lbl{display:block;font-weight:500;font-size:13px;margin-bottom:4px}
+.field .help{color:var(--mut);font-size:12px;margin-top:4px}
+.field .warn{color:var(--warn-fg);font-size:12px;margin-top:4px}
+.field .error{color:var(--bad-fg);font-size:12px;margin-top:4px}
+input[type=text],input[type=number],input[type=password],input[type=time],input[type=datetime-local],select,textarea{font:inherit;min-height:40px;padding:6px 10px;border:1px solid var(--field-line);border-radius:6px;max-width:100%;background:var(--card);color:var(--fg)}
+textarea{min-height:80px}
 input[type=text],textarea{width:100%;max-width:560px}
 .days label{margin-right:10px;white-space:nowrap}
-button{font:inherit;padding:5px 14px;border:1px solid #0b5cad;background:#0b5cad;color:#fff;border-radius:4px;cursor:pointer}
-button.sec{background:#fff;color:#0b5cad}button.danger{background:#c0392b;border-color:#c0392b}
-button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
-.formbox{border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin:10px 0;background:#fafbfc}
-.notice{border-left:5px solid #1e8a44;background:#eef8f1;padding:8px 12px;margin:10px 0}
-.testres{padding:6px 10px;border-radius:4px;margin:8px 0}.testres.ok{background:#e3f4e8;color:#14643a}.testres.fail{background:#fdf0ee;color:#9b2c1f}
-.errsum{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;margin:10px 0}
+button,.btn{font:inherit;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:0 16px;border:1px solid var(--pri);background:var(--card);color:var(--pri);border-radius:6px;cursor:pointer;font-weight:600;text-decoration:none}
+button.pri,.btn.pri{background:var(--pri);color:var(--on-dark)}
+button.sec,.btn.sec{border-color:var(--field-line);color:var(--fg);font-weight:400}
+button.danger,.btn.danger{background:var(--danger);border-color:var(--danger);color:var(--on-dark)}
+button.small,.btn.small{min-height:32px;padding:0 10px}
+button:disabled,input:disabled,select:disabled,textarea:disabled,.btn[aria-disabled=true]{opacity:.5;cursor:not-allowed}
+.formbox{border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin:10px 0;background:var(--bg)}
+.notice{border-left:5px solid var(--bar-done);background:var(--ok-bg);padding:8px 12px}
+.testres{padding:6px 10px;border-radius:4px;margin:8px 0}.testres.ok{background:var(--ok-bg);color:var(--ok-fg)}.testres.fail{background:var(--bad-bg);color:var(--bad-fg)}
+.errsum{border-left:5px solid var(--bar-fail);background:var(--bad-bg);padding:8px 12px}
 table.edit input[type=text],table.edit select,table.edit input[type=number]{width:100%;min-width:90px}
-@media (max-width:600px){main{padding:8px}th,td{padding:5px 4px;font-size:13px}.kv{grid-template-columns:1fr}}
-.setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:#1b6fd1}.setup-step.s-done{border-left-color:#1e8a44}.setup-step.s-failed{border-left-color:#c0392b}
+.tablewrap{overflow-x:auto}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tabs a{display:inline-flex;align-items:center;min-height:42px;padding:0 16px;color:var(--fg);text-decoration:none;border-bottom:3px solid transparent;white-space:nowrap}
+.tabs a:hover{background:var(--hover)}
+.tabs a[aria-selected=true]{color:var(--link);font-weight:600;border-bottom-color:var(--link)}
+.subnav-layout{display:grid;grid-template-columns:200px minmax(0,760px);gap:20px;align-items:start}
+.subnav{display:flex;flex-direction:column;padding:8px 0}
+.subnav a{display:block;min-height:40px;line-height:24px;padding:8px 16px;color:var(--fg);text-decoration:none;border-left:3px solid transparent}
+.subnav a:hover{background:var(--hover)}
+.subnav a[aria-current=page]{background:var(--sel-bg);color:var(--link);font-weight:600;border-left-color:var(--link)}
+.savebar{position:sticky;bottom:0;display:flex;gap:12px;align-items:center;justify-content:space-between;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 20px;box-shadow:0 -2px 8px var(--shadow)}
+.savebar .actions{display:flex;gap:8px}
+.stepper{display:flex;gap:8px;list-style:none;margin:0;padding:0;flex-wrap:wrap}
+.stepper li{display:flex;align-items:center;gap:8px;padding:4px 12px 4px 4px;color:var(--mut)}
+.stepper .num{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--idle-bg);color:var(--idle-fg);font-weight:600;border:1px solid var(--field-line)}
+.stepper li.done{color:var(--ok-fg)}.stepper li.done .num{background:var(--ok-bg);color:var(--ok-fg);border-color:var(--ok-fg)}
+.stepper li.current{color:var(--link);font-weight:600}.stepper li.current .num{background:var(--pri);color:var(--on-dark);border-color:var(--pri)}
+.modal-backdrop{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+.modal-backdrop[hidden]{display:none}
+.modal{background:var(--card);border-radius:10px;width:520px;max-width:100%;max-height:90vh;overflow:auto;padding:24px;box-shadow:0 8px 32px var(--shadow)}
+.modal h2{font-size:18px;margin-bottom:12px}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+.banner{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px 16px;border-radius:6px;border-left:5px solid var(--bar-wait);background:var(--warn-bg);color:var(--warn-fg)}
+.banner.error{border-left-color:var(--bar-fail);background:var(--bad-bg);color:var(--bad-fg)}
+.banner[hidden]{display:none}
+.skeleton{display:inline-block;min-width:80px;height:1em;border-radius:4px;background:var(--skel);vertical-align:middle;animation:gipulse 1.4s ease-in-out infinite}
+@keyframes gipulse{50%{opacity:.5}}
+.bars{display:flex;gap:4px}.bars span{flex:1;height:6px;border-radius:3px;background:var(--bar-pending)}
+.bars .done{background:var(--bar-done)}.bars .running{background:var(--bar-run)}.bars .waiting{background:var(--bar-wait)}.bars .failed{background:var(--bar-fail)}
+.logbox{font-family:var(--mono);font-size:12px;background:var(--hover);border:1px solid var(--line);border-radius:6px;padding:8px;max-height:320px;overflow:auto;white-space:pre-wrap}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:var(--bar-run)}.setup-step.s-done{border-left-color:var(--bar-done)}.setup-step.s-failed{border-left-color:var(--bar-fail)}
 .setup-step h2{margin:0 0 4px;font-size:16px}.setup-step .num{display:inline-block;min-width:22px;color:var(--mut)}
-.badge.sb-pending{background:#9aa5b1}.badge.sb-running{background:#1b6fd1}.badge.sb-done{background:#1e8a44}.badge.sb-failed{background:#c0392b}.badge.sb-skipped{background:#9aa5b1;font-style:italic}
-.spinner{display:inline-block;width:10px;height:10px;margin-right:5px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:gispin 1s linear infinite;vertical-align:-1px}
+.badge.sb-pending,.badge.sb-skipped{background:var(--idle-bg);color:var(--idle-fg)}.badge.sb-skipped{font-style:italic}
+.badge.sb-running{background:var(--run-bg);color:var(--run-fg)}.badge.sb-done{background:var(--ok-bg);color:var(--ok-fg)}.badge.sb-failed{background:var(--bad-bg);color:var(--bad-fg)}
+.spinner{display:inline-block;width:10px;height:10px;margin-right:5px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:gispin 1s linear infinite;vertical-align:-1px}
 @keyframes gispin{to{transform:rotate(360deg)}}
-pre.detail{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:6px 8px;margin:6px 0;white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}
+pre.detail{background:var(--hover);border:1px solid var(--line);border-radius:4px;padding:6px 8px;margin:6px 0;white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}
 .setup-step fieldset{border:0;padding:0;margin:0}.setup-step .choice{margin:8px 0}
-.banner-ok{border-left:5px solid #1e8a44;background:#eef8f1;padding:8px 12px;margin:10px 0;font-weight:600}
+.banner-ok{border-left:5px solid var(--bar-done);background:var(--ok-bg);padding:8px 12px;font-weight:600}
 .waits{color:var(--mut);font-style:italic}
 '@
 }
@@ -232,29 +282,18 @@ function Get-GINavIcon {
 }
 
 function Get-GINavItems {
-    <# The fixed, ordered side-nav item list. Role 'Admin' items are disabled (not hidden) for non-admins. #>
+    <# The fixed, ordered side-nav item list. Role 'Admin' items are disabled for non-admins; HideForNonAdmin items are not rendered for them. A $null entry is the divider. #>
     [CmdletBinding()]
     [OutputType([object[]])]
     param()
-    $children = @()
-    if (Get-Command -Name Get-GISettingsSchema -ErrorAction SilentlyContinue) {
-        $schema = Get-GISettingsSchema
-        if ($schema -is [System.Collections.IDictionary]) {
-            $children = @(foreach ($key in $schema.Keys) {
-                    $t = $schema[$key]
-                    $label = if ($t -is [System.Collections.IDictionary] -and $t.Contains('Title')) { [string]$t['Title'] } else { [string]$key }
-                    @{ Label = $label; Href = "/settings/$key"; Key = [string]$key }
-                })
-        }
-    }
     @(
-        @{ Label = 'Runs'; Href = '/'; Icon = 'list'; Role = ''; Children = @() }
-        @{ Label = 'Pools'; Href = '/pools'; Icon = 'layers'; Role = ''; Children = @() }
-        @{ Label = 'Run control'; Href = '/run'; Icon = 'play'; Role = 'Admin'; Children = @() }
-        @{ Label = 'Settings'; Href = '/settings'; Icon = 'gear'; Role = 'Admin'; Children = $children }
-        @{ Label = 'Audit'; Href = '/audit'; Icon = 'clipboard'; Role = 'Admin'; Children = @() }
-        @{ Label = 'Setup'; Href = '/setup'; Icon = 'wrench'; Role = 'Admin'; Children = @() }
-        @{ Label = 'JSON API'; Href = '/api/runs'; Icon = 'braces'; Role = ''; Children = @() }
+        @{ Label = 'Golden images'; Href = '/'; Icon = 'layers' }
+        @{ Label = 'Audit log'; Href = '/audit'; Icon = 'clipboard' }
+        $null
+        # Interim: the page is still admin-only until task 08 makes it read-only for other roles.
+        @{ Label = 'Global settings'; Href = '/settings'; Icon = 'gear'; Role = 'Admin' }
+        @{ Label = 'Setup'; Href = '/setup'; Icon = 'wrench'; Role = 'Admin'; HideForNonAdmin = $true }
+        @{ Label = 'JSON API'; Href = '/api/runs'; Icon = 'braces'; Muted = $true }
     )
 }
 
@@ -269,6 +308,8 @@ function New-GISideNav {
     $setupLocked = $setupMode -and -not $setupComplete
 
     $parts = foreach ($item in (Get-GINavItems)) {
+        if ($null -eq $item) { '<hr class="navdivider">'; continue }
+        if ($item.HideForNonAdmin -and -not $isAdmin) { continue }
         $label = ConvertTo-GIHtml $item.Label
         $href = $item.Href
         $icon = Get-GINavIcon $item.Icon
@@ -279,34 +320,18 @@ function New-GISideNav {
             $disabledTitle = 'Admins only'
         }
         $active = $false
-        if ($href -eq '/') { $active = ($path -eq '/' -or $path.StartsWith('/runs/')) }
+        if ($href -eq '/') { $active = ($path -eq '/' -or $path.StartsWith('/runs/') -or $path.StartsWith('/images')) }
         elseif ($href -eq '/settings') { $active = ($path -eq '/settings' -or $path.StartsWith('/settings/')) }
         else { $active = ($path -eq $href) }
-        $kids = @($item.Children)
-
+        $muted = if ($item.Muted) { ' muted' } else { '' }
         if ($disabledTitle) {
             $t = ConvertTo-GIHtml $disabledTitle
-            $row = "<span class=""navitem disabled"" aria-disabled=""true"" title=""$t"">$icon<span class=""label"">$label</span><span class=""navlock"">$(Get-GINavIcon 'lock')</span></span>"
+            "<span class=""navitem disabled"" aria-disabled=""true"" title=""$t"">$icon<span class=""label"">$label</span><span class=""navlock"">$(Get-GINavIcon 'lock')</span></span>"
         } else {
-            $cls = 'navitem'; $cur = ''
+            $cls = "navitem$muted"; $cur = ''
             if ($active) { $cls = 'navitem active'; $cur = ' aria-current="page"' }
-            $row = "<a class=""$cls"" href=""$href"" title=""$label""$cur>$icon<span class=""label"">$label</span></a>"
+            "<a class=""$cls"" href=""$href"" title=""$label""$cur>$icon<span class=""label"">$label</span></a>"
         }
-        if ($kids.Count -eq 0) { $row; continue }
-
-        $kidHtml = foreach ($k in $kids) {
-            $kl = ConvertTo-GIHtml $k.Label
-            if ($disabledTitle) {
-                "<span class=""navchild disabled"" aria-disabled=""true"" title=""$(ConvertTo-GIHtml $disabledTitle)"">$kl</span>"
-            } elseif ($path -ieq $k.Href) {
-                "<a class=""navchild active"" href=""$(ConvertTo-GIHtml $k.Href)"" aria-current=""page"">$kl</a>"
-            } else {
-                "<a class=""navchild"" href=""$(ConvertTo-GIHtml $k.Href)"">$kl</a>"
-            }
-        }
-        $open = ''
-        if ($active -and -not $disabledTitle) { $open = ' open' }
-        "<div class=""navgroup"">$row<details class=""navsub""$open><summary>Sections</summary><div class=""navchildren"">$(@($kidHtml) -join '')</div></details></div>"
     }
     $collapse = "<button type=""button"" class=""navcollapse"" aria-expanded=""true"" aria-controls=""sidenav"" aria-label=""Collapse menu"" title=""Collapse menu"">$(Get-GINavIcon 'chevrons')<span class=""label"">Collapse</span></button>"
     "<nav class=""sidenav"" id=""sidenav"" aria-label=""Main"">$collapse$(@($parts) -join '')</nav>"
@@ -351,11 +376,14 @@ function New-GIPage {
     )
     $refresh = ''
     if ($RefreshSeconds -gt 0) { $refresh = "<meta http-equiv=""refresh"" content=""$RefreshSeconds"">" }
-    $ctx = @{ Path = ''; IsAdmin = $false; IsApprover = $false; SetupMode = $false; SetupComplete = $true }
+    $ctx = @{ Path = ''; IsAdmin = $false; IsApprover = $false; SetupMode = $false; SetupComplete = $true; UserName = ''; Role = '' }
     $g = Get-Variable -Name GINavContext -Scope Global -ErrorAction SilentlyContinue
     if ($g -and $g.Value -is [System.Collections.IDictionary]) { foreach ($k in $g.Value.Keys) { $ctx[[string]$k] = $g.Value[$k] } }
     $nav = New-GISideNav -Context $ctx
     $menuIcon = Get-GINavIcon 'menu'
+    $userBox = ''
+    if ($ctx.UserName) { $userBox = "<div class=""userbox""><span>$(ConvertTo-GIHtml $ctx.UserName)</span><span class=""rolepill"">$(ConvertTo-GIHtml $ctx.Role)</span></div>" }
+    $uiScript = if (Get-Command -Name Get-GIUiScript -ErrorAction SilentlyContinue) { Get-GIUiScript } else { '' }
     @"
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -365,14 +393,18 @@ $refresh
 <style>$(Get-GICss)</style></head>
 <body>
 <script>$(Get-GINavScript)</script>
-<header class="topbar"><button type="button" class="navtoggle-mobile" aria-controls="sidenav" aria-expanded="false" aria-label="Open menu">$menuIcon</button><h1>VDI Golden Image Pipeline</h1></header>
+<a class="sr-only" href="#main">Skip to content</a>
+<header class="topbar"><button type="button" class="navtoggle-mobile" aria-controls="sidenav" aria-expanded="false" aria-label="Open menu">$menuIcon</button><div class="apptitle">VDI Golden Image Pipeline</div>$userBox</header>
 <div class="layout">
 $nav
-<main>
+<main id="main" tabindex="-1">
+<div class="banner" id="gi-expired" role="alert" hidden><span class="banner-text">Your session expired. Sign in again to continue.</span><a href="/">Sign in</a></div>
 $BodyHtml
+<div id="gi-live" class="sr-only" role="status" aria-live="polite"></div>
 </main>
 </div>
 <div class="navbackdrop"></div>
+<script>$uiScript</script>
 </body></html>
 "@
 }
@@ -724,7 +756,14 @@ function Get-GIPostRejection {
     )
     if ($Context.NoAuth -and -not $Context['LocalAdmin']) { return @{ Code = 403; Message = 'The dashboard is read-only when it runs without authentication.' } }
     $ok = if ($Role -eq 'Admin') { Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent } else { Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent }
-    if (-not $ok) { return @{ Code = 403; Message = "You are not in the $($Role.ToLower()) group." } }
+    if (-not $ok) {
+        try {
+            $callerRole = if (Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent) { 'Admin' } elseif (Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent) { 'Approver' } else { 'Viewer' }
+            $path = if ($WebEvent) { [string]$WebEvent.Path } else { '' }
+            Write-GIAudit -Config (Get-GIDashboardConfig $Context) -User (Get-GIDashboardUser -Context $Context -WebEvent $WebEvent) -Action 'auth.denied' -Target $path -Detail @{ needed = $Role; role = $callerRole; result = 'Denied' }
+        } catch { Write-Verbose "Could not audit the denied request: $($_.Exception.Message)" }
+        return @{ Code = 403; Message = "You are not in the $($Role.ToLower()) group." }
+    }
     $origin = if ($Headers) { [string]$Headers['Origin'] } else { '' }
     $hostHdr = if ($Headers) { [string]$Headers['Host'] } else { '' }
     if ($origin -and $origin -ne 'null') {

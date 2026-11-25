@@ -1,6 +1,7 @@
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
     $script:secret = [byte[]](1..32)
     function New-Event($Groups, $User = 'jdoe', $Domain = 'DOMAIN') {
         [pscustomobject]@{ Auth = [pscustomobject]@{ User = [pscustomobject]@{ Username = $User; Domain = $Domain; Groups = $Groups } } }

@@ -1,5 +1,6 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'SettingsViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'SetupViews.ps1')
 
