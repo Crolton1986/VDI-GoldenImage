@@ -72,6 +72,7 @@ function New-GIRun {
         progress       = ''
         stages         = $stages
         safetySnapshot = $null
+        retention      = $null
         snapshot       = $null
         validation     = [ordered]@{ passed = $false; checks = @() }
         approval       = [ordered]@{ decision = $null; by = $null; at = $null; startTime = $null; comment = $null }
@@ -158,6 +159,109 @@ function Set-GIProgress {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Message
     )
     $Run.progress = $Message
+    # Inside Maintain, show the detail on the running step too (e.g. Windows Update pass 2 of 5)
+    if ($Message) {
+        $running = @(Get-GIStepList -Run $Run) | Where-Object { $_.status -eq 'Running' } | Select-Object -First 1
+        if ($running) { $running.message = $Message }
+    }
+    Save-GIRun -Config $Config -Run $Run
+}
+
+#----- Maintain sub-steps (run.stages.Maintain.steps) -----
+
+function Get-GIStepList {
+    # The Maintain step array of a run, or @() when the run has none yet.
+    param([Parameter(Mandatory)]$Run)
+    $st = $Run.stages.Maintain
+    # Unrolled on output: callers wrap with @()
+    if ($null -eq $st -or -not $st.PSObject.Properties['steps'] -or $null -eq $st.steps) { return }
+    $st.steps
+}
+
+function Get-GIStep {
+    param([Parameter(Mandatory)]$Run, [Parameter(Mandatory)][string]$Id)
+    @(Get-GIStepList -Run $Run) | Where-Object { $_.id -ceq $Id } | Select-Object -First 1
+}
+
+function Initialize-GIMaintainSteps {
+    <#
+    .SYNOPSIS
+        Builds run.stages.Maintain.steps from the step plan for this config, keeping earlier progress when resuming.
+    .DESCRIPTION
+        Resume happens when -ResumeFrom is given, or when the previous attempt left a step Failed or Running.
+        Then resumable steps (safety snapshot, updates, packages) that Succeeded before the resume point keep
+        their result and are skipped; every other step goes back to Pending. A previous attempt that finished
+        cleanly, or no previous attempt, starts fresh. Steps that don't apply to this config are Skipped.
+        Returns the step id work starts from ('' when fresh).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)]$Run,
+        [Parameter(Mandatory)][object[]]$Plan,
+        [AllowEmptyString()][string]$ResumeFrom = ''
+    )
+    $prev = @(Get-GIStepList -Run $Run)
+    $byId = @{}
+    foreach ($p in $prev) { $byId[[string]$p.id] = $p }
+    $interrupted = @($prev | Where-Object { $_.status -in 'Failed', 'Running' }).Count -gt 0
+    $resume = [bool]$ResumeFrom -or $interrupted
+    $planIds = @($Plan | ForEach-Object { $_.Id })
+    $cut = if ($ResumeFrom) { [array]::IndexOf($planIds, $ResumeFrom) } else { $planIds.Count }
+    if ($ResumeFrom -and $cut -lt 0) { throw "Maintain has no step '$ResumeFrom'. Steps: $($planIds -join ', ')." }
+
+    $steps = for ($i = 0; $i -lt $Plan.Count; $i++) {
+        $p = $Plan[$i]
+        $old = $byId[$p.Id]
+        $row = [ordered]@{ id = $p.Id; label = $p.Label; resumable = [bool]$p.Resumable; status = 'Pending'; startedAt = $null; endedAt = $null; message = '' }
+        if (-not $p.Applies) {
+            $row.status = 'Skipped'; $row.message = [string]$p.SkipReason
+        } elseif ($resume -and $p.Resumable -and $i -lt $cut -and $old -and $old.status -eq 'Succeeded') {
+            $row.status = 'Succeeded'; $row.startedAt = $old.startedAt; $row.endedAt = $old.endedAt
+            $row.message = ([string]$old.message -replace ' \(earlier attempt\)$', '') + ' (earlier attempt)'
+            if ($old.PSObject.Properties['attempt']) { $row.attempt = $old.attempt }
+            if ($old.PSObject.Properties['fixes']) { $row.fixes = $old.fixes }
+        }
+        [pscustomobject]$row
+    }
+    Add-Member -InputObject $Run.stages.Maintain -NotePropertyName steps -NotePropertyValue @($steps) -Force
+    Save-GIRun -Config $Config -Run $Run
+    if (-not $resume) { return '' }
+    $first = @($steps | Where-Object { $_.status -notin 'Succeeded', 'Skipped' }) | Select-Object -First 1
+    if ($first) { return [string]$first.id } else { return '' }
+}
+
+function Set-GIStep {
+    <#
+    .SYNOPSIS
+        Updates one Maintain step. Without -Status only the message changes (live progress while a step runs).
+        Also mirrors the step into run.progress so the existing progress line keeps working.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)]$Run,
+        [Parameter(Mandatory)][string]$Id,
+        [ValidateSet('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')][string]$Status,
+        [AllowEmptyString()][string]$Message,
+        [int]$Attempt,
+        [AllowEmptyCollection()][object[]]$Fixes
+    )
+    $step = Get-GIStep -Run $Run -Id $Id
+    if (-not $step) { throw "Unknown Maintain step '$Id'." }
+    $now = (Get-Date).ToString('o')
+    if ($Status) {
+        $step.status = $Status
+        switch ($Status) {
+            'Pending' { $step.startedAt = $null; $step.endedAt = $null }
+            'Running' { $step.startedAt = $now; $step.endedAt = $null }
+            default   { $step.endedAt = $now }
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('Message')) { $step.message = $Message }
+    if ($PSBoundParameters.ContainsKey('Attempt')) { Add-Member -InputObject $step -NotePropertyName attempt -NotePropertyValue $Attempt -Force }
+    if ($PSBoundParameters.ContainsKey('Fixes')) { Add-Member -InputObject $step -NotePropertyName fixes -NotePropertyValue @($Fixes) -Force }
+    $Run.progress = if ($step.message -and $step.status -eq 'Running') { "$($step.label): $($step.message)" } else { [string]$step.label }
     Save-GIRun -Config $Config -Run $Run
 }
 

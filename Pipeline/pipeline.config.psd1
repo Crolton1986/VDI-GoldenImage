@@ -13,17 +13,22 @@
   AppVolumes = @{ Server = 'avm01.domain.local';  CredentialSecret = 'GI-AppVol'; SkipCertificateCheck = $false
                   TestPackages = @('Notepad++')            # packages assigned to the test pool's computer OU
                   # API paths differ between App Volumes releases: confirm against your AVM's API docs
-                  Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities'; Attachments = '/app_volumes/app_attachments' } }
+                  Endpoints = @{ Session = '/cv_api/sessions'; OnlineEntities = '/cv_api/online_entities'; Attachments = '/app_volumes/app_attachments' } }
 
   # The golden image VM and what runs inside it
   GoldenImage = @{
     VmName            = 'W11-GI-01'
     GuestCredentialSecret = 'GI-GuestAdmin'
     ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1'
+    InstallerSourceDir = ''   # optional host folder synced to <script dir>\Install in the guest
     Actions           = @('VmTools','Horizon','DEM','AppVolumes','FSLogix','MsTeams')   # run with -Unattended after updates
     WindowsUpdate     = @{ Enabled = $true; MaxPasses = 5 }
     FinalizeAction    = 'Finalize'
     PowerOffTimeoutMin = 90
+    ActionTimeoutMin  = 60    # minutes per package install before it's stopped and the step fails
+    GuestWorkDir      = 'C:\ProgramData\VDI\Pipeline'   # pipeline-owned guest folder; deleted by CleanupGuest
+    Watcher = @{ LogPollSec = 10; IdlePollSec = 60; StatusPollSec = 60; WatchingWindowSec = 30
+                 StaleHeartbeatSec = 180; MaxRelaunches = 3; MaxStepAttempts = 4; FixTimeoutSec = 600 }
   }
 
   # Test pool receives every new snapshot; production pools only after approval
@@ -40,9 +45,14 @@
     MachineReadyTimeoutMin = 60
   }
 
-  # Snapshot retention (Prune = $false => report only)
-  # ProtectAncestors: never delete a parent of an in-use snapshot (Horizon tracks snapshots by path)
-  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }
+  # Snapshot naming and retention (Prune = $false => report only). Runs after production PostCheck passes.
+  # Names: '<NamePrefix> yy.MM.dd.HHmm'. Mode Chain keeps: root (Master) > previous Baseline > production Baseline.
+  # ProtectAncestors: Chain = keep parents of a pending push; Tree = keep parents of any in-use snapshot.
+  Snapshots = @{
+    NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true
+    ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15
+    CleanupFailedRuns = $true   # revert to / remove pre-maint snapshots of failed runs at the start of Maintain
+  }
 
   # Production promotion behaviour
   Promotion = @{

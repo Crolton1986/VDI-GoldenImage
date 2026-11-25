@@ -4,7 +4,8 @@
 .DESCRIPTION
     Server-rendered HTML over the pipeline module. Settings save to config/settings.json,
     credentials go to the SecretManagement vault of the account the dashboard runs as, and run
-    controls queue a request for the VDI-GI-Runner scheduled task (stages never run inside a web request).
+    controls queue a request for the VDI-GI-Runner scheduled task, or with -LocalAdmin start a separate
+    pwsh process for it (stages never run inside a web request).
 .PARAMETER ConfigPath
     Optional pipeline config file (defaults to pipeline.config.psd1 next to the module).
 .PARAMETER Port
@@ -93,7 +94,9 @@ $setupViewsPath = $ctx.SetupViewsPath
 $navContextPath = Join-Path $webRoot 'NavContext.ps1'
 $componentsPath = Join-Path $webRoot 'Components.ps1'
 
-Start-PodeServer -Quiet {
+# Several request threads so one slow request (a connection test waiting on MFA) doesn't block every page.
+# The request timeout (150 s, above the 120 s test limit) lives in server.psd1 next to this script.
+Start-PodeServer -Quiet -Threads 4 {
     # Make the context, module and view functions available in every route runspace.
     Set-PodeState -Name 'GIContext' -Value $ctx | Out-Null
     Import-PodeModule -Path $manifest
@@ -116,6 +119,14 @@ Start-PodeServer -Quiet {
             $c = (Get-PodeState -Name 'GIContext')
             if ($c.StopAt -and (Get-Date) -ge $c.StopAt) { Close-PodeServer }
         }
+    }
+
+    # --- Logging: errors and requests (408s included) go to <Paths.Logs>/dashboard_*.log ---
+    $logDir = [string]$ctx.Config.Paths.Logs
+    if ($logDir) {
+        if (-not (Test-Path -LiteralPath $logDir)) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+        New-PodeLoggingMethod -File -Path $logDir -Name 'dashboard_errors' -MaxDays 14 | Enable-PodeErrorLogging
+        New-PodeLoggingMethod -File -Path $logDir -Name 'dashboard_requests' -MaxDays 14 | Enable-PodeRequestLogging
     }
 
     # --- Endpoint ---
@@ -176,7 +187,15 @@ Start-PodeServer -Quiet {
             $runToken = Get-GIFormToken -Secret $c.FormSecret -User $user -RunId 'run'
             $notice += New-GIRunActionsHtml -Run $run -Token $runToken -Busy $busy
         }
-        Write-PodeHtmlResponse -Value (New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice)
+        $stepLogs = Get-GIRunStepLogs -Config (Get-GIDashboardConfig $c) -Run $run
+        Write-PodeHtmlResponse -Value (New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice -StepLogs $stepLogs)
+    }
+
+    # Live log of one guest-watcher step; polled by the run page while the step is Running.
+    Add-PodeRoute -Method Get -Path '/runs/:runId/steps/:stepId/log' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        $r = Get-GIStepLogResponse -Config (Get-GIDashboardConfig $c) -RunId ([string]$WebEvent.Parameters['runId']) -StepId ([string]$WebEvent.Parameters['stepId']) -Offset ([string]$WebEvent.Query['offset'])
+        Write-PodeJsonResponse -Value (ConvertTo-Json -InputObject $r.Body -Depth 6 -Compress) -StatusCode $r.Status
     }
 
     Add-PodeRoute -Method Post -Path '/runs/:runId/decision' @auth -ScriptBlock {
@@ -266,6 +285,7 @@ Start-PodeServer -Quiet {
             $shown = @{ Section = $sk; Values = @{} }
             foreach ($k in $current.Values.Keys) { $shown.Values[$k] = $current.Values[$k] }
             foreach ($k in $conv.Values.Keys) { $shown.Values[$k] = $conv.Values[$k] }
+            if ($current.ContainsKey('Installers')) { $shown.Installers = $current.Installers }
             $page = New-GISettingsSectionPage -Schema $schema -SectionKey $sk -SectionData $shown -Errors $errors `
                 -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId "settings:$sk") -Notice 'Not saved: fix the highlighted fields.' -IsHttps $c.IsHttps
             Write-PodeHtmlResponse -Value $page -StatusCode 400
@@ -331,8 +351,10 @@ Start-PodeServer -Quiet {
         if ($why) { Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message $why.Message) -StatusCode $why.Code; return }
         $user = Get-GIDashboardUser -Context $c -WebEvent $WebEvent
         $cfg = Get-GIDashboardConfig $c
-        $result = Test-GIConnection -Config $cfg -System $schema[$sk]['Test']
-        Write-GIAudit -Config $cfg -User $user -Action 'connection.test' -Target $sk -Detail @{ ok = $result.ok; detail = $result.detail }
+        Write-GIAudit -Config $cfg -User $user -Action 'connection.test.start' -Target $sk
+        # Separate process with a hard limit: an MFA push or a hung login can't block the web server
+        $result = Invoke-GIConnectionTest -ConfigPath $c.ConfigPath -System $schema[$sk]['Test']
+        Write-GIAudit -Config $cfg -User $user -Action 'connection.test' -Target $sk -Detail @{ ok = $result.ok; detail = $result.detail; seconds = $result.seconds }
         $page = New-GISettingsSectionPage -Schema $schema -SectionKey $sk -SectionData (Get-GISettingsSection -Config $cfg -Section $sk) `
             -Token (Get-GIFormToken -Secret $c.FormSecret -User $user -RunId "settings:$sk") -TestResult $result -IsHttps $c.IsHttps
         Write-PodeHtmlResponse -Value $page
@@ -350,6 +372,8 @@ Start-PodeServer -Quiet {
         $notice = switch ($WebEvent.Query['r']) {
             'queued'    { 'Queued. The runner task picks it up within a few seconds; the run appears in the run list.' }
             'norunner'  { 'Queued, but the VDI-GI-Runner task could not be started. Check that it is registered (Register-GIPipelineTasks.ps1).' }
+            'started'   { 'Started in a local process (local mode, no scheduled task). The run appears in the run list; output is in logs/runner-*.log.' }
+            'runfailed' { 'Queued, but the local runner process stopped right away. See the newest logs/runner-*.log.err.' }
             'cancelled' { 'Queued request cancelled.' }
             default { '' }
         }
@@ -370,15 +394,17 @@ Start-PodeServer -Quiet {
         $cfg = Get-GIDashboardConfig $c
         $action = [string]$WebEvent.Data['action']
         $p = @{ Config = $cfg; RequestedBy = $user; Action = $action }
-        if ($action -in 'FromStage', 'Stage') { $p.Stage = [string]$WebEvent.Data['stage']; $p.RunId = [string]$WebEvent.Data['runId'] }
+        if ($action -in 'FromStage', 'Stage') {
+            $p.Stage = [string]$WebEvent.Data['stage']; $p.RunId = [string]$WebEvent.Data['runId']
+            if ([string]$WebEvent.Data['step']) { $p.Step = [string]$WebEvent.Data['step'] }
+        }
         try {
             New-GIRunRequest @p | Out-Null
         } catch {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message "Not started: $($_.Exception.Message)") -StatusCode 409
             return
         }
-        $r = 'queued'
-        try { Start-GIRunnerTask } catch { $r = 'norunner' }
+        $r = Start-GIQueuedRun -Config $cfg -ConfigPath $c.ConfigPath -Local:([bool]$c.LocalAdmin)
         Move-PodeResponseUrl -Url "/run?r=$r"
     }
 
@@ -402,8 +428,7 @@ Start-PodeServer -Quiet {
             Write-PodeHtmlResponse -Value (New-GINotFoundPage -Message "Rollback not started: $($_.Exception.Message)") -StatusCode 409
             return
         }
-        $r = 'queued'
-        try { Start-GIRunnerTask } catch { $r = 'norunner' }
+        $r = Start-GIQueuedRun -Config $cfg -ConfigPath $c.ConfigPath -Local:([bool]$c.LocalAdmin)
         Move-PodeResponseUrl -Url "/run?r=$r"
     }
 

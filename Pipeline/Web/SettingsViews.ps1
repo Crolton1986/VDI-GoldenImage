@@ -76,6 +76,66 @@ function Get-GIControlHtml {
     }
 }
 
+function Get-GIPackagesFieldHtml {
+    <# Checkbox table for the 'packages' field. $Installers is Get-GIInstallerStatus output; without it only the checkboxes render. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)]$Field, $Value, $Installers = $null)
+    $fk = [string]$Field.Key
+    $selected = @(@($Value) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    $rowsByAction = @{}
+    $showStatus = $null -ne $Installers
+    if ($showStatus) { foreach ($p in @(Get-GIValue $Installers 'Packages' @())) { $rowsByAction[[string]$p.Action] = $p } }
+    $head = '<tr><th scope="col">Maintain</th><th scope="col">Package</th>'
+    if ($showStatus) { $head += '<th scope="col">Installer on host</th><th scope="col">Status</th>' }
+    $head += '</tr>'
+    $body = foreach ($action in @(Get-GIValue $Field 'ItemValues' @())) {
+        $a = [string]$action
+        $id = Get-GIHtmlId 'pkg' $a
+        $chk = ''
+        if ($selected -ccontains $a) { $chk = ' checked' }
+        $info = if ($rowsByAction.ContainsKey($a)) { $rowsByAction[$a] } else { $null }
+        $name = if ($info) { [string]$info.Name } else { $a }
+        $row = "<tr><td><input type=""checkbox"" id=""$id"" name=""$(ConvertTo-GIHtml $fk)"" value=""$(ConvertTo-GIHtml $a)""$chk></td>"
+        $row += "<td><label for=""$id"">$(ConvertTo-GIHtml $name)</label><div class=""help"">$(ConvertTo-GIHtml $a)$(if ($info) { " &middot; <code>$(ConvertTo-GIHtml $info.Mask)</code>" })</div></td>"
+        if ($showStatus) {
+            $file = '<span class="muted">-</span>'
+            if ($info -and $info.File) {
+                $meta = @()
+                if ($info.Version) { $meta += "v$($info.Version)" }
+                if ($null -ne $info.SizeMB) { $meta += "$($info.SizeMB) MB" }
+                if ($info.Modified) { $meta += ([datetime]$info.Modified).ToString('yyyy-MM-dd') }
+                $file = "<code>$(ConvertTo-GIHtml $info.File)</code><div class=""help"">$(ConvertTo-GIHtml ($meta -join ', '))</div>"
+            }
+            $state = if ($info) { [string]$info.State } else { 'NoFolder' }
+            $badge = switch ($state) {
+                'Found' { '<span class="badge st-ok">Found</span>' }
+                'Download' { '<span class="badge st-sched">Downloads automatically</span>' }
+                'Missing' {
+                    if ($selected -ccontains $a) { '<span class="badge st-bad">Missing</span>' } else { '<span class="badge st-pending">Missing</span>' }
+                }
+                default { '<span class="badge st-skip">Not checked</span>' }
+            }
+            $row += "<td>$file</td><td>$badge</td>"
+        }
+        "$row</tr>"
+    }
+    $h = "<table class=""edit pkgs""><thead>$head</thead><tbody>$(@($body) -join '')</tbody></table>"
+    if ($showStatus) {
+        $folder = [string](Get-GIValue $Installers 'Folder' '')
+        $ferr = Get-GIValue $Installers 'FolderError' $null
+        if ($ferr) { $h += "<div class=""testres fail"" role=""status"">$(ConvertTo-GIHtml $ferr)</div>" }
+        elseif ($folder) {
+            $miss = @(@(Get-GIValue $Installers 'Packages' @()) | Where-Object { $_.Selected -and $_.State -eq 'Missing' })
+            if ($miss.Count) { $h += "<div class=""testres fail"" role=""status"">$($miss.Count) ticked package(s) have no installer in $(ConvertTo-GIHtml $folder). Preflight will stop the run until you add them or untick them.</div>" }
+            else { $h += "<div class=""help"">Checked $(ConvertTo-GIHtml $folder) just now.</div>" }
+        } else {
+            $h += '<div class="help">No installer folder set, so the pipeline can''t check installers. They must already be in the Install folder inside the golden VM.</div>'
+        }
+    }
+    return $h
+}
+
 function Get-GITableFieldHtml {
     [CmdletBinding()]
     [OutputType([string])]
@@ -250,6 +310,9 @@ function New-GISettingsSectionPage {
                 'table' {
                     $h += "<div class=""lbl"">$label</div>$(Get-GITableFieldHtml -Field $f -Value $v)"
                 }
+                'packages' {
+                    $h += "<div class=""lbl"">$label</div>$(Get-GIPackagesFieldHtml -Field $f -Value $v -Installers (Get-GIValue $SectionData 'Installers' $null))"
+                }
                 default {
                     $h += "<label for=""$fid"">$label</label>$(Get-GIControlHtml -Field $f -Name $fk -Value $v)"
                 }
@@ -273,7 +336,7 @@ function New-GISettingsSectionPage {
             $cls = 'fail'
             $word = 'Failed'
             if ($ok) { $cls = 'ok'; $word = 'OK' }
-            $h += "<div class=""testres $cls"" role=""status""><strong>$word</strong> $(ConvertTo-GIHtml (Get-GIValue $TestResult 'detail'))</div>"
+            $h += "<div class=""testres $cls"" role=""status""><strong>$word</strong> $((ConvertTo-GIHtml ([string](Get-GIValue $TestResult 'detail'))) -replace "`r?`n", '<br>')</div>"
         }
     }
 
@@ -416,6 +479,27 @@ function New-GIRunActionsHtml {
     $note = ''
     if ($Busy) { $dis = ' disabled'; $note = '<p class="muted">Disabled while the pipeline is busy.</p>' }
     $tok = Get-GITokenInput $Token
+    $steps = @(@(Get-GIValue (Get-GIValue (Get-GIValue $Run 'stages' $null) 'Maintain' $null) 'steps' @()) | Where-Object { $null -ne $_ })
+    if ($status -eq 'Failed' -and [string](Get-GIValue $Run 'currentStage') -eq 'Maintain' -and $steps.Count) {
+        # Resume picks the first unfinished step; SafetySnapshot restarts Maintain (a snapshot revert also forces that)
+        $at = @($steps | Where-Object { [string](Get-GIValue $_ 'status') -in 'Failed', 'Running' }) | Select-Object -First 1
+        if (-not $at) { $at = @($steps | Where-Object { [string](Get-GIValue $_ 'status') -eq 'Pending' }) | Select-Object -First 1 }
+        $atLabel = if ($at) { ConvertTo-GIHtml (Get-GIValue $at 'label') } else { 'the first unfinished step' }
+        $opts = foreach ($s in $steps) {
+            if ([string](Get-GIValue $s 'status') -eq 'Skipped') { continue }
+            $sid = ConvertTo-GIHtml (Get-GIValue $s 'id')
+            $sel = ''
+            if ($at -and [string](Get-GIValue $s 'id') -eq [string](Get-GIValue $at 'id')) { $sel = ' selected' }
+            "<option value=""$sid""$sel>$(ConvertTo-GIHtml (Get-GIValue $s 'label'))</option>"
+        }
+        $hidden = "$tok<input type=""hidden"" name=""runId"" value=""$rid""><input type=""hidden"" name=""stage"" value=""Maintain"">"
+        $h = "<section class=""card""><h3>Actions</h3>$note"
+        $h += "<form method=""post"" action=""/run/start"">$hidden<input type=""hidden"" name=""action"" value=""FromStage""><button type=""submit""$dis>Resume Maintain at $atLabel</button> "
+        $h += "<button type=""submit"" name=""step"" value=""SafetySnapshot"" class=""sec""$dis>Restart Maintain from the beginning</button></form>"
+        $h += "<form method=""post"" action=""/run/start"" class=""formbox"">$hidden<input type=""hidden"" name=""action"" value=""FromStage""><label>Resume from step <select name=""step""$dis>$(@($opts) -join '')</select></label> <button type=""submit"" class=""sec""$dis>Resume from this step</button></form>"
+        $h += '<p class="muted">Steps that already succeeded are skipped. If the golden VM was reverted to a snapshot since this run started, Maintain restarts from the beginning instead.</p></section>'
+        return $h
+    }
     if ($status -eq 'Failed' -and $stage) {
         return "<section class=""card""><h3>Actions</h3>$note<form method=""post"" action=""/run/start"">$tok<input type=""hidden"" name=""runId"" value=""$rid""><input type=""hidden"" name=""stage"" value=""$stage""><button type=""submit"" name=""action"" value=""FromStage""$dis>Retry from $stage</button> <button type=""submit"" name=""action"" value=""Stage"" class=""sec""$dis>Re-run $stage only</button></form></section>"
     }

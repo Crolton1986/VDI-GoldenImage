@@ -368,11 +368,162 @@ Describe 'Test-GIConnection' {
     }
 }
 
+Describe 'Connect-GITestVIServer' {
+    BeforeAll {
+        # PowerCLI isn't installed where the tests run; define stand-ins so they can be mocked
+        if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { function global:Connect-VIServer { param($Server, $Credential) } }
+        if (-not (Get-Command Set-PowerCLIConfiguration -ErrorAction SilentlyContinue)) { function global:Set-PowerCLIConfiguration { param($Scope, $WebOperationTimeoutSeconds, [switch]$Confirm) } }
+    }
+    BeforeEach {
+        $cfg = New-TestConfig
+        Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { [pscredential]::new('svc-vc', (ConvertTo-SecureString 'x' -AsPlainText -Force)) }
+        Mock -ModuleName VDI-GIPipeline Set-PowerCLIConfiguration {}
+    }
+
+    It 'fails fast without calling Connect-VIServer when port 443 is unreachable' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $false }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer {}
+        { Connect-GITestVIServer -Config $cfg } | Should -Throw "*Can't reach vc on port 443*"
+        Should -Invoke -ModuleName VDI-GIPipeline Connect-VIServer -Times 0 -Exactly
+    }
+
+    It 'turns a denied or unanswered MFA login into a message that names MFA' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $true }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer { throw 'Cannot complete login due to an incorrect user name or password.' }
+        { Connect-GITestVIServer -Config $cfg } | Should -Throw '*svc-vc*Duo*'
+    }
+
+    It 'Test-GIConnection returns ok = $false (not a hang or throw) when the MFA push is denied' {
+        Mock -ModuleName VDI-GIPipeline Test-GITcpPort { $true }
+        Mock -ModuleName VDI-GIPipeline Connect-VIServer { throw 'Cannot complete login due to an incorrect user name or password.' }
+        $r = Test-GIConnection -Config $cfg -System vCenter
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match 'MFA'
+    }
+}
+
+Describe 'Test-GITcpPort' {
+    It 'returns $false for a closed port instead of throwing' {
+        Test-GITcpPort -Server '127.0.0.1' -Port 1 -TimeoutMs 1000 | Should -BeFalse
+    }
+}
+
+Describe 'Test-GIConnection AppVolumes' {
+    BeforeAll {
+        # A web exception with a status code, shaped like what Invoke-RestMethod throws
+        function global:New-GIHttpError([int]$Code, [string]$Reason) {
+            $resp = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$Code)
+            $resp.ReasonPhrase = $Reason
+            $ex = [Microsoft.PowerShell.Commands.HttpResponseException]::new("Response status code does not indicate success: $Code ($Reason).", $resp)
+            return $ex
+        }
+    }
+    BeforeEach {
+        $cfg = New-TestConfig
+        $cfg.AppVolumes = @{ Server = 'avm.test'; CredentialSecret = 'GI-av'; Endpoints = @{ Session = '/app_volumes/sessions'; OnlineEntities = '/app_volumes/online_entities' } }
+        Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { [pscredential]::new('u', (ConvertTo-SecureString 'p' -AsPlainText -Force)) }
+        $global:GIAvCalls = [System.Collections.Generic.List[string]]::new()
+    }
+    AfterAll { Remove-Item function:global:New-GIHttpError -ErrorAction SilentlyContinue; Remove-Variable GIAvCalls -Scope Global -ErrorAction SilentlyContinue }
+
+    It 'falls back to /cv_api paths on 404 and says which paths worked' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod {
+            $global:GIAvCalls.Add("$Method $Uri")
+            if ($Uri -like '*/app_volumes/*') { throw (New-GIHttpError 404 'Not Found') }
+            if ($Uri -like '*online_entities') { return ('{"online":{"records":[{"name":"a"},{"name":"b"}]}}' | ConvertFrom-Json) }
+            return @{}
+        }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeTrue
+        $r.detail | Should -Match '2 online entities'
+        $r.detail | Should -Match 'Login worked at /cv_api/sessions'
+        $r.detail | Should -Match 'POST https://avm.test/app_volumes/sessions -> 404 Not Found'
+        $r.detail | Should -Match 'Online entities worked at /cv_api/online_entities'
+    }
+
+    It 'stops on a non-404 and reports the URL and status' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod { $global:GIAvCalls.Add("$Uri"); throw (New-GIHttpError 401 'Unauthorized') }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match 'POST https://avm.test/app_volumes/sessions -> 401 Unauthorized'
+        $global:GIAvCalls.Count | Should -Be 1
+    }
+
+    It 'lists every path tried when all of them 404' {
+        Mock -ModuleName VDI-GIPipeline Invoke-RestMethod { throw (New-GIHttpError 404 'Not Found') }
+        $r = Test-GIConnection -Config $cfg -System AppVolumes
+        $r.ok | Should -BeFalse
+        $r.detail | Should -Match '/app_volumes/sessions -> 404'
+        $r.detail | Should -Match '/cv_api/sessions -> 404'
+    }
+}
+
 Describe 'Set-GIPipelineScheduleTask' {
     It 'reports ok = $false off Windows' -Skip:$IsWindows {
         $cfg = New-TestConfig
         $r = Set-GIPipelineScheduleTask -Config $cfg
         $r.ok | Should -BeFalse
         $r.detail | Should -Match 'only available on Windows'
+    }
+}
+
+Describe 'Start-GIQueuedRun' {
+    BeforeEach { $cfg = New-TestConfig }
+
+    It 'starts a local process and never touches the scheduled task with -Local' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess { @{ Pid = 1234; Log = 'x.log'; Error = $null } }
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerTask {}
+        Start-GIQueuedRun -Config $cfg -Local | Should -Be 'started'
+        Should -Invoke -ModuleName VDI-GIPipeline Start-GIRunnerTask -Times 0 -Exactly
+    }
+
+    It 'reports runfailed when the local process dies right away' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess { @{ Pid = 1234; Log = 'x.log'; Error = 'module not found' } }
+        Start-GIQueuedRun -Config $cfg -Local -WarningAction SilentlyContinue | Should -Be 'runfailed'
+    }
+
+    It 'uses the scheduled task without -Local and reports norunner when it is missing' {
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerTask { throw 'task not found' }
+        Mock -ModuleName VDI-GIPipeline Start-GIRunnerProcess {}
+        Start-GIQueuedRun -Config $cfg | Should -Be 'norunner'
+        Should -Invoke -ModuleName VDI-GIPipeline Start-GIRunnerProcess -Times 0 -Exactly
+    }
+}
+
+Describe 'Run requests with a Maintain step' {
+    BeforeEach {
+        $cfg = New-TestConfig
+        $reqPath = Join-Path $cfg.Paths.State 'run-request.json'
+        $runId = New-TestRun -Config $cfg
+        $run = Get-GIRun -Config $cfg -RunId $runId
+        $plan = @(
+            [pscustomobject]@{ Id = 'SafetySnapshot'; Label = 'Safety snapshot'; Resumable = $true; Applies = $true; SkipReason = '' }
+            [pscustomobject]@{ Id = 'Pkg:Horizon'; Label = 'Install Horizon Agent'; Resumable = $true; Applies = $true; SkipReason = '' }
+        )
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan $plan
+        Mock -ModuleName VDI-GIPipeline Write-GIAudit {}
+    }
+
+    It 'queues a step that exists in the run' {
+        $r = New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:Horizon' -RunId $runId -RequestedBy 'a'
+        $r.step | Should -Be 'Pkg:Horizon'
+        (Get-Content $reqPath -Raw | ConvertFrom-Json).step | Should -Be 'Pkg:Horizon'
+    }
+
+    It 'rejects a step the run does not have' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:DEM' -RunId $runId -RequestedBy 'a' } | Should -Throw "*no Maintain step 'Pkg:DEM'*"
+        Test-Path $reqPath | Should -BeFalse
+    }
+
+    It 'rejects a malformed step' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:Horizon;rm' -RunId $runId -RequestedBy 'a' } | Should -Throw "Invalid step*"
+    }
+
+    It 'rejects a step for any stage but Maintain' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage TestPush -Step 'Pkg:Horizon' -RunId $runId -RequestedBy 'a' } | Should -Throw '*only be given for the Maintain stage*'
+    }
+
+    It 'stores step as null when none is given' {
+        (New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -RunId $runId -RequestedBy 'a').step | Should -BeNullOrEmpty
     }
 }

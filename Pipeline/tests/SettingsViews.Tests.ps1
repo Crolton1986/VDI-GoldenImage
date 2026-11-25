@@ -222,3 +222,80 @@ Describe 'Run actions' {
         (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Failed'; currentStage = 'X' }) -Token 't' -Busy $true) | Should -Match '\sdisabled[\s>]'
     }
 }
+
+Describe 'Packages field' {
+    BeforeAll {
+        $script:pf = @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = @('VmTools', 'Horizon', 'MsTeams', 'DEM') }
+        $script:inst = [pscustomobject]@{ Folder = 'D:\Inst'; FolderError = $null; Packages = @(
+                [pscustomobject]@{ Action = 'VmTools'; Name = 'VMware Tools'; Mask = 'VMware-tools-*64.exe'; Selected = $true; State = 'Found'; File = 'VMware-tools-12.5.0-x86_64.exe'; Version = '12.5.0'; SizeMB = 110.2; Modified = [datetime]'2026-11-01' }
+                [pscustomobject]@{ Action = 'Horizon'; Name = 'Horizon Agent'; Mask = '*Horizon-Agent-x86_64-*.exe'; Selected = $true; State = 'Missing'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+                [pscustomobject]@{ Action = 'MsTeams'; Name = 'Microsoft Teams for VDI'; Mask = 'teamsbootstrapper.exe'; Selected = $false; State = 'Download'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+                [pscustomobject]@{ Action = 'DEM'; Name = 'Dynamic Environment Manager'; Mask = '*.msi'; Selected = $false; State = 'Missing'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+            ) }
+    }
+    It 'ticks the selected packages, one checkbox per package, all named after the field' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools', 'Horizon') -Installers $inst
+        ([regex]::Matches($h, 'type="checkbox" id="pkg_\w+" name="Actions"')).Count | Should -Be 4
+        $h | Should -Match 'id="pkg_VmTools" name="Actions" value="VmTools" checked'
+        $h | Should -Not -Match 'value="MsTeams" checked'
+    }
+    It 'shows the host file and a status badge per package' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools', 'Horizon') -Installers $inst
+        $h | Should -Match 'VMware-tools-12\.5\.0-x86_64\.exe'
+        $h | Should -Match 'v12\.5\.0, 110\.2 MB, 2026-11-01'
+        $h | Should -Match 'st-bad">Missing'
+        $h | Should -Match 'st-pending">Missing'
+        $h | Should -Match 'Downloads automatically'
+        $h | Should -Match '1 ticked package\(s\) have no installer'
+    }
+    It 'renders only checkboxes without installer data' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools')
+        $h | Should -Not -Match 'Installer on host'
+        $h | Should -Not -Match 'badge'
+    }
+    It 'explains when no installer folder is set' {
+        $noFolder = [pscustomobject]@{ Folder = ''; FolderError = $null; Packages = @() }
+        Get-GIPackagesFieldHtml -Field $pf -Value @() -Installers $noFolder | Should -Match 'No installer folder set'
+    }
+    It 'is rendered by the section page from SectionData.Installers' {
+        $sch = [ordered]@{ Packages = @{ Title = 'Packages'; ConfigPath = 'GoldenImage'; Test = $null; ReadOnly = $false; Fields = @($pf) } }
+        $h = New-GISettingsSectionPage -Schema $sch -SectionKey 'Packages' -SectionData @{ Values = @{ Actions = @('Horizon') }; Installers = $inst } -Token 't'
+        $h | Should -Match 'value="Horizon" checked'
+        $h | Should -Match 'Installer on host'
+    }
+}
+
+Describe 'Maintain resume actions' {
+    BeforeAll {
+        function script:New-FailedRun($steps, $stage = 'Maintain') {
+            [pscustomobject]@{ runId = '20261125-010101'; status = 'Failed'; currentStage = $stage
+                stages = [pscustomobject]@{ Maintain = [pscustomobject]@{ status = 'Failed'; steps = $steps } } }
+        }
+        $script:steps = @(
+            [pscustomobject]@{ id = 'SafetySnapshot'; label = 'Safety snapshot'; status = 'Succeeded' }
+            [pscustomobject]@{ id = 'CopyInstallers'; label = 'Copy installers'; status = 'Skipped' }
+            [pscustomobject]@{ id = 'WindowsUpdate'; label = 'Windows Update'; status = 'Succeeded' }
+            [pscustomobject]@{ id = 'Pkg:Horizon'; label = 'Install Horizon Agent'; status = 'Failed' }
+            [pscustomobject]@{ id = 'Finalize'; label = 'Finalize'; status = 'Pending' }
+        )
+    }
+    It 'offers resume at the failed step, restart, and a step picker without skipped steps' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk'
+        $h | Should -Match 'Resume Maintain at Install Horizon Agent'
+        $h | Should -Match 'name="step" value="SafetySnapshot"[^>]*>Restart Maintain from the beginning'
+        $h | Should -Match '<option value="Pkg:Horizon" selected>Install Horizon Agent</option>'
+        $h | Should -Not -Match 'value="CopyInstallers"'
+        $h | Should -Match 'name="stage" value="Maintain"'
+        ([regex]::Matches($h, 'name="action" value="FromStage"')).Count | Should -Be 2
+        ([regex]::Matches($h, 'name="token" value="tk"')).Count | Should -Be 2
+    }
+    It 'falls back to the plain retry buttons for runs without steps' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun @()) -Token 'tk'
+        $h | Should -Match 'Retry from Maintain'
+        $h | Should -Not -Match 'Resume Maintain'
+    }
+    It 'disables everything while busy' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk' -Busy $true
+        ([regex]::Matches($h, '\sdisabled[\s>]')).Count | Should -BeGreaterThan 2
+    }
+}
