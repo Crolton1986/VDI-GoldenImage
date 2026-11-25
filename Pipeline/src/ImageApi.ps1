@@ -32,6 +32,7 @@ function Get-GIApiRouteTable {
         @{ M = 'GET';    P = '^/settings/(?<section>[^/]+)$';                               R = 'Viewer';   H = 'Get-GIApiGlobalSettings' }
         @{ M = 'POST';   P = '^/settings/(?<section>[^/]+)$';                               R = 'Admin';    H = 'Save-GIApiGlobalSettings' }
         @{ M = 'POST';   P = '^/settings/(?<section>[^/]+)/test$';                          R = 'Admin';    H = 'Test-GIApiSettings' }
+        @{ M = 'GET';    P = '^/inventory$';                                                R = 'Admin';    H = 'Get-GIApiInventory' }
         @{ M = 'GET';    P = '^/fixes$';                                                    R = 'Viewer';   H = 'Get-GIApiFixes' }
     )
 }
@@ -284,12 +285,15 @@ function Invoke-GILiveSource {
         }
         $out = $w.Shell.EndInvoke($async)
         if ($w.Shell.HadErrors -and $w.Shell.Streams.Error.Count) {
-            $msg = [string]$w.Shell.Streams.Error[0].Exception.Message
+            $ex = $w.Shell.Streams.Error[0].Exception
+            while ($ex.InnerException) { $ex = $ex.InnerException }
+            $msg = [string]$ex.Message
             return @{ Ok = $false; Data = $null; Error = "${Name}: $msg" }
         }
         return @{ Ok = $true; Data = @($out | Select-Object -Last 1)[0]; Error = $null }
     } catch {
-        return @{ Ok = $false; Data = $null; Error = "${Name}: $($_.Exception.Message)" }
+        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+        return @{ Ok = $false; Data = $null; Error = "${Name}: $($ex.Message)" }
     }
 }
 
@@ -362,6 +366,18 @@ function New-GIApiImage {
     param($Req)
     $payload = @{}
     if ($Req.Body -is [System.Collections.IDictionary]) { foreach ($k in $Req.Body.Keys) { if ($k -ne 'token') { $payload[$k] = $Req.Body[$k] } } }
+    if ($Req.Query['dryRun']) {
+        # Validate only (wizard review step): same rules, nothing is saved
+        try {
+            $existing = @(Get-GIImageEntries -Config $Req.Config)
+            $entry = @{ Name = ([string]$payload['Name']).Trim() }
+            foreach ($b in ($script:GIImageBlocks + 'AppVolumes')) { if ($payload.ContainsKey($b)) { $entry[$b] = Copy-GIValue $payload[$b] } }
+            $entry.Id = New-GIImageId -Name $entry.Name -Existing @($existing | ForEach-Object { $_.Id })
+            if (-not $entry.Name) { throw 'Image not saved, 1 problem(s): Name: required' }
+            Assert-GIImageEntryValid -Entry $entry -Others $existing
+        } catch { return (New-GIApiError 400 $_.Exception.Message) }
+        return @{ Code = 200; Body = [ordered]@{ valid = $true } }
+    }
     try { $e = New-GIImageFromPayload -Config $Req.Config -Payload $payload -By $Req.User }
     catch { return (New-GIApiError 400 $_.Exception.Message) }
     @{ Code = 201; Body = [ordered]@{ id = $e.Id; name = $e.Name } }
@@ -557,4 +573,35 @@ function Invoke-GIApiRollback {
     }
     Write-GIApiAudit -Req $Req -Action 'pool.rollback' -Target $pool -Detail @{ image = $img.Id; snapshot = [string]$res.SnapshotName; logoffPolicy = $policy; startTime = $startTime.ToString('o'); runId = $runId } -ImageConfig $img.Config
     @{ Code = 200; Body = [ordered]@{ pool = $pool; snapshot = [string]$res.SnapshotName; logoffPolicy = $policy; startTime = $startTime.ToString('o') } }
+}
+
+function Get-GIApiInventory {
+    <# VMs from vCenter and pools from Horizon, each with the image that already uses it. Admin only (wizard). #>
+    param($Req)
+    $entries = @(Get-GIImageEntries -Config $Req.Config)
+    $usedVm = @{}; $usedPool = @{}
+    foreach ($e in $entries) {
+        $usedVm[([string]$e.GoldenImage.VmName).ToLowerInvariant()] = $e.Name
+        foreach ($p in (Get-GIImagePoolNames $e)) { $usedPool[$p.ToLowerInvariant()] = $e.Name }
+    }
+    $cfg = $Req.Config
+    $vcWork = {
+        param($c)
+        $srv = $c.vCenter.Server
+        if (-not @($global:DefaultVIServers | Where-Object { $_.IsConnected -and $_.Name -eq $srv })) { Connect-VIServer -Server $srv -Credential (Get-GISecretCredential -Name $c.vCenter.CredentialSecret) -ErrorAction Stop | Out-Null }
+        , @(Get-VM -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ name = $_.Name; power = [string]$_.PowerState; os = [string]$_.Guest.OSFullName; snapshots = @(Get-Snapshot -VM $_ -ErrorAction SilentlyContinue).Count } })
+    }
+    $hzWork = {
+        param($c)
+        if (-not $global:GILiveHzAt -or ((Get-Date) - $global:GILiveHzAt).TotalMinutes -gt 10) { Connect-GIHorizon -Config $c; $global:GILiveHzAt = Get-Date }
+        , @(Get-GIHorizonPools | ForEach-Object { [pscustomobject]@{ name = [string]$_.name } })
+    }
+    $inv = if (Get-GIOpt $Req 'LiveInvoker') { Get-GIOpt $Req 'LiveInvoker' } else { { param($n, $w, $a, $t) Invoke-GILiveSource -Name $n -Work $w -ArgumentList $a -TimeoutSec $t } }
+    $vc = & $inv 'vCenter' $vcWork @($cfg) 15
+    $hz = & $inv 'Horizon' $hzWork @($cfg) 15
+    @{ Code = 200; Body = [ordered]@{
+            vms = @(if ($vc.Ok) { @($vc.Data) | ForEach-Object { [ordered]@{ name = $_.name; power = $_.power; os = $_.os; snapshots = $_.snapshots; usedBy = [string]$usedVm[([string]$_.name).ToLowerInvariant()] } } })
+            pools = @(if ($hz.Ok) { @($hz.Data) | ForEach-Object { [ordered]@{ name = $_.name; usedBy = [string]$usedPool[([string]$_.name).ToLowerInvariant()] } } })
+            errors = @(@(if (-not $vc.Ok) { $vc.Error }) + @(if (-not $hz.Ok) { $hz.Error }))
+        } }
 }

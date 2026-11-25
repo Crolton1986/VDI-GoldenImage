@@ -14,6 +14,7 @@ function Set-GINavContext {
     }
     $isAdmin = [bool](Test-GIDashboardAdmin -Context $Context -WebEvent $WebEvent)
     $isApprover = [bool](Test-GIDashboardApprover -Context $Context -WebEvent $WebEvent)
+    try { $null = Write-GISignIn -Config (Get-GIDashboardConfig $Context) -User (Get-GIDashboardUser -Context $Context -WebEvent $WebEvent) -Role $(if ($isAdmin) { 'Admin' } elseif ($isApprover) { 'Approver' } else { 'Viewer' }) } catch { Write-Verbose "Sign-in audit skipped: $($_.Exception.Message)" }
     $global:GINavContext = @{
         Path          = if ($WebEvent) { [string]$WebEvent.Path } else { '' }
         IsAdmin       = $isAdmin

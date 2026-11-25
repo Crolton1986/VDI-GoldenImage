@@ -50,3 +50,34 @@ Describe 'Write-GIAudit / Get-GIAudit' {
         { Write-GIAudit -Config $bad -User 'u' -Action 'a' -Target 't' -WarningVariable w -WarningAction SilentlyContinue; $w | Should -Not -BeNullOrEmpty } | Should -Not -Throw
     }
 }
+
+Describe 'Search and sign-in audit' {
+    BeforeEach {
+        $script:cfg = @{ Paths = @{ State = (New-Item -ItemType Directory (Join-Path $TestDrive ([guid]::NewGuid().ToString('N')))).FullName } }
+    }
+    It 'records a sign-in once per user per period and skips system users' {
+        Write-GISignIn -Config $script:cfg -User 'LAB\jwood' -Role Admin | Should -BeTrue
+        Write-GISignIn -Config $script:cfg -User 'LAB\jwood' -Role Admin | Should -BeFalse
+        Write-GISignIn -Config $script:cfg -User 'LAB\other' -Role Viewer | Should -BeTrue
+        Write-GISignIn -Config $script:cfg -User 'local-admin' | Should -BeFalse
+        @(Get-GIAudit -Config $script:cfg | Where-Object action -eq 'auth.signin').Count | Should -Be 2
+    }
+    It 'filters by image, category, user and date and pages newest first' {
+        Write-GIAudit -Config $script:cfg -User 'a' -Action 'settings.update' -Image 'x' -Detail @{ section = 'Packages' }
+        Write-GIAudit -Config $script:cfg -User 'b' -Action 'vm.power' -Image 'y'
+        Write-GIAudit -Config $script:cfg -User 'a' -Action 'auth.signin'
+        (Search-GIAudit -Config $script:cfg -Image 'x').Total | Should -Be 1
+        (Search-GIAudit -Config $script:cfg -Category 'signin').Total | Should -Be 1
+        (Search-GIAudit -Config $script:cfg -User 'a').Total | Should -Be 2
+        (Search-GIAudit -Config $script:cfg -From ([datetime]'2999-01-01')).Total | Should -Be 0
+        $p = Search-GIAudit -Config $script:cfg -PageSize 2 -Page 2
+        @($p.Entries).Count | Should -Be 1
+        $p.Total | Should -Be 3
+    }
+    It 'never shows secret-like detail keys and defaults old entries sensibly' {
+        $e = [pscustomobject]@{ at = '2026-01-01T00:00:00'; user = 'u'; action = 'credential.set'; detail = [pscustomobject]@{ section = 'vCenter'; password = 'x'; userName = 'svc' } }
+        (Get-GIAuditDetailText $e) | Should -Not -Match 'x$'
+        (Get-GIAuditDetailText $e) | Should -Not -Match 'password'
+        Get-GIAuditResult $e | Should -Be 'Saved'
+    }
+}

@@ -1,6 +1,8 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
+    # Page-wide assertions below look at markup only, not the shared page script
+    function Get-GIUiScript { '' }
     . (Join-Path $PSScriptRoot '..' 'Web' 'SettingsViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'SetupViews.ps1')
 

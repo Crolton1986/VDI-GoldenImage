@@ -4,6 +4,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'SettingsViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'SetupViews.ps1')
+    foreach ($f in 'ImageViews', 'ImageScripts', 'RunViews', 'AdminViews') { . (Join-Path $PSScriptRoot '..' 'Web' "$f.ps1") }
 
     $script:schema = Get-GISettingsSchema
     $script:run = [pscustomobject]@{ runId = '20261124-120000'; status = 'Succeeded'; stages = @() }
@@ -23,14 +24,16 @@ BeforeAll {
         NavItems $Html | ForEach-Object { ($_ -split '\|')[1, 2] -join '|' }
     }
     function script:Pages {
+        $script:img = [ordered]@{ id = 'a'; name = 'A'; description = ''; os = ''; paused = $false; vm = 'VM'; testPool = 'T'; productionPools = @('P'); packages = @(); autoPromote = $false
+            schedule = @{ day = 'Tuesday'; time = '20:00' }; maintenanceWindow = @{ days = @('Saturday'); startTime = '22:00' }; lastRun = $null; activeRun = $null; lastKnownGood = $null }
         [ordered]@{
-            list     = { New-GIRunListPage -Runs @($script:run) }
-            detail   = { New-GIRunDetailPage -Run $script:run }
-            pools    = { New-GIPoolsPage -LastKnownGood $null -Runs @($script:run) -TestPoolName 'TST' }
+            home     = { New-GIHomePage -Summaries @($script:img) -Ctx (Get-GIViewContext) }
+            overview = { New-GIImageOverviewPage -Summary $script:img -Ctx (Get-GIViewContext) }
+            runs     = { New-GIImageRunsPage -Summary $script:img -Ctx (Get-GIViewContext) -Runs @() -Total 0 }
             notfound = { New-GINotFoundPage }
-            settings = { New-GISettingsSectionPage -Schema $script:schema -SectionKey 'vCenter' -SectionData @{ Values = @{} } -Token 't' }
-            runctl   = { New-GIRunControlPage -Runs @($script:run) -Lock $null -PendingRequest $null -Token 't' -Stages @('Preflight') -TestPool 'TST' -ProdPools @('PRD') -LastKnownGood '' }
-            audit    = { New-GIAuditPage -Entries @() }
+            global   = { New-GIGlobalSettingsPage -Ctx (Get-GIViewContext) -Section 'vCenter' -BodyHtml '<p>x</p>' }
+            audit    = { New-GIAuditLogPage -Entries @() }
+            wizard   = { New-GIWizardPage -Ctx (Get-GIViewContext) -Installers ([pscustomobject]@{ Packages = @() }) }
             setup    = { New-GISetupPage -State ([pscustomobject]@{ schemaVersion = 1; mode = $null; modeLocked = $false; options = [pscustomobject]@{ invalidCertAction = 'Warn' }; updatedAt = ''; steps = [pscustomobject]@{} }) -Token 't' }
         }
     }
@@ -51,14 +54,14 @@ Describe 'Side navigation' {
     }
     It 'has no Runs item and no settings children' {
         Ctx '/' $true
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         (NavItems $html) -join ';' | Should -Not -CMatch 'navitem\|Runs\|'
         $html | Should -Not -Match 'navchild'
         $html | Should -Match '<hr class="navdivider">'
     }
     It 'hides Setup and disables Global settings for a viewer' {
         Ctx '/' $false
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         $items = @(NavItems $html)
         $items | Where-Object { $_ -like '*|Setup|*' } | Should -BeNullOrEmpty
         $items | Where-Object { $_ -like 'navitem|Global settings|*' } | Should -Match '\|True\|'
@@ -67,11 +70,11 @@ Describe 'Side navigation' {
     }
     It 'enables every item for an admin' {
         Ctx '/' $true
-        @(NavItems (New-GIRunListPage -Runs @())) | Where-Object { $_ -match '\|True\|' } | Should -BeNullOrEmpty
+        @(NavItems (New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext))) | Where-Object { $_ -match '\|True\|' } | Should -BeNullOrEmpty
     }
     It 'disables everything except Setup while setup is incomplete' {
         Ctx '/setup' $true $true $false
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         $enabled = @(NavItems $html | Where-Object { $_ -match '^navitem\|.*\|False\|' })
         $enabled.Count | Should -Be 1
         $enabled[0] | Should -Match '^navitem\|Setup\|/setup\|False\|True$'
@@ -79,25 +82,25 @@ Describe 'Side navigation' {
     }
     It 'behaves normally in setup mode once setup is complete' {
         Ctx '/' $true $true $true
-        @(NavItems (New-GIRunListPage -Runs @())) | Where-Object { $_ -match '^navitem\|.*\|True\|' } | Should -BeNullOrEmpty
+        @(NavItems (New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext))) | Where-Object { $_ -match '^navitem\|.*\|True\|' } | Should -BeNullOrEmpty
     }
     It 'marks the active item' {
         Ctx '/' $true
-        NavItems (New-GIRunListPage -Runs @()) | Where-Object { $_ -match '^navitem.*\|True$' } | Should -Be 'navitem|Golden images|/|False|True'
+        NavItems (New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)) | Where-Object { $_ -match '^navitem.*\|True$' } | Should -Be 'navitem|Golden images|/|False|True'
         Ctx '/runs/20261124-120000' $true
-        NavItems (New-GIRunDetailPage -Run $script:run) | Where-Object { $_ -match '^navitem.*\|True$' } | Should -Be 'navitem|Golden images|/|False|True'
+        NavItems (New-GIRunNotFoundPage) | Where-Object { $_ -match '^navitem.*\|True$' } | Should -Be 'navitem|Golden images|/|False|True'
         Ctx '/settings/Pools' $true
         NavItems (New-GINotFoundPage) | Where-Object { $_ -match '^navitem.*\|True$' } | Should -Be 'navitem|Global settings|/settings|False|True'
     }
     It 'shows the user name and role badge in the top bar' {
         $global:GINavContext = @{ Path = '/'; IsAdmin = $false; IsApprover = $true; UserName = 'LAB\approver1'; Role = 'Approver'; SetupMode = $false; SetupComplete = $true }
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         $html | Should -Match '<span>LAB\\approver1</span><span class="rolepill">Approver</span>'
         $html | Should -Match '<div class="apptitle">VDI Golden Image Pipeline</div>'
     }
     It 'has landmarks, a skip link and a live region' {
         Ctx '/' $true
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         $html | Should -Match '<header class="topbar">'
         $html | Should -Match '<nav class="sidenav" id="sidenav" aria-label="Main">'
         $html | Should -Match '<main id="main"'
@@ -107,7 +110,7 @@ Describe 'Side navigation' {
     }
     It 'has the collapse and mobile toggle buttons and the storage script' {
         Ctx '/' $true
-        $html = New-GIRunListPage -Runs @()
+        $html = New-GIHomePage -Summaries @() -Ctx (Get-GIViewContext)
         $html | Should -Match '<button type="button" class="navcollapse" aria-expanded="true"'
         $html | Should -Match 'class="navtoggle-mobile" aria-controls="sidenav" aria-expanded="false"'
         $html | Should -Match 'giNavCollapsed'

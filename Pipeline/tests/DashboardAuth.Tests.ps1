@@ -42,20 +42,6 @@ Describe 'Approver checks' {
     }
 }
 
-Describe 'Approval form' {
-    It 'encodes values and posts to the decision route' {
-        $html = New-GIApprovalForm -RunId '20261124-120000' -Token 'a"b' -DefaultStart ([datetime]'2026-11-28 22:00')
-        $html | Should -Match 'action="/runs/20261124-120000/decision"'
-        $html | Should -Match 'value="2026-11-28T22:00"'
-        $html | Should -Match 'a&quot;b'
-    }
-    It 'detail page shows the form only when passed in' {
-        $run = '{"runId":"20261124-120000","status":"AwaitingApproval","stages":{},"approval":{"decision":null}}' | ConvertFrom-Json
-        New-GIRunDetailPage -Run $run | Should -Not -Match '<form'
-        New-GIRunDetailPage -Run $run -ApprovalFormHtml '<form id="x"></form>' | Should -Match '<form id="x">'
-    }
-}
-
 Describe 'Roles and POST checks' {
     BeforeAll {
         $script:base = @{ NoAuth = $false; LocalAdmin = $false; ApproverShort = 'VDI-Pipeline-Approvers'; AdminShort = 'VDI-Pipeline-Admins'; FormSecret = $secret }
@@ -101,3 +87,4 @@ Describe 'Roles and POST checks' {
         Get-Command Add-GIAdminNav -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 }
+

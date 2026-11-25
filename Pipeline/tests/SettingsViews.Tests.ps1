@@ -1,6 +1,8 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
+    # Page-wide assertions below look at markup only, not the shared page script
+    function Get-GIUiScript { '' }
     . (Join-Path $PSScriptRoot '..' 'Web' 'SettingsViews.ps1')
 
     $script:schema = [ordered]@{
@@ -47,7 +49,7 @@ Describe 'Settings layout' {
 Describe 'Settings section page' {
     It 'posts to the section with hidden token' {
         $h = Page
-        $h | Should -Match '<form method="post" action="/settings/vCenter" class="settings-form"><input type="hidden" name="token" value="tok123">'
+        $h | Should -Match '<form method="post" action="/settings/vCenter" class="settings-form" id="settings-form" data-savebar><input type="hidden" name="token" value="tok123">'
     }
     It 'renders string and encodes values' {
         $h = Page
@@ -97,7 +99,8 @@ Describe 'Settings section page' {
         $h | Should -Match 'type="password"[^>]*value=""[^>]*autocomplete="new-password"'
         $h | Should -Match 'name="username" value="svc&quot;&lt;u&gt;"'
         $h | Should -Match 'badge st-ok">set<'
-        $h | Should -Not -Match '\sdisabled[\s>]'
+        # The save bar starts with disabled buttons (nothing changed yet); no form field or credential control is disabled
+        ($h -replace '(?s)<div class="savebar".*?</div></div>', '') | Should -Not -Match '\sdisabled[\s>]'
     }
     It 'disables credential entry when not https' {
         $h = Page -https $false
@@ -122,104 +125,6 @@ Describe 'Settings section page' {
     It 'shows notice' {
         $h = New-GISettingsSectionPage -Schema $schema -SectionKey 'vCenter' -SectionData $data -Token 't' -Notice 'Saved <1>'
         $h | Should -Match 'Saved &lt;1&gt;'
-    }
-}
-
-Describe 'Run control page' {
-    BeforeAll {
-        $script:runs = @(1..25 | ForEach-Object { [pscustomobject]@{ runId = ('20261101-0000{0:00}' -f $_); status = 'Succeeded' } })
-        $script:stages = @('Preflight', 'Maintain', 'Validate')
-        function script:RC($lock = $null, $pending = $null) {
-            New-GIRunControlPage -Runs $script:runs -Lock $lock -PendingRequest $pending -Token 'tok' -Stages $script:stages -TestPool 'TST-W11' -ProdPools @('PRD-W11') -LastKnownGood 'GI-<lkg>'
-        }
-    }
-    It 'is idle and enabled without a lock' {
-        $h = RC
-        $h | Should -Match '<strong>Idle</strong>'
-        $h | Should -Not -Match '\sdisabled[\s>]'
-        $h | Should -Match 'action="/run/start"'
-        $h | Should -Match 'name="action" value="All"'
-        $h | Should -Match 'No stop button|no stop button'
-        $h | Should -Match 'VDI-GI-Runner'
-    }
-    It 'limits run list to newest 20' {
-        $h = RC
-        ([regex]::Matches($h, '<option value="20261101-')).Count | Should -Be 20
-        $h | Should -Match '20261101-000025 \(Succeeded\)'
-        $h | Should -Not -Match '20261101-000001 '
-    }
-    It 'is busy and disabled with an active lock' {
-        $h = RC ([pscustomobject]@{ stage = 'Maintain'; runId = 'R<1>'; requestedBy = 'D\x'; startedAt = '2026-11-24T10:00:00'; stale = $false })
-        $h | Should -Match '<strong>Busy</strong>'
-        $h | Should -Match 'R&lt;1&gt;'
-        $h | Should -Match '\sdisabled[\s>]'
-        ([regex]::Matches($h, '<button type="submit"[^>]*disabled')).Count | Should -BeGreaterOrEqual 4
-    }
-    It 'is enabled with a stale lock' {
-        $h = RC ([pscustomobject]@{ stage = 'Maintain'; runId = 'R1'; requestedBy = 'x'; startedAt = '2026-11-24T10:00:00'; stale = $true })
-        $h | Should -Match 'Stale lock'
-        $h | Should -Not -Match '\sdisabled[\s>]'
-    }
-    It 'shows queued request and disables' {
-        $h = RC $null ([pscustomobject]@{ action = 'All'; requestedBy = 'x'; requestedAt = '2026-11-24T10:00:00' })
-        $h | Should -Match 'Queued, waiting for the runner'
-        $h | Should -Match 'action="/run/cancel-request"'
-        $h | Should -Match 'Cancel queued request'
-        $h | Should -Match '\sdisabled[\s>]'
-    }
-    It 'has modes and rollback form with confirmPool' {
-        $h = RC
-        $h | Should -Match 'name="action" value="FromStage"'
-        $h | Should -Match 'name="action" value="Stage"'
-        $h | Should -Match 'name="action" value="PostCheck"'
-        $h | Should -Match 'action="/run/rollback"'
-        $h | Should -Match 'name="confirmPool"'
-        $h | Should -Match 'name="forceLogoff"'
-        $h | Should -Match 'Ends active sessions on that pool'
-        $h | Should -Match 'GI-&lt;lkg&gt;'
-        $h | Should -Match '<option value="PRD-W11">'
-        $h | Should -Match '<option value="TST-W11">'
-    }
-    It 'every form carries the token' {
-        $h = RC
-        ([regex]::Matches($h, '<form ')).Count | Should -Be ([regex]::Matches($h, 'name="token" value="tok"')).Count
-    }
-}
-
-Describe 'Audit page' {
-    It 'renders rows, diff lines and encodes' {
-        $e = @(
-            [pscustomobject]@{ at = '2026-11-24T10:00:00'; user = 'D\<a>'; action = 'settings.save'; target = 'vCenter'
-                detail = [pscustomobject]@{ changes = [pscustomobject]@{ Server = [pscustomobject]@{ old = 'a'; new = 'b<c' } } } },
-            @{ at = '2026-11-24T11:00:00'; user = 'u'; action = 'run.request'; target = 'All'; detail = @{ stage = 'Validate' } }
-        )
-        $h = New-GIAuditPage -Entries $e
-        $h | Should -Match 'Server: a -&gt; b&lt;c'
-        $h | Should -Match 'stage: Validate'
-        $h | Should -Match 'D\\&lt;a&gt;'
-        $h | Should -Match 'settings.save'
-    }
-    It 'handles empty' { (New-GIAuditPage -Entries @()) | Should -Match 'No audit entries' }
-}
-
-Describe 'Run actions' {
-    It 'Failed shows retry and rerun' {
-        $h = New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = '20261124-213005'; status = 'Failed'; currentStage = 'Validate' }) -Token 'tk'
-        $h | Should -Match 'Retry from Validate'
-        $h | Should -Match 'Re-run Validate only'
-        $h | Should -Match 'value="FromStage"'
-        $h | Should -Match 'name="runId" value="20261124-213005"'
-        $h | Should -Match 'name="token" value="tk"'
-        $h | Should -Not -Match '\sdisabled[\s>]'
-    }
-    It 'Scheduled shows PostCheck' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Scheduled' }) -Token 't') | Should -Match 'value="PostCheck"'
-    }
-    It 'other statuses return empty' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Succeeded' }) -Token 't') | Should -Be ''
-    }
-    It 'disables when busy' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Failed'; currentStage = 'X' }) -Token 't' -Busy $true) | Should -Match '\sdisabled[\s>]'
     }
 }
 
@@ -265,37 +170,3 @@ Describe 'Packages field' {
     }
 }
 
-Describe 'Maintain resume actions' {
-    BeforeAll {
-        function script:New-FailedRun($steps, $stage = 'Maintain') {
-            [pscustomobject]@{ runId = '20261125-010101'; status = 'Failed'; currentStage = $stage
-                stages = [pscustomobject]@{ Maintain = [pscustomobject]@{ status = 'Failed'; steps = $steps } } }
-        }
-        $script:steps = @(
-            [pscustomobject]@{ id = 'SafetySnapshot'; label = 'Safety snapshot'; status = 'Succeeded' }
-            [pscustomobject]@{ id = 'CopyInstallers'; label = 'Copy installers'; status = 'Skipped' }
-            [pscustomobject]@{ id = 'WindowsUpdate'; label = 'Windows Update'; status = 'Succeeded' }
-            [pscustomobject]@{ id = 'Pkg:Horizon'; label = 'Install Horizon Agent'; status = 'Failed' }
-            [pscustomobject]@{ id = 'Finalize'; label = 'Finalize'; status = 'Pending' }
-        )
-    }
-    It 'offers resume at the failed step, restart, and a step picker without skipped steps' {
-        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk'
-        $h | Should -Match 'Resume Maintain at Install Horizon Agent'
-        $h | Should -Match 'name="step" value="SafetySnapshot"[^>]*>Restart Maintain from the beginning'
-        $h | Should -Match '<option value="Pkg:Horizon" selected>Install Horizon Agent</option>'
-        $h | Should -Not -Match 'value="CopyInstallers"'
-        $h | Should -Match 'name="stage" value="Maintain"'
-        ([regex]::Matches($h, 'name="action" value="FromStage"')).Count | Should -Be 2
-        ([regex]::Matches($h, 'name="token" value="tk"')).Count | Should -Be 2
-    }
-    It 'falls back to the plain retry buttons for runs without steps' {
-        $h = New-GIRunActionsHtml -Run (New-FailedRun @()) -Token 'tk'
-        $h | Should -Match 'Retry from Maintain'
-        $h | Should -Not -Match 'Resume Maintain'
-    }
-    It 'disables everything while busy' {
-        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk' -Busy $true
-        ([regex]::Matches($h, '\sdisabled[\s>]')).Count | Should -BeGreaterThan 2
-    }
-}

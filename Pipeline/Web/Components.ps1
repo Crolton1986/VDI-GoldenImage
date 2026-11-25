@@ -13,7 +13,7 @@ function New-GIButton {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][string]$Label,
-        [ValidateSet('pri', 'outline', 'sec', 'danger')][string]$Variant = 'outline',
+        [ValidateSet('pri', 'outline', 'sec', 'danger', 'dangerline')][string]$Variant = 'outline',
         [string]$Type = 'button',
         [string]$Id = '',
         [string]$Name = '',
@@ -185,7 +185,8 @@ function New-GIStepper {
 }
 
 function New-GIModal {
-    <# Hidden until a button with data-opens="<Id>" is used. Focus goes to the first field, or to Cancel when there is none. #>
+    <# Hidden until a button with data-opens="<Id>" is used. Focus goes to the first field, or to Cancel when there is none.
+       -Api 'POST /api/...' makes it a JSON form (see Get-GIUiScript): errors stay in the dialog, a 409 refreshes the page. #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -194,13 +195,17 @@ function New-GIModal {
         [Parameter(Mandatory)][string]$BodyHtml,
         [Parameter(Mandatory)][string]$ConfirmLabel,
         [ValidateSet('pri', 'danger')][string]$ConfirmVariant = 'pri',
-        [string]$FormAction = '',          # when set the dialog is a POST form
-        [string]$FormHtml = ''             # extra hidden inputs (token etc.), already encoded
+        [string]$FormAction = '',          # classic POST form
+        [string]$FormHtml = '',            # extra hidden inputs (token etc.), already encoded
+        [string]$Api = '',                 # 'POST /api/images/x/runs'
+        [string]$Then = 'reload'           # 'reload' or a URL
     )
     $i = ConvertTo-GIHtml $Id
-    $confirm = "<button type=""submit"" class=""btn $ConfirmVariant"">$(ConvertTo-GIHtml $ConfirmLabel)</button>"
-    $inner = "<h2 id=""$i-title"">$(ConvertTo-GIHtml $Title)</h2>$BodyHtml<div class=""actions""><button type=""button"" class=""btn sec"" data-close>Cancel</button>$confirm</div>"
-    if ($FormAction) { $inner = "<form method=""post"" action=""$(ConvertTo-GIHtml $FormAction)"">$FormHtml$inner</form>" }
+    $err = if ($Api) { '<p class="error" data-error role="alert" tabindex="-1"></p>' } else { '' }
+    $confirm = "<button type=""submit"" class=""btn $ConfirmVariant"" data-confirm>$(ConvertTo-GIHtml $ConfirmLabel)</button>"
+    $inner = "<h2 id=""$i-title"">$(ConvertTo-GIHtml $Title)</h2>$BodyHtml$err<div class=""actions""><button type=""button"" class=""btn sec"" data-close>Cancel</button>$confirm</div>"
+    if ($Api) { $inner = "<form data-api=""$(ConvertTo-GIHtml $Api)"" data-then=""$(ConvertTo-GIHtml $Then)"" data-conflict=""reload"">$FormHtml$inner</form>" }
+    elseif ($FormAction) { $inner = "<form method=""post"" action=""$(ConvertTo-GIHtml $FormAction)"">$FormHtml$inner</form>" }
     "<div class=""modal-backdrop"" id=""$i"" hidden><div class=""modal"" role=""dialog"" aria-modal=""true"" aria-labelledby=""$i-title"">$inner</div></div>"
 }
 
@@ -260,7 +265,12 @@ window.GI={live:live};
 /* Dialogs: focus in, Escape or Cancel closes, focus returns to the opener. */
 var opener=null;
 function focusables(m){return m.querySelectorAll('input:not([type=hidden]):not(:disabled),select:not(:disabled),textarea:not(:disabled),button:not(:disabled),a[href]')}
-function openDlg(id,from){var b=d.getElementById(id);if(!b){return}opener=from||d.activeElement;b.hidden=false;
+function fill(b,from){if(!from||!from.attributes){return}[].forEach.call(from.attributes,function(a){if(a.name.indexOf('data-fill-')!==0){return}var k=a.name.substring(10);
+b.querySelectorAll('[data-fill="'+k+'"]').forEach(function(n){n.textContent=a.value});
+b.querySelectorAll('input[name="'+k+'"],select[name="'+k+'"]').forEach(function(n){n.value=a.value});
+if(k==='match'){b.querySelectorAll('[data-must-match]').forEach(function(n){n.setAttribute('data-must-match',a.value);n.value=''})}
+if(k==='api'){var f=b.querySelector('form[data-api]');if(f){f.setAttribute('data-api',a.value)}}})}
+function openDlg(id,from){var b=d.getElementById(id);if(!b){return}opener=from||d.activeElement;fill(b,from);b.hidden=false;var gf=b.querySelector('form');if(gf&&gf.querySelector('[data-confirm]')&&window.GI.gate){window.GI.gate(gf)}
 var m=b.querySelector('.modal'),f=m.querySelector('input:not([type=hidden]):not(:disabled),select:not(:disabled),textarea:not(:disabled)')||m.querySelector('[data-close]');if(f){f.focus()}}
 function closeDlg(b){b.hidden=true;if(opener&&opener.focus){opener.focus()}opener=null}
 d.addEventListener('click',function(e){var t=e.target;if(!t||!t.closest){return}
@@ -300,6 +310,43 @@ return fetch(url,{credentials:'same-origin',signal:c.signal,headers:{Accept:'app
 if(r.status===401){var b=d.getElementById('gi-expired');if(b){b.hidden=false}return {ok:false,status:401,error:'Your session expired.'}}
 return r.json().then(function(j){return {ok:r.ok,status:r.status,data:j,error:r.ok?null:(j&&j.error)||('HTTP '+r.status)}},function(){return {ok:false,status:r.status,error:'HTTP '+r.status}})
 },function(e){clearTimeout(t);return {ok:false,status:0,error:(e&&e.name==='AbortError')?'The server did not answer within 15 seconds.':'The server could not be reached.'}})};
+
+/* API forms: <form data-api="POST /api/..." data-then="reload|/url" data-conflict="reload">. Sends JSON with the CSRF token, shows errors inline. */
+function tokenMeta(){var m=d.querySelector('meta[name=gi-token]');return m?m.getAttribute('content'):''}
+window.GI.send=function(method,url,body){return fetch(url,{method:method,credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json','X-GI-Token':tokenMeta()},body:method==='GET'?undefined:JSON.stringify(body||{})}).then(function(r){
+if(r.status===401){var b=d.getElementById('gi-expired');if(b){b.hidden=false}return {ok:false,status:401,error:'Your session expired. Sign in again to continue.'}}
+return r.json().then(function(j){return {ok:r.ok,status:r.status,data:j,error:r.ok?null:(j&&j.error)||('HTTP '+r.status)}},function(){return {ok:r.ok,status:r.status,data:null,error:r.ok?null:('HTTP '+r.status)}})},function(){return {ok:false,status:0,error:'The server could not be reached. Try again.'}})};
+d.addEventListener('submit',function(e){var f=e.target;if(!f||!f.getAttribute||!f.getAttribute('data-api')){return}
+e.preventDefault();var spec=f.getAttribute('data-api').split(' '),btn=f.querySelector('button[type=submit]'),err=f.querySelector('[data-error]'),body={};
+new FormData(f).forEach(function(v,k){if(k==='token'){return}if(body[k]!==undefined){body[k]=[].concat(body[k],v)}else{body[k]=v}});
+f.querySelectorAll('input[type=checkbox]').forEach(function(c){if(c.name&&!c.checked&&body[c.name]===undefined){body[c.name]=false}else if(c.name&&c.checked&&c.value==='on'){body[c.name]=true}});
+if(btn){btn.disabled=true;btn.setAttribute('data-label',btn.textContent);btn.textContent='Working...'}
+if(err){err.textContent=''}
+window.GI.send(spec[0],spec[1],body).then(function(r){
+if(r.ok){var t=f.getAttribute('data-then')||'reload';var loc=t;if(r.data&&r.data.redirect){loc=r.data.redirect}if(loc==='reload'){location.reload()}else{location.href=loc}return}
+if(r.status===409){var c=f.getAttribute('data-conflict');if(err){err.textContent=r.error}if(c==='reload'){setTimeout(function(){location.reload()},1500)}}
+else if(err){err.textContent=r.error}else{alert(r.error)}
+if(btn){btn.disabled=false;btn.textContent=btn.getAttribute('data-label')||'Confirm'}
+var dlg=f.closest('.modal');if(dlg&&err){err.focus&&err.focus()}})});
+
+/* Typed confirmation: the confirm button stays disabled until the field matches exactly; required fields must be filled. */
+window.GI.gate=gate;function gate(f){var ok=true;f.querySelectorAll('[data-must-match]').forEach(function(i){if(i.value!==i.getAttribute('data-must-match')){ok=false}});
+f.querySelectorAll('[data-required]').forEach(function(i){if(!String(i.value).trim()){ok=false}});
+f.querySelectorAll('[data-required-check]').forEach(function(i){if(!i.checked){ok=false}});
+var b=f.querySelector('[data-confirm]');if(b){b.disabled=!ok}}
+d.addEventListener('input',function(e){var f=e.target.closest&&e.target.closest('form');if(f&&f.querySelector('[data-confirm]')){gate(f)}});
+d.addEventListener('change',function(e){var f=e.target.closest&&e.target.closest('form');if(f&&f.querySelector('[data-confirm]')){gate(f)}});
+d.querySelectorAll('form').forEach(function(f){if(f.querySelector('[data-confirm]')){gate(f)}});
+
+/* Test connection: sends the current form values (unsaved included) to the API; nothing is saved. */
+d.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-test-section]');if(!b){return}
+var sec=b.getAttribute('data-test-section'),f=d.getElementById('settings-form'),body={},out=d.getElementById('test-result');
+if(f){new FormData(f).forEach(function(v,k){if(k!=='token'){body[k]=v}})}
+b.disabled=true;out.textContent='Testing...';
+window.GI.send('POST','/api/settings/'+encodeURIComponent(sec)+'/test',body).then(function(r){b.disabled=false;out.textContent='';
+var x=d.createElement('div'),ok=r.ok&&r.data&&r.data.ok;x.className='testres '+(ok?'ok':'fail');
+var s=d.createElement('strong');s.textContent=ok?('Connected in '+(r.data.seconds||0)+' seconds. '):'Failed. ';x.appendChild(s);
+var t=d.createElement('span');t.style.whiteSpace='pre-wrap';t.textContent=ok?r.data.detail:(r.data&&r.data.detail?r.data.detail:r.error);x.appendChild(t);out.appendChild(x)})});
 })();
 '@
 }

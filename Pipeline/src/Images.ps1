@@ -233,7 +233,9 @@ function New-GIImageFromPayload {
     if (-not $name) { throw 'Image not saved, 1 problem(s): Name: required' }
     $entry = @{ Name = $name; Description = ([string]$Payload['Description']).Trim(); Os = ([string]$Payload['Os']).Trim(); Paused = $false }
     foreach ($b in ($script:GIImageBlocks + 'AppVolumes')) { if ($Payload.Contains($b)) { $entry[$b] = Copy-GIValue $Payload[$b] } }
+    if (-not $entry.ContainsKey('GoldenImage')) { $entry.GoldenImage = @{} }
     $entry.Id = if ($Payload['Id']) { [string]$Payload['Id'] } else { New-GIImageId -Name $name -Existing @($existing | ForEach-Object { $_.Id }) }
+    if (-not $entry.GoldenImage['GuestCredentialSecret']) { $entry.GoldenImage.GuestCredentialSecret = "GI-Guest-$($entry.Id)" }
     # Validate against the other images as they will be stored (a legacy virtual entry becomes a real one on first write)
     Assert-GIImageEntryValid -Entry $entry -Others @($existing | Where-Object { $_.Id -cne $entry.Id })
     $list = @(Read-GIImageOverlayList -Config $Config) + @($entry)
@@ -264,13 +266,14 @@ function Save-GIImageSection {
     } else {
         $def = Get-GISettingsSectionDef $Section
         if ($def.ReadOnly) { throw "Settings section '$Section' is read only." }
-        if ($Section -notin $script:GIImageBlocks) { throw "'$Section' is not a per-image section." }
+        $block = ([string]$def.ConfigPath).Split('.')[0]
+        if ($block -notin $script:GIImageBlocks) { throw "'$Section' is not a per-image section." }
         $cur = Get-GISettingsEffective -Config (Get-GIImageConfig -Config $Config -ImageId $ImageId) -Def $def
         # Validate the whole section as it would be after the save (the caller may send only the fields it changed)
         $whole = @{}; foreach ($k in $cur.Keys) { $whole[$k] = $cur[$k] }; foreach ($k in $Values.Keys) { $whole[$k] = $Values[$k] }
         $errors = Test-GISettingsSection -Section $Section -Values $whole
         if ($errors.Count) { throw "Settings '$Section' not saved, $($errors.Count) error(s): $((($errors.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name): $($_.Value)" }) -join '; '))" }
-        if (-not $entry.ContainsKey($Section)) { $entry[$Section] = Copy-GIValue $e[$Section] }
+        if (-not $entry.ContainsKey($block)) { $entry[$block] = Copy-GIValue $e[$block] }
         foreach ($f in $def.Fields) {
             if ($f.Type -eq 'secret' -or -not $Values.Contains($f.Key)) { continue }
             $new = ConvertTo-GISettingsFieldValue $f $Values[$f.Key] $true
@@ -384,6 +387,7 @@ function Get-GIRunSummary {
         snapshot = [string](Get-GIWatcherProp (Get-GIWatcherProp $Run 'snapshot' $null) 'name' '')
         error = [string](Get-GIWatcherProp $Run 'error' '')
         approvedBy = [string](Get-GIWatcherProp (Get-GIWatcherProp $Run 'approval' $null) 'by' '')
+        stages = @(foreach ($sn in 'Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate', 'Approval', 'Promote', 'PostCheck') { [string](Get-GIWatcherProp (Get-GIWatcherProp (Get-GIWatcherProp $Run 'stages' $null) $sn $null) 'status' 'Pending') })
         stepsDone = @($steps | Where-Object { $_.status -in 'Succeeded', 'Skipped' }).Count; stepsTotal = $steps.Count
     }
 }
@@ -410,4 +414,28 @@ function Get-GIImageSummary {
         activeRun = Get-GIRunSummary $active
         lastKnownGood = if ($lkg) { [ordered]@{ snapshotName = [string]$lkg.snapshotName; runId = [string]$lkg.runId; promotedAt = [string]$lkg.promotedAt } } else { $null }
     }
+}
+
+function Set-GIImageSecretName {
+    <# Makes sure a secret field of one image names a vault secret; returns the name (existing, or the default recorded now). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$ImageId, [Parameter(Mandatory)][string]$Section, [Parameter(Mandatory)][string]$Key, [string]$By = 'unknown')
+    $def = Get-GISettingsSectionDef $Section
+    $f = @($def.Fields | Where-Object { $_.Key -eq $Key -and $_.Type -eq 'secret' }) | Select-Object -First 1
+    if (-not $f) { throw "Section '$Section' has no secret field '$Key'." }
+    $ic = Get-GIImageConfig -Config $Config -ImageId $ImageId
+    $n = Get-GISettingsNode $ic (Get-GISettingsFieldPath $def $f)
+    if ($n.Found -and -not [string]::IsNullOrWhiteSpace([string]$n.Value)) { return [string]$n.Value }
+    $name = Get-GISettingsAttr $f 'DefaultName' "GI-Guest-$ImageId"
+    $list = @(Read-GIImageOverlayList -Config $Config)
+    foreach ($e in $list) {
+        if ($e.Id -ceq $ImageId) {
+            $block = ([string]$def.ConfigPath).Split('.')[0]
+            if (-not $e.ContainsKey($block)) { $e[$block] = Copy-GIValue $ic[$block] }
+            Set-GISettingsNode $e @((Get-GISettingsFieldPath $def $f)) $name
+        }
+    }
+    Write-GIImageOverlayList -Config $Config -List $list
+    Write-GIAudit -Config $Config -User $By -Action 'settings.update' -Target $Section -Detail @{ image = $ImageId; section = $Section; keys = @($Key) } -Result 'OK'
+    return $name
 }

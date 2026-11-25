@@ -262,56 +262,57 @@ Users sign in with HTTP Basic over https, checked against Active Directory. Ther
 
 | Role | Group | Can do |
 |---|---|---|
-| Viewer | `Dashboard.ViewerGroup` | Look at runs, reports, logs and pools |
+| Viewer | `Dashboard.ViewerGroup` | Look at images, runs, reports, logs, settings and the audit log |
 | Approver | `Dashboard.ApproverGroup` | Everything a viewer can, plus approve or reject |
-| Admin | `Dashboard.AdminGroup` | Everything an approver can, plus settings, credentials, Test connection, run controls and the audit log |
+| Admin | `Dashboard.AdminGroup` | Everything an approver can, plus start and retry runs, power, revert, roll back, edit settings and credentials, add and remove images, Setup |
 
 Each role includes the ones above it. Forms carry a per-user token and the Origin header is checked, so another web page can't submit them.
 
+### Golden images
+
+The dashboard is organized around golden images. The home page (`/`) is a grid of cards, nine per page, one per image: guest VM power, last and next run, a stage tracker while a run is active, and a pool table (test pool first, then pools that are behind or failed, three rows with "Show N more pools"). The page paints from stored config and run state. VM power and each pool's current snapshot are filled in afterwards from `GET /api/images/{id}/live`, one request per card, with a 15 second limit and a Try again button, so a slow or unreachable vCenter or Horizon never blocks the page. It refreshes every 60 seconds while the tab is visible (`Dashboard.LiveRefreshSeconds`).
+
+A card opens the image page (`/images/{id}`) with three tabs: **Overview** (pools with Roll back, snapshots with Revert VM, guest VM power, schedule), **Runs** (every run of this image, filter and 25 per page, a Logs link per run) and **Settings**. A run has its own page (`/images/{id}/runs/{runId}`) with the stage progress, the Maintain steps built from the run, the approval panel, and Download all logs. `/runs/{runId}` redirects to it.
+
+The sidebar has Golden images, Audit log, Global settings, Setup (admins) and JSON API. There is no cross-image Runs page: the cards show what needs attention.
+
+Roles on top of the table above: Viewer sees everything and changes nothing, Approver also approves and rejects, Admin does everything. Every write is checked on the server (403 plus an `auth.denied` audit entry), whatever the buttons show.
+
 ### Settings
 
-![Pools settings page](docs/settings-pools.png)
-
-`/settings` has one sub-menu per system, with these sections: vCenter, Horizon, App Volumes, Golden image, Windows Update, Pools, Validation, Snapshots, Schedule & promotion, Email and Dashboard. Each section is a form with the fields, help text and validation for that part of the config.
-
-* Saving writes the changed keys to `config/settings.json`, layered over `pipeline.config.psd1` (see Configuration). Changes apply from the next run.
-* The Dashboard section is read-only here. Edit `pipeline.config.psd1` and restart the dashboard.
-* Saving Schedule & promotion also updates the weekly trigger of the `VDI-GI-Pipeline` task, so the new day and time take effect without re-running `Register-GIPipelineTasks.ps1`.
+* **Per image** (`/images/{id}/settings`, open to every role, editable by Admins only): General (name, description, pause, remove), Guest VM, Pools, Windows Update, Packages, App Volumes tests, Validation, Snapshots, Schedule and promotion. Saving changes only that image.
+* **Global** (`/settings`): vCenter, Horizon, App Volumes (connection and endpoints), Email, Dashboard and sign-in (read only: edit `pipeline.config.psd1` and restart), Fixes (read only list of `Pipeline/guest/fixes`).
+* **Packages** are a fixed catalog built into the pipeline. You tick which ones an image maintains; you can't add free-form packages. The installer folder on the host can be shared by several images.
+* Saving writes the changed keys to `config/settings.json`, layered over `pipeline.config.psd1`. Changes apply from the next run. Every save writes `settings.update` to the audit log with the section and changed keys, never secret values.
+* Test connection (vCenter, Horizon, App Volumes, Email) tests the values in the form, unsaved ones included, in a separate PowerShell process with a 120 second limit. Passwords are write-only and stored in the SecretManagement vault.
 * Turning on `AutoPromote` asks for a confirmation.
+
+### Adding, pausing and removing images
+
+**Add golden image** (`/images/new`, Admin) is a five step wizard: Basics, Guest VM and pools (loaded live from vCenter and Horizon; a VM or pool used by another image is disabled), Windows Update and packages, Schedule and promotion, Review. It creates the image and starts no run. Set the guest administrator password afterwards under Settings, Guest VM. **Pause image** keeps history but skips scheduled runs and blocks Start run. **Remove** takes the image out of the dashboard only: vCenter, Horizon, snapshots, pools, run history and logs are not touched. It is refused while a run is active.
+
+Config and state are per image: `GoldenImages` in `config/settings.json`, and `state/<imageId>/`, `logs/<imageId>/`, `reports/<imageId>/`. An older single-image config is migrated automatically when the dashboard starts (backup in `config/migration-backup-<timestamp>/`, never deleted). See `docs/ADR-0001-multi-image.md`.
+
+### Runs, approval and rollback
+
+* **Start run** (Admin) asks for confirmation and queues a full run for that image. **Retry from this step** continues a failed run. Different images can run at the same time; one image runs one run at a time.
+* The approval panel shows the validation results and the pools that will be updated. Approve (with an optional start time) and Reject (comment required) are for Approvers and Admins. If two people act at once the second sees who decided first.
+* **Roll back** on the Overview tab pushes a snapshot to one pool (default last known good), with a logoff policy and start now or later. It has no stages and no run page; a run it relates to gets the status Rolled back. **Revert VM** and **Power on/off** are blocked while a run is active.
+* How it works: the dashboard never runs a stage inside a web request. It writes `state/<imageId>/run-request.json` and starts the `VDI-GI-Runner` scheduled task, which runs `Invoke-GIPipeline.ps1 -FromRequest` (it goes through every image). With `-LocalAdmin` the dashboard starts that process itself. There is no stop button: killing a run partway through a snapshot or push could leave vCenter or Horizon in a state nobody has looked at.
+
+### Download all logs
+
+The run page's **Download all logs** (and `GET /api/images/{id}/runs/{runId}/logs.zip`) builds a zip with the host run log, the watcher logs, the run JSON, the HTML report and a `README.txt`, plus `guest/`: logs collected from inside the guest VM. The Maintain step **Collect guest logs** (just before Clean up guest), and any failing Maintain step, copy the guest's installer logs, Windows Update logs (including `Get-WindowsUpdateLog` output), CBS and DISM logs, MSI logs, Horizon, DEM, App Volumes, FSLogix, Teams, OneDrive and VMware Tools logs, the watcher files and an event log extract limited to the run. Files over 20 MB keep their last part and are noted in `_collection-notes.txt`; credential-like files are never collected. If the guest can't be reached the step is Skipped with the reason; it never fails the run. Logs are not redacted.
 
 ### Credentials
 
-Sections that need a login (vCenter, Horizon, App Volumes, Golden image) show a username and password form. It's write-only: the password is never shown again. The credential is stored in the SecretManagement vault of the account the dashboard runs as, under the secret name from the config. That has to be the same account that runs the pipeline tasks, or the pipeline won't find the secret. `Register-GIPipelineTasks.ps1` already runs both as the account you give it. Leave the password blank to keep the stored one. Credential forms are only accepted over https, so `-NoTls` can't be used to enter them (the loopback-only `-LocalAdmin` lab mode is the exception).
+Sections that need a login (vCenter, Horizon, App Volumes, the image's guest administrator) show a username and password form. It's write-only: the password is never shown again. The credential is stored in the SecretManagement vault under the name in the config (new images use `GI-Guest-<imageId>`). Credentials can only be entered over https.
 
-### Test connection
-
-Sections for vCenter, Horizon, App Volumes, Golden image, Pools and Email have a Test connection button. The checks are read-only. The Golden image test looks at the VM and its VMware Tools state and never powers it on.
-
-Each test runs in its own PowerShell process with a 120-second limit, so a slow or stuck login can't freeze the dashboard. If the account is behind Duo or another MFA push, approve the push on your phone while the page loads; a denied or ignored push shows up as a failed test with an MFA hint. The pipeline's scheduled runs can't answer a push, so exempt the service account from MFA.
-
-Dashboard errors and every request (including timeouts) are logged to `logs/dashboard_errors_*.log` and `logs/dashboard_requests_*.log`. Each test also writes `connection.test.start` and `connection.test` lines to the audit log.
-
-### Run controls
-
-![Run control page](docs/run-controls.png)
-
-`/run` (admin only) starts work without a shell on the server:
-
-* Go starts a full run, the same as `-Stage All`.
-* Retry from the failed stage continues an existing run from the stage that failed, through Validate. When Maintain failed, the run page offers Resume Maintain at the failed step, Restart Maintain from the beginning, and a picker to resume from any step.
-* Single stage re-runs one of Preflight, Maintain, Snapshot, TestPush or Validate on an existing run.
-* PostCheck now runs the production check straight away.
-* Roll back a pool pushes the last-known-good snapshot, or one you name, to a pool. You have to type the pool name to confirm. Force logoff ends user sessions on the pool's machines.
-
-How it works: the dashboard never runs a stage inside a web request. It writes `state/run-request.json` and starts the `VDI-GI-Runner` scheduled task, which runs `Invoke-GIPipeline.ps1 -FromRequest` as the service account. The runner takes `state/pipeline.lock` first. If the pipeline is busy (a scheduled run, a command-line run or another dashboard run), the request stays queued and an admin can cancel it on the Run page. Only one request can be queued at a time.
-
-With `-LocalAdmin` (lab/test runs) there are no scheduled tasks. The dashboard starts `Invoke-GIPipeline.ps1 -FromRequest` as a hidden `pwsh` process under your own account instead, and its output goes to `logs/runner-<timestamp>.log`. To stop one in an emergency, end that `pwsh` process (its id is in the run's log), then check vCenter and Horizon as below.
-
-There's no stop button. A stage can be partway through a snapshot, a guest operation or an image push, and killing the process from a web page would leave vCenter or Horizon in a state nobody has looked at. To stop in an emergency, end the `VDI-GI-Runner` task (or `VDI-GI-Pipeline` for a scheduled run) in Task Scheduler, then check vCenter and Horizon by hand: power state, snapshots, and any pending push on the pools. The stale lock clears itself on the next run once its process is gone.
+Dashboard errors and every request are logged to `logs/dashboard_errors_*.log` and `logs/dashboard_requests_*.log`.
 
 ### Audit
 
-`/audit` (admin only) shows the newest 200 entries of `state/audit.jsonl`: settings saves with a field-level diff (secrets are never included), credential changes, connection tests, run requests and cancellations, approvals and rollbacks, each with the user and time.
+`/audit` is visible to every role (read only): newest first, 50 per page, filterable by image, action type, user and dates, with Export CSV for the current filter. It records settings saves (section and changed keys, never secrets), credential changes, connection tests, run requests and decisions, VM power and revert, pool rollbacks, image create, update, pause, resume and delete, denied attempts, and sign-ins (once per user per 8 hours, because sign-in is stateless basic authentication). Failed sign-ins are not recorded yet: Pode checks the password before the dashboard sees the request.
 
 ### Lab mode
 
@@ -323,19 +324,16 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 
 | Route | Purpose |
 |---|---|
-| `GET /` | Run list and last-known-good |
-| `GET /runs/:runId` | Run detail with stages, checks and promotion status |
-| `POST /runs/:runId/decision` | Approve or reject (approvers only) |
-| `GET /reports/:runId` | HTML report |
-| `GET /logs/:runId` | Run log |
-| `GET /pools` | Pool status |
-| `GET /settings`, `GET /settings/:section` | Settings sections (admins only) |
-| `POST /settings/:section`, `/credential`, `/test` | Save, set credential, test connection (admins only) |
-| `GET /run` | Run controls (admins only) |
-| `POST /run/start`, `/run/rollback`, `/run/cancel-request` | Queue a run, queue a rollback, cancel a queued request (admins only) |
-| `GET /audit` | Audit log (admins only) |
-| `GET /api/runs` | Runs as JSON |
-| `GET /api/runs/:runId` | One run as JSON |
+| `GET /` | Golden image cards |
+| `GET /images/new` | Add golden image wizard (admins) |
+| `GET /images/:id`, `/images/:id/runs`, `/images/:id/settings[/:section]` | Image page tabs |
+| `GET /images/:id/runs/current`, `/images/:id/runs/:runId` | Current run (redirect), run page |
+| `POST /images/:id/settings/:section[/credential]` | Save a per-image section, set a credential (admins) |
+| `GET /settings[/:section]`, `POST /settings/:section` | Global settings (save: admins) |
+| `GET /audit`, `/audit.csv` | Audit log and CSV export |
+| `GET /reports/:runId`, `/logs/:runId`, `/runs/:runId` | Report, run log, redirect to the run page |
+| `GET /api/runs`, `/api/runs/:runId` | Runs as JSON (all images) |
+| `/api/images/...`, `/api/settings/...`, `/api/fixes`, `/api/inventory` | The image API, see `docs/CONTRACT.md` |
 
 ## Safety behavior
 

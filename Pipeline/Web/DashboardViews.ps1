@@ -208,6 +208,7 @@ input[type=text],textarea{width:100%;max-width:560px}
 button,.btn{font:inherit;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:0 16px;border:1px solid var(--pri);background:var(--card);color:var(--pri);border-radius:6px;cursor:pointer;font-weight:600;text-decoration:none}
 button.pri,.btn.pri{background:var(--pri);color:var(--on-dark)}
 button.sec,.btn.sec{border-color:var(--field-line);color:var(--fg);font-weight:400}
+button.dangerline,.btn.dangerline{border-color:var(--danger);color:var(--danger);background:var(--card)}
 button.danger,.btn.danger{background:var(--danger);border-color:var(--danger);color:var(--on-dark)}
 button.small,.btn.small{min-height:32px;padding:0 10px}
 button:disabled,input:disabled,select:disabled,textarea:disabled,.btn[aria-disabled=true]{opacity:.5;cursor:not-allowed}
@@ -247,6 +248,68 @@ table.edit input[type=text],table.edit select,table.edit input[type=number]{widt
 @keyframes gipulse{50%{opacity:.5}}
 .bars{display:flex;gap:4px}.bars span{flex:1;height:6px;border-radius:3px;background:var(--bar-pending)}
 .bars .done{background:var(--bar-done)}.bars .running{background:var(--bar-run)}.bars .waiting{background:var(--bar-wait)}.bars .failed{background:var(--bar-fail)}
+.pagehead{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.pagehead p{margin:4px 0 0}.headbtns{display:flex;gap:8px;flex-wrap:wrap}
+.small{font-size:12px}.right{text-align:right}
+.cardgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:stretch}
+@media (max-width:1100px){.cardgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:700px){.cardgrid{grid-template-columns:1fr}}
+.gicard{position:relative;display:flex;flex-direction:column;gap:16px;overflow:visible}
+.gicard.failed{border-color:var(--bad-fg)}
+.cardhead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.cardhead h2{font-size:16px}
+a.cardlink{color:var(--fg);text-decoration:none}a.cardlink::after{content:"";position:absolute;inset:0;border-radius:10px}
+a.cardlink:focus-visible{outline-offset:-2px}
+.gicard .btn,.gicard button,.gicard a:not(.cardlink){position:relative;z-index:1}
+dl.facts{margin:0;display:flex;flex-direction:column;gap:4px;font-size:13px}
+dl.facts>div{display:flex;justify-content:space-between;gap:8px}dl.facts dt{color:var(--mut)}dl.facts dd{margin:0;text-align:right}
+.caption{margin:6px 0 0;font-size:12px;color:var(--mut)}.caption.bad{color:var(--bad-fg)}
+table.pooltable{font-size:12px}table.pooltable td,table.pooltable th{padding:5px 4px}
+table.pooltable td[data-col=snapshot]{font-family:var(--mono)}
+.linkbtn{border:0;background:none;color:var(--link);text-decoration:underline;min-height:32px;padding:0;font-weight:400;justify-content:flex-start}
+.cardactions{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.cardactions .row1 .btn{width:100%}.cardactions .row2{display:flex;gap:8px}.cardactions .row2>*{flex:1}
+.cardactions .row1>span{display:block}.cardactions .row1>span .btn{width:100%}
+.livemsg{background:var(--bad-bg);color:var(--bad-fg);border-radius:6px;padding:8px 10px;display:flex;gap:8px;justify-content:space-between;align-items:center;font-size:12px}
+.livemsg[hidden]{display:none}.livemsg button{white-space:nowrap;flex:none}
+.addtile{border-style:dashed;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;min-height:240px}
+.empty{max-width:560px;margin:40px auto;text-align:center}.checklist{list-style:none;padding:0;text-align:left;display:inline-block}
+.banners{display:flex;flex-direction:column;gap:8px}
+.pager{display:flex;gap:12px;align-items:center;justify-content:flex-end}
+.strip{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 20px}
+.twocol{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start}
+.twocol .col{display:flex;flex-direction:column;gap:20px}
+@media (max-width:900px){.twocol{grid-template-columns:1fr}}
+.btnrow{display:flex;gap:8px;margin:12px 0}.btnrow .btn{flex:1}
+.filterrow{display:flex;gap:16px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.field.inline{margin:0;display:flex;gap:8px;align-items:center}.field.inline label{margin:0}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.summary dt{font-size:12px;color:var(--mut)}.summary dd{margin:2px 0 0}
+@media (max-width:900px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+ol.stages{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:12px}
+ol.stages li{font-size:12px}ol.stages li .bar{height:6px;border-radius:3px;background:var(--bar-pending);margin-bottom:6px}
+ol.stages li.done .bar{background:var(--bar-done)}ol.stages li.running .bar{background:var(--bar-run)}ol.stages li.waiting .bar{background:var(--bar-wait)}ol.stages li.failed .bar{background:var(--bar-fail)}
+ol.stages li strong{display:block}
+@media (max-width:900px){ol.stages{grid-template-columns:1fr}}
+.nowline{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.approval{border:2px solid var(--bar-wait)}
+.stagerow{border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.stagerow.running{border-color:var(--bar-run)}.stagerow.failed{border-color:var(--bar-fail)}.stagerow.waiting{border-color:var(--bar-wait)}
+.stagerow>summary{display:grid;grid-template-columns:140px 110px 80px minmax(0,1fr);gap:12px;align-items:center;padding:12px 20px;cursor:pointer;min-height:40px}
+.stagerow>summary .msg{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stagerow .inner{padding:0 20px 16px}
+@media (max-width:900px){.stagerow>summary{grid-template-columns:1fr}}
+.stepcard{border:1px solid var(--bar-run);border-radius:8px;padding:12px;margin:8px 0}
+.logbox{white-space:pre;overflow:auto}
+.alert{border-left:5px solid var(--bar-fail);background:var(--bad-bg);color:var(--bad-fg);border-radius:6px;padding:12px 16px}
+.settings-layout{display:grid;grid-template-columns:200px minmax(0,760px);gap:20px;align-items:start}
+@media (max-width:900px){.settings-layout{grid-template-columns:1fr}}
+.settings-main .field input[type=text],.settings-main textarea{max-width:none}
+.dangerzone{border-color:var(--danger)}.dangerzone h2{color:var(--danger)}
+fieldset.wizstep{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:0 0 20px;min-inline-size:0}fieldset.wizstep legend{float:left;width:100%;margin:0 0 12px;padding:0}fieldset.wizstep legend+*{clear:both}fieldset.wizstep[hidden]{display:none}fieldset.wizstep h2:focus-visible{outline:2px solid var(--link)}
+.wizfoot{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.cols2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+@media (max-width:900px){.cols2{grid-template-columns:1fr}}
+td.nowrap,.nowrap{white-space:nowrap}
+.skip{position:absolute;left:-9999px;top:0}.skip:focus{left:8px;top:8px;z-index:99;background:var(--card);color:var(--link);padding:8px 12px;border-radius:6px}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .setup-step{border-left:5px solid var(--line)}.setup-step.s-running{border-left-color:var(--bar-run)}.setup-step.s-done{border-left-color:var(--bar-done)}.setup-step.s-failed{border-left-color:var(--bar-fail)}
 .setup-step h2{margin:0 0 4px;font-size:16px}.setup-step .num{display:inline-block;min-width:22px;color:var(--mut)}
@@ -381,7 +444,7 @@ function New-GIPage {
     )
     $refresh = ''
     if ($RefreshSeconds -gt 0) { $refresh = "<meta http-equiv=""refresh"" content=""$RefreshSeconds"">" }
-    $ctx = @{ Path = ''; IsAdmin = $false; IsApprover = $false; SetupMode = $false; SetupComplete = $true; UserName = ''; Role = '' }
+    $ctx = @{ Path = ''; IsAdmin = $false; IsApprover = $false; SetupMode = $false; SetupComplete = $true; UserName = ''; Role = ''; Token = '' }
     $g = Get-Variable -Name GINavContext -Scope Global -ErrorAction SilentlyContinue
     if ($g -and $g.Value -is [System.Collections.IDictionary]) { foreach ($k in $g.Value.Keys) { $ctx[[string]$k] = $g.Value[$k] } }
     $nav = New-GISideNav -Context $ctx
@@ -393,12 +456,13 @@ function New-GIPage {
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="gi-token" content="$(ConvertTo-GIHtml $ctx.Token)">
 $refresh
 <title>$(ConvertTo-GIHtml $Title)</title>
 <style>$(Get-GICss)</style></head>
 <body>
 <script>$(Get-GINavScript)</script>
-<a class="sr-only" href="#main">Skip to content</a>
+<a class="skip" href="#main">Skip to content</a>
 <header class="topbar"><button type="button" class="navtoggle-mobile" aria-controls="sidenav" aria-expanded="false" aria-label="Open menu">$menuIcon</button><div class="apptitle">VDI Golden Image Pipeline</div>$userBox</header>
 <div class="layout">
 $nav
@@ -412,327 +476,6 @@ $BodyHtml
 <script>$uiScript</script>
 </body></html>
 "@
-}
-
-function Get-GIRunRowHtml {
-    param($Run)
-    $id = ConvertTo-GIHtml (Get-GIValue $Run 'runId')
-    $snapName = Get-GIValue (Get-GIValue $Run 'snapshot' $null) 'name'
-    $sb = "<tr><td><a href=""/runs/$id"">$id</a></td>"
-    $sb += "<td>$(ConvertTo-GIHtml (Get-GIValue $Run 'goldenVm'))</td>"
-    $sb += "<td>$(ConvertTo-GIHtml $snapName)</td>"
-    $sb += "<td>$(ConvertTo-GIHtml (Get-GIValue $Run 'currentStage'))</td>"
-    $sb += "<td>$(Get-GIStatusBadge ([string](Get-GIValue $Run 'status')))</td>"
-    $sb += "<td>$(Format-GIDate (Get-GIValue $Run 'createdAt'))</td>"
-    $sb += "<td>$(Format-GIDate (Get-GIValue $Run 'updatedAt'))</td>"
-    $sb += "<td>$(ConvertTo-GIHtml (Get-GIValue $Run 'progress'))</td></tr>"
-    $sb
-}
-
-function Get-GIRunTableHtml {
-    param($Runs)
-    $head = '<table><thead><tr><th>Run</th><th>Golden VM</th><th>Snapshot</th><th>Stage</th><th>Status</th><th>Created</th><th>Updated</th><th>Progress</th></tr></thead><tbody>'
-    $rows = foreach ($r in @($Runs)) { Get-GIRunRowHtml $r }
-    "$head$(@($rows) -join '')</tbody></table>"
-}
-
-function New-GIRunListPage {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [AllowNull()]$Runs,
-        [int]$RefreshSeconds = 0
-    )
-    $all = @($Runs | Where-Object { $null -ne $_ })
-    $waiting = @($all | Where-Object { (Get-GIValue $_ 'status') -eq 'AwaitingApproval' })
-    $others = @($all | Where-Object { (Get-GIValue $_ 'status') -ne 'AwaitingApproval' })
-    $body = '<h2>Golden image runs</h2>'
-    if ($waiting.Count -gt 0) {
-        $body += "<section class=""card attn""><h2 style=""margin-top:0"">Needs approval</h2>$(Get-GIRunTableHtml $waiting)</section>"
-    }
-    if ($others.Count -gt 0) {
-        $body += "<section class=""card"">$(Get-GIRunTableHtml $others)</section>"
-    } elseif ($waiting.Count -eq 0) {
-        $body += '<p class="muted">No runs found.</p>'
-    }
-    New-GIPage -Title 'Golden image runs' -BodyHtml $body -RefreshSeconds $RefreshSeconds
-}
-
-function Get-GIStepLogLinesHtml {
-    <# Log lines as <div class="ll lv-*"> rows. Everything from the log is HTML-encoded. #>
-    [CmdletBinding()]
-    [OutputType([string])]
-    param($Lines)
-    $rows = foreach ($l in @($Lines)) {
-        if ($null -eq $l) { continue }
-        $lv = ([string](Get-GIValue $l 'level' 'INFO')).ToLowerInvariant()
-        if ($lv -notin @('info', 'warn', 'error', 'out')) { $lv = 'info' }
-        $at = [string](Get-GIValue $l 'at' '')
-        $t = if ($at -match 'T(\d\d:\d\d:\d\d)') { $Matches[1] } else { '' }
-        "<div class=""ll lv-$lv""><span class=""lt"">$(ConvertTo-GIHtml $t)</span>$(ConvertTo-GIHtml (Get-GIValue $l 'text'))</div>"
-    }
-    @($rows) -join ''
-}
-
-function Get-GIStepLogScript {
-    # Polls open step logs of Running steps; log text only ever goes in through textContent.
-    @'
-(function(){
-var MAXL=2000,EVERY=10000;
-function stamp(a){var m=/T(\d\d:\d\d:\d\d)/.exec(a||'');return m?m[1]:''}
-function add(box,l){
-var d=document.createElement('div');
-var lv=(l.level||'INFO').toLowerCase();if(['info','warn','error','out'].indexOf(lv)<0){lv='info'}
-d.className='ll lv-'+lv;
-var t=document.createElement('span');t.className='lt';t.textContent=stamp(l.at);
-d.appendChild(t);d.appendChild(document.createTextNode(l.text==null?'':String(l.text)));
-box.appendChild(d);
-while(box.childNodes.length>MAXL){box.removeChild(box.firstChild)}
-}
-function key(d){return 'giLogOpen:'+d.getAttribute('data-run')+':'+d.getAttribute('data-step')}
-function poll(d){
-if(d.getAttribute('data-running')!=='1'||d.getAttribute('data-busy')==='1'){return}
-d.setAttribute('data-busy','1');
-var box=d.querySelector('.logbox');
-var url='/runs/'+d.getAttribute('data-run')+'/steps/'+d.getAttribute('data-step')+'/log?offset='+encodeURIComponent(d.getAttribute('data-offset')||'0');
-fetch(url,{credentials:'same-origin',headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null}).then(function(j){
-d.removeAttribute('data-busy');
-if(!j){return}
-var atEnd=box.scrollTop+box.clientHeight>=box.scrollHeight-8;
-if(j.offset<parseInt(d.getAttribute('data-offset')||'0',10)){while(box.firstChild){box.removeChild(box.firstChild)}}
-(j.lines||[]).forEach(function(l){add(box,l)});
-d.setAttribute('data-offset',String(j.offset));
-if(atEnd){box.scrollTop=box.scrollHeight}
-if(!j.running){d.setAttribute('data-running','0')}
-}).catch(function(){d.removeAttribute('data-busy')});
-}
-function all(){return document.querySelectorAll('details.steplog')}
-function tick(){Array.prototype.forEach.call(all(),function(d){if(d.open){poll(d)}})}
-document.addEventListener('DOMContentLoaded',function(){
-Array.prototype.forEach.call(all(),function(d){
-var box=d.querySelector('.logbox');if(box){box.scrollTop=box.scrollHeight}
-try{if(sessionStorage.getItem(key(d))==='1'){d.open=true}}catch(e){}
-d.addEventListener('toggle',function(){
-try{sessionStorage.setItem(key(d),d.open?'1':'0')}catch(e){}
-if(d.open){poll(d)}
-});
-});
-setInterval(tick,EVERY);
-});
-})();
-'@
-}
-
-function Get-GIStepTableHtml {
-    <#
-    Nested table of Maintain sub-steps (run.stages.Maintain.steps); '' when there are none.
-    StepLogs maps step id -> @{ Lines; Offset } for the steps that get a live log; the caller reads the files so this stays pure.
-    #>
-    [CmdletBinding()]
-    [OutputType([string])]
-    param($Steps, [string]$RunId = '', $StepLogs = $null)
-    $list = @(@($Steps) | Where-Object { $null -ne $_ })
-    if (-not $list.Count) { return '' }
-    $rows = foreach ($st in $list) {
-        $s = [string](Get-GIValue $st 'status' 'Pending')
-        $started = Get-GIValue $st 'startedAt' $null
-        $ended = Get-GIValue $st 'endedAt' $null
-        $dur = if ($started) { ConvertTo-GIHtml (Format-GIDuration $started $ended) } else { '' }
-        "<tr><td>$(Get-GIStatusIcon $s)$(ConvertTo-GIHtml (Get-GIValue $st 'label' (Get-GIValue $st 'id')))</td><td>$(Get-GIStatusBadge $s)</td><td>$(Format-GIDate $started)</td><td>$dur</td><td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
-        $sid = [string](Get-GIValue $st 'id' '')
-        if ($StepLogs -is [System.Collections.IDictionary] -and $sid -and $RunId -and $StepLogs.Contains($sid)) {
-            $log = $StepLogs[$sid]
-            $lines = @(Get-GIValue $log 'Lines' @())
-            $isRunning = if ($s -eq 'Running') { '1' } else { '0' }
-            $summary = if ($lines.Count) { "Log ($($lines.Count) lines)" } else { 'Log' }
-            "<tr class=""steplogrow""><td colspan=""5""><details class=""steplog"" data-run=""$(ConvertTo-GIHtml ([uri]::EscapeDataString($RunId)))"" data-step=""$(ConvertTo-GIHtml ([uri]::EscapeDataString($sid)))"" data-offset=""$([int64](Get-GIValue $log 'Offset' 0))"" data-running=""$isRunning""><summary>$summary</summary><div class=""logbox"">$(Get-GIStepLogLinesHtml $lines)</div></details></td></tr>"
-        }
-    }
-    "<table class=""steps""><thead><tr><th>Step</th><th>Status</th><th>Started</th><th>Duration</th><th>Message</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table>"
-}
-
-function New-GIRunDetailPage {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory)]$Run,
-        [int]$RefreshSeconds = 0,
-        [string]$ApprovalFormHtml = '',   # already-encoded form HTML, only passed for approvers
-        [string]$NoticeHtml = '',         # already-encoded notice (e.g. result of an approve/reject)
-        $StepLogs = $null                 # hashtable step id -> @{ Lines; Offset }, read by the route (views do no file access)
-    )
-    $id = ConvertTo-GIHtml (Get-GIValue $Run 'runId')
-    $status = [string](Get-GIValue $Run 'status')
-    $body = "<h2>Run $id $(Get-GIStatusBadge $status)</h2>"
-    if ($NoticeHtml) { $body += "<section class=""card attn"">$NoticeHtml</section>" }
-
-    $snap = Get-GIValue $Run 'snapshot' $null
-    $body += '<section class="card"><dl class="kv">'
-    $body += "<dt>Golden VM</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $Run 'goldenVm'))</dd>"
-    $body += "<dt>Current stage</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $Run 'currentStage'))</dd>"
-    $body += "<dt>Created</dt><dd>$(Format-GIDate (Get-GIValue $Run 'createdAt'))</dd>"
-    $body += "<dt>Updated</dt><dd>$(Format-GIDate (Get-GIValue $Run 'updatedAt'))</dd>"
-    $body += "<dt>Snapshot</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $snap 'name'))</dd>"
-    $body += "<dt>Progress</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $Run 'progress'))</dd>"
-    $body += '</dl>'
-    $body += "<p class=""links""><a href=""/reports/$id"">Report</a><a href=""/logs/$id"">Log</a><a href=""/api/runs/$id"">JSON</a></p></section>"
-
-    $err = Get-GIValue $Run 'error' $null
-    if ($err) {
-        $body += "<h2>Error</h2><div class=""err"">$(ConvertTo-GIHtml $err)</div>"
-    }
-
-    # Stage timeline, fixed order
-    $stages = Get-GIValue $Run 'stages' $null
-    $body += '<h2>Stages</h2><section class="card"><table><thead><tr><th>Stage</th><th>Status</th><th>Started</th><th>Ended</th><th>Duration</th><th>Message</th></tr></thead><tbody>'
-    foreach ($name in (Get-GIViewStageOrder)) {
-        $st = Get-GIValue $stages $name $null
-        $stStatus = [string](Get-GIValue $st 'status' 'Pending')
-        $started = Get-GIValue $st 'startedAt' $null
-        $ended = Get-GIValue $st 'endedAt' $null
-        $body += "<tr><td>$(Get-GIStatusIcon $stStatus)$name</td><td>$(Get-GIStatusBadge $stStatus)</td>"
-        $body += "<td>$(Format-GIDate $started)</td><td>$(Format-GIDate $ended)</td>"
-        $body += "<td>$(ConvertTo-GIHtml (Format-GIDuration $started $ended))</td>"
-        $body += "<td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
-        $stepHtml = Get-GIStepTableHtml (Get-GIValue $st 'steps' @()) -RunId ([string](Get-GIValue $Run 'runId')) -StepLogs $StepLogs
-        if ($stepHtml) { $body += "<tr class=""substeps""><td></td><td colspan=""5"">$stepHtml</td></tr>" }
-    }
-    $body += '</tbody></table></section>'
-
-    # Snapshot manifest
-    $manifest = Get-GIValue $snap 'manifest' $null
-    if ($manifest) {
-        $props = if ($manifest -is [System.Collections.IDictionary]) { $manifest.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Name = $_.Key; Value = $_.Value } } }
-        else { $manifest.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Value = $_.Value } } }
-        $body += '<h2>Snapshot manifest</h2><section class="card"><table><thead><tr><th>Component</th><th>Version</th></tr></thead><tbody>'
-        foreach ($p in @($props)) { $body += "<tr><td>$(ConvertTo-GIHtml $p.Name)</td><td>$(ConvertTo-GIHtml $p.Value)</td></tr>" }
-        $body += '</tbody></table></section>'
-    }
-
-    # Validation checks grouped by category
-    $validation = Get-GIValue $Run 'validation' $null
-    $checks = @(Get-GIValue $validation 'checks' @())
-    if ($checks.Count -gt 0) {
-        $vp = Get-GIValue $validation 'passed' $false
-        $vBadge = if ($vp) { Get-GIStatusBadge 'Succeeded' } else { Get-GIStatusBadge 'Failed' }
-        $body += "<h2>Validation $vBadge</h2><section class=""card""><table><thead><tr><th>Check</th><th>Target</th><th>Result</th><th>Detail</th></tr></thead><tbody>"
-        foreach ($grp in ($checks | Group-Object -Property { [string](Get-GIValue $_ 'category' 'Other') })) {
-            $body += "<tr class=""cat""><td colspan=""4"">$(ConvertTo-GIHtml $grp.Name)</td></tr>"
-            foreach ($c in $grp.Group) {
-                $res = if (Get-GIValue $c 'passed' $false) { Get-GIStatusBadge 'Succeeded' } else { Get-GIStatusBadge 'Failed' }
-                $body += "<tr><td>$(ConvertTo-GIHtml (Get-GIValue $c 'name'))</td><td>$(ConvertTo-GIHtml (Get-GIValue $c 'target'))</td><td>$res</td><td>$(ConvertTo-GIHtml (Get-GIValue $c 'detail'))</td></tr>"
-            }
-        }
-        $body += '</tbody></table></section>'
-    }
-
-    # Approval
-    $ap = Get-GIValue $Run 'approval' $null
-    $decision = Get-GIValue $ap 'decision' $null
-    $body += '<h2>Approval</h2><section class="card">'
-    if ($status -eq 'AwaitingApproval' -and -not $decision) {
-        $body += '<p>' + (Get-GIStatusBadge 'AwaitingApproval') + ' Waiting for an approver.</p>'
-        $body += $ApprovalFormHtml
-    }
-    $body += '<dl class="kv">'
-    $body += "<dt>Decision</dt><dd>$(if ($decision) { ConvertTo-GIHtml $decision } else { '<span class="muted">none yet</span>' })</dd>"
-    $body += "<dt>By</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $ap 'by'))</dd>"
-    $body += "<dt>At</dt><dd>$(Format-GIDate (Get-GIValue $ap 'at'))</dd>"
-    $body += "<dt>Start time</dt><dd>$(Format-GIDate (Get-GIValue $ap 'startTime'))</dd>"
-    $body += "<dt>Comment</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $ap 'comment'))</dd>"
-    $body += '</dl></section>'
-
-    # Promotion pools
-    $pools = @(Get-GIValue (Get-GIValue $Run 'promotion' $null) 'pools' @())
-    if ($pools.Count -gt 0) {
-        $body += '<h2>Promotion</h2><section class="card"><table><thead><tr><th>Pool</th><th>Scheduled start</th><th>Status</th><th>Message</th></tr></thead><tbody>'
-        foreach ($p in $pools) {
-            $body += "<tr><td>$(ConvertTo-GIHtml (Get-GIValue $p 'poolName'))</td><td>$(Format-GIDate (Get-GIValue $p 'scheduledStart'))</td><td>$(Get-GIStatusBadge ([string](Get-GIValue $p 'status')))</td><td>$(ConvertTo-GIHtml (Get-GIValue $p 'message'))</td></tr>"
-        }
-        $body += '</tbody></table></section>'
-    }
-
-    if ($body.Contains('class="steplog"')) { $body += "<script>$(Get-GIStepLogScript)</script>" }
-    New-GIPage -Title "Run $(Get-GIValue $Run 'runId')" -BodyHtml $body -RefreshSeconds $RefreshSeconds
-}
-
-function Get-GIPoolSummary {
-    <# Latest promotion entry per pool across runs (newest first), from state only. #>
-    [CmdletBinding()]
-    [OutputType([object[]])]
-    param([AllowNull()]$Runs)
-    $seen = [ordered]@{}
-    foreach ($r in @($Runs | Where-Object { $null -ne $_ })) {
-        foreach ($p in @(Get-GIValue (Get-GIValue $r 'promotion' $null) 'pools' @())) {
-            $name = [string](Get-GIValue $p 'poolName')
-            if ($name -and -not $seen.Contains($name)) {
-                $seen[$name] = [pscustomobject]@{
-                    Pool           = $name
-                    Snapshot       = [string](Get-GIValue (Get-GIValue $r 'snapshot' $null) 'name')
-                    RunId          = [string](Get-GIValue $r 'runId')
-                    ScheduledStart = Get-GIValue $p 'scheduledStart'
-                    Status         = [string](Get-GIValue $p 'status')
-                }
-            }
-        }
-    }
-    @($seen.Values)
-}
-
-function New-GIPoolsPage {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [AllowNull()]$LastKnownGood,
-        [AllowNull()]$Runs,
-        [string]$TestPoolName = '',
-        [int]$RefreshSeconds = 0
-    )
-    $body = '<h2>Pools</h2><p class="muted">Derived from pipeline state only; no live Horizon queries.</p>'
-
-    $body += '<h2>Last known good</h2><section class="card">'
-    if ($LastKnownGood) {
-        $rid = ConvertTo-GIHtml (Get-GIValue $LastKnownGood 'runId')
-        $body += '<dl class="kv">'
-        $body += "<dt>Golden VM</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $LastKnownGood 'goldenVm'))</dd>"
-        $body += "<dt>Snapshot</dt><dd>$(ConvertTo-GIHtml (Get-GIValue $LastKnownGood 'snapshotName'))</dd>"
-        $body += "<dt>Run</dt><dd><a href=""/runs/$rid"">$rid</a></dd>"
-        $body += "<dt>Promoted</dt><dd>$(Format-GIDate (Get-GIValue $LastKnownGood 'promotedAt'))</dd></dl>"
-    } else {
-        $body += '<p class="muted">No promotion has completed yet.</p>'
-    }
-    $body += '</section>'
-
-    # Test pool: latest run that got past the Snapshot stage
-    $all = @($Runs | Where-Object { $null -ne $_ })
-    $testRun = $all | Where-Object {
-        (Get-GIValue $_ 'snapshot' $null) -and (Get-GIValue (Get-GIValue (Get-GIValue $_ 'stages' $null) 'TestPush' $null) 'status' 'Pending') -ne 'Pending'
-    } | Select-Object -First 1
-    $body += "<h2>Test pool $(ConvertTo-GIHtml $TestPoolName)</h2><section class=""card"">"
-    if ($testRun) {
-        $rid = ConvertTo-GIHtml (Get-GIValue $testRun 'runId')
-        $tp = Get-GIValue (Get-GIValue (Get-GIValue $testRun 'stages' $null) 'TestPush' $null) 'status'
-        $body += "<dl class=""kv""><dt>Snapshot</dt><dd>$(ConvertTo-GIHtml (Get-GIValue (Get-GIValue $testRun 'snapshot' $null) 'name'))</dd>"
-        $body += "<dt>Run</dt><dd><a href=""/runs/$rid"">$rid</a></dd><dt>TestPush</dt><dd>$(Get-GIStatusBadge ([string]$tp))</dd></dl>"
-    } else {
-        $body += '<p class="muted">No run has pushed to the test pool yet.</p>'
-    }
-    $body += '</section>'
-
-    $body += '<h2>Production pools</h2><section class="card">'
-    $summary = @(Get-GIPoolSummary -Runs $all)
-    if ($summary.Count -gt 0) {
-        $body += '<table><thead><tr><th>Pool</th><th>Snapshot</th><th>Scheduled start</th><th>Status</th><th>Run</th></tr></thead><tbody>'
-        foreach ($s in $summary) {
-            $rid = ConvertTo-GIHtml $s.RunId
-            $body += "<tr><td>$(ConvertTo-GIHtml $s.Pool)</td><td>$(ConvertTo-GIHtml $s.Snapshot)</td><td>$(Format-GIDate $s.ScheduledStart)</td><td>$(Get-GIStatusBadge $s.Status)</td><td><a href=""/runs/$rid"">$rid</a></td></tr>"
-        }
-        $body += '</tbody></table>'
-    } else {
-        $body += '<p class="muted">No promotions recorded.</p>'
-    }
-    $body += '</section>'
-    New-GIPage -Title 'Pools' -BodyHtml $body -RefreshSeconds $RefreshSeconds
 }
 
 function New-GINotFoundPage {
@@ -773,30 +516,6 @@ function Test-GIFormToken {
     $actual = [System.Text.Encoding]::ASCII.GetBytes($Token)
     return [System.Security.Cryptography.CryptographicOperations]::FixedTimeEquals($expected, $actual)
 }
-
-function New-GIApprovalForm {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory)][string]$RunId,
-        [Parameter(Mandatory)][string]$Token,
-        [Parameter(Mandatory)][datetime]$DefaultStart
-    )
-    $rid = ConvertTo-GIHtml $RunId
-    $tok = ConvertTo-GIHtml $Token
-    $start = $DefaultStart.ToString('yyyy-MM-ddTHH:mm')
-    @"
-<form method="post" action="/runs/$rid/decision" class="approval">
-<input type="hidden" name="token" value="$tok">
-<p><label>Production start time (defaults to next maintenance window)<br>
-<input type="datetime-local" name="startTime" value="$start" required></label></p>
-<p><label>Comment (change ticket, reason)<br><input type="text" name="comment" maxlength="500" style="width:100%"></label></p>
-<p><button type="submit" name="decision" value="approve">Approve and schedule</button>
-<button type="submit" name="decision" value="reject">Reject</button></p>
-</form>
-"@
-}
-
 
 function Get-GIDashboardUser {
     # DOMAIN\user of the authenticated caller; 'local-admin' with -LocalAdmin; 'anonymous' with -NoAuth
