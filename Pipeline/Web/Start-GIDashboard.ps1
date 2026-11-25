@@ -185,7 +185,15 @@ Start-PodeServer -Quiet -Threads 4 {
             $runToken = Get-GIFormToken -Secret $c.FormSecret -User $user -RunId 'run'
             $notice += New-GIRunActionsHtml -Run $run -Token $runToken -Busy $busy
         }
-        Write-PodeHtmlResponse -Value (New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice)
+        $stepLogs = Get-GIRunStepLogs -Config (Get-GIDashboardConfig $c) -Run $run
+        Write-PodeHtmlResponse -Value (New-GIRunDetailPage -Run $run -RefreshSeconds $refresh -ApprovalFormHtml $form -NoticeHtml $notice -StepLogs $stepLogs)
+    }
+
+    # Live log of one guest-watcher step; polled by the run page while the step is Running.
+    Add-PodeRoute -Method Get -Path '/runs/:runId/steps/:stepId/log' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        $r = Get-GIStepLogResponse -Config (Get-GIDashboardConfig $c) -RunId ([string]$WebEvent.Parameters['runId']) -StepId ([string]$WebEvent.Parameters['stepId']) -Offset ([string]$WebEvent.Query['offset'])
+        Write-PodeJsonResponse -Value (ConvertTo-Json -InputObject $r.Body -Depth 6 -Compress) -StatusCode $r.Status
     }
 
     Add-PodeRoute -Method Post -Path '/runs/:runId/decision' @auth -ScriptBlock {

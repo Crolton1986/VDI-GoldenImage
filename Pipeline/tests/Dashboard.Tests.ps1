@@ -115,3 +115,56 @@ Describe 'Run detail Maintain steps' {
         New-GIRunDetailPage -Run $r | Should -Not -Match 'class="substeps"'
     }
 }
+
+Describe 'Run detail step logs' {
+    BeforeAll {
+        $dir = Join-Path $TestDrive 'log-state'
+        $null = New-Item -ItemType Directory -Path $dir
+        $script:lcfg = @{ Paths = @{ State = $dir }; GoldenImage = @{ VmName = 'W11-GI-01' } }
+        $r = New-GIRun -Config $lcfg -RunId '20261125-060606'
+        $plan = @(
+            [pscustomobject]@{ Id = 'SafetySnapshot'; Label = 'Safety snapshot'; Resumable = $true; Applies = $true; SkipReason = '' }
+            [pscustomobject]@{ Id = 'Pkg:Horizon'; Label = 'Install Horizon Agent'; Resumable = $true; Applies = $true; SkipReason = '' }
+            [pscustomobject]@{ Id = 'WindowsUpdate'; Label = 'Windows Update'; Resumable = $true; Applies = $true; SkipReason = '' }
+        )
+        $null = Initialize-GIMaintainSteps -Config $lcfg -Run $r -Plan $plan
+        Set-GIStep -Config $lcfg -Run $r -Id 'Pkg:Horizon' -Status Running -Message 'm'
+        $script:lrun = Get-GIRun -Config $lcfg -RunId '20261125-060606'
+        $script:logs = @{
+            'Pkg:Horizon' = @{ Offset = 1234; Lines = @(
+                    @{ at = '2026-11-25T10:01:02.0000000+01:00'; level = 'OUT'; step = 'Pkg:Horizon'; text = 'installing <script>alert(1)</script>' },
+                    @{ at = '2026-11-25T10:01:03.0000000+01:00'; level = 'WARN'; step = 'Pkg:Horizon'; text = 'careful' },
+                    @{ at = '2026-11-25T10:01:04.0000000+01:00'; level = 'ERROR'; step = 'Pkg:Horizon'; text = 'boom' },
+                    @{ at = 'x'; level = 'EVIL" onclick="x'; step = 'Pkg:Horizon'; text = 't' }) }
+            'WindowsUpdate' = @{ Offset = 0; Lines = @() }
+        }
+        $script:lh = New-GIRunDetailPage -Run $lrun -StepLogs $logs
+    }
+    It 'renders a details block only for steps that have a log entry' {
+        ([regex]::Matches($lh, '<details class="steplog"')).Count | Should -Be 2
+        $lh | Should -Not -Match 'data-step="SafetySnapshot"'
+    }
+    It 'renders no details block when no StepLogs are passed, and no script' {
+        $h = New-GIRunDetailPage -Run $lrun
+        $h | Should -Not -Match '<details class="steplog"'
+        $h | Should -Not -Match 'giLogOpen'
+    }
+    It 'HTML-encodes log text and whitelists the level class' {
+        $lh | Should -Not -Match '<script>alert'
+        $lh | Should -Match 'installing &lt;script&gt;alert\(1\)&lt;/script&gt;'
+        $lh | Should -Match 'class="ll lv-out"><span class="lt">10:01:02</span>'
+        $lh | Should -Match 'class="ll lv-warn"'
+        $lh | Should -Match 'class="ll lv-error"'
+        $lh | Should -Not -Match 'onclick="x'
+    }
+    It 'URL-encodes the step id in data attributes and carries offset and running flag' {
+        $lh | Should -Match 'data-run="20261125-060606" data-step="Pkg%3AHorizon" data-offset="1234" data-running="1"'
+        $lh | Should -Match 'data-step="WindowsUpdate" data-offset="0" data-running="0"'
+    }
+    It 'includes the polling script once and never uses innerHTML' {
+        ([regex]::Matches($lh, 'giLogOpen:')).Count | Should -Be 1
+        $script = $lh.Substring($lh.IndexOf('giLogOpen:') - 400)
+        $script | Should -Match 'textContent'
+        $script | Should -Not -Match 'innerHTML'
+    }
+}
