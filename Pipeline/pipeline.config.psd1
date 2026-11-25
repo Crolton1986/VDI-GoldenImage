@@ -38,6 +38,9 @@
     GuestSampleCount = 2
     RequiredServices = @('wsnm','svservice','frxsvc')
     MachineReadyTimeoutMin = 60
+    StuckMachineGraceMin = 10            # minutes a clone may sit in AGENT_UNREACHABLE / ERROR before it counts as stuck
+    AutoRecreateStuckMachines = $true    # test pool only: delete stuck clones so Horizon provisions fresh ones
+    MaxRecreateAttempts = 2
   }
 
   # Snapshot retention (Prune = $false => report only)

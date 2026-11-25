@@ -251,6 +251,12 @@ function Invoke-GIStageMaintain {
             $dir = Split-Path $gi.ScriptPathInGuest -Parent
             Invoke-GIGuestScript -VM $vm -Credential $cred -ScriptText "New-Item -ItemType Directory -Path '$dir' -Force | Out-Null" | Out-Null
             Copy-VMGuestFile -Source $local -Destination "$dir\" -VM $vm -LocalToGuest -GuestCredential $cred -Force -ErrorAction Stop
+            # The script reads its overrides (AppVolManager, DemConfigPath, ...) from '<script>.config' next to it.
+            # Without this copy the guest runs on the built-in defaults in the .ps1.
+            $localCfg = "$local.config"
+            if (Test-Path $localCfg) {
+                Copy-VMGuestFile -Source $localCfg -Destination "$dir\" -VM $vm -LocalToGuest -GuestCredential $cred -Force -ErrorAction Stop
+            }
         }
     }
 
@@ -387,21 +393,56 @@ function New-GICheck {
 }
 
 function Wait-GIPoolMachinesSettled {
+    <#
+    .SYNOPSIS
+      Waits until every machine in the pool is in a good state. A machine in a non-transient bad state
+      (AGENT_UNREACHABLE, ERROR, ...) gets Validation.StuckMachineGraceMin to recover on its own. With
+      -AllowRecreate and Validation.AutoRecreateStuckMachines it is then deleted so the pool provisions a
+      fresh one, up to Validation.MaxRecreateAttempts rounds. Each deletion is appended to -Actions.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Config,
         $Run,
         [Parameter(Mandatory)] [string] $PoolId,
         [Parameter(Mandatory)] [string] $PoolName,
-        [int] $TimeoutMinutes = 60
+        [int] $TimeoutMinutes = 60,
+        [switch] $AllowRecreate,
+        [System.Collections.Generic.List[string]] $Actions
     )
+    $graceMin   = [double](Get-GIConfigValue $Config 'Validation.StuckMachineGraceMin' 0)
+    $recreate   = $AllowRecreate -and [bool](Get-GIConfigValue $Config 'Validation.AutoRecreateStuckMachines' $false)
+    $maxRounds  = [int](Get-GIConfigValue $Config 'Validation.MaxRecreateAttempts' 2)
+    $rounds     = 0
+    $stuckSince = @{}
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ($true) {
         $machines = @(Get-GIHorizonPoolMachines -PoolId $PoolId)
-        $busy = @($machines | Where-Object { $script:GITransientMachineStates -contains $_.state })
-        if ($machines.Count -gt 0 -and $busy.Count -eq 0) { return $machines }
+        $busy  = @($machines | Where-Object { $script:GITransientMachineStates -contains $_.state })
+        $stuck = @($machines | Where-Object { $script:GITransientMachineStates -notcontains $_.state -and $script:GIGoodMachineStates -notcontains $_.state })
+
+        # Track how long each bad machine has been bad; a machine that recovers or is replaced drops out
+        $now = Get-Date
+        foreach ($k in @($stuckSince.Keys)) { if (-not ($stuck | Where-Object { $_.name -eq $k })) { $stuckSince.Remove($k) } }
+        foreach ($m in $stuck) { if (-not $stuckSince.ContainsKey($m.name)) { $stuckSince[$m.name] = $now } }
+        $expired = @($stuck | Where-Object { ($now - $stuckSince[$_.name]).TotalMinutes -ge $graceMin })
+
+        if ($machines.Count -gt 0 -and $busy.Count -eq 0 -and $stuck.Count -eq 0) { return $machines }
+        if ($machines.Count -gt 0 -and $busy.Count -eq 0 -and $expired.Count -eq $stuck.Count) {
+            # Every bad machine has used up its grace period
+            if (-not $recreate -or $rounds -ge $maxRounds) { return $machines }
+            $ids = @($expired | ForEach-Object { if ($_.PSObject.Properties['id']) { [string]$_.id } } | Where-Object { $_ })
+            if ($ids.Count -eq 0) { return $machines }
+            $rounds++
+            $desc = ($expired | ForEach-Object { "$($_.name) ($($_.state))" }) -join ', '
+            if ($Run) { Write-GILog -Config $Config -RunId $Run.runId -Level Warn -Message "Deleting stuck machine(s) in '$PoolName' so Horizon recreates them (round $rounds of $maxRounds): $desc" }
+            if ($Actions) { $Actions.Add("Deleted stuck machine(s) for recreation, round ${rounds}: $desc") }
+            Remove-GIHorizonMachines -MachineId $ids
+            $stuckSince.Clear()
+            $deadline = (Get-Date).AddMinutes($TimeoutMinutes)   # recreated clones get a full timeout
+        }
         if ((Get-Date) -gt $deadline) { return $machines }
-        if ($Run) { Set-GIProgress -Config $Config -Run $Run -Message "Waiting for $PoolName machines: $($busy.Count) of $($machines.Count) still provisioning" }
+        if ($Run) { Set-GIProgress -Config $Config -Run $Run -Message "Waiting for $PoolName machines: $($busy.Count + $stuck.Count) of $($machines.Count) not ready" }
         Start-Sleep -Seconds 30
     }
 }
@@ -419,7 +460,8 @@ function Test-GIPoolHealth {
         [string] $ExpectedSnapshotId,
         [hashtable] $Manifest = @{},
         [switch] $IncludeGuest,
-        [switch] $IncludeAppVolumes
+        [switch] $IncludeAppVolumes,
+        [switch] $AllowRecreate
     )
     $checks = [System.Collections.Generic.List[object]]::new()
     $pool = Get-GIHorizonPool -Name $PoolName
@@ -430,7 +472,10 @@ function Test-GIPoolHealth {
     }
 
     $timeout = [int](Get-GIConfigValue $Config 'Validation.MachineReadyTimeoutMin' 60)
-    $machines = @(Wait-GIPoolMachinesSettled -Config $Config -Run $Run -PoolId $info.PoolId -PoolName $PoolName -TimeoutMinutes $timeout)
+    $recreated = [System.Collections.Generic.List[string]]::new()
+    $machines = @(Wait-GIPoolMachinesSettled -Config $Config -Run $Run -PoolId $info.PoolId -PoolName $PoolName -TimeoutMinutes $timeout `
+        -AllowRecreate:$AllowRecreate -Actions $recreated)
+    foreach ($note in $recreated) { $checks.Add((New-GICheck 'Horizon' 'Recreated' $PoolName $true $note)) }
     $checks.Add((New-GICheck 'Horizon' 'MachineCount' $PoolName ($machines.Count -gt 0) "$($machines.Count) machine(s)"))
     foreach ($m in $machines) {
         $checks.Add((New-GICheck 'Horizon' 'MachineState' $m.name ($script:GIGoodMachineStates -contains $m.state) ([string]$m.state)))
@@ -512,7 +557,7 @@ function Invoke-GIStageValidate {
     if ($tp -and $tp.PSObject.Properties['horizonSnapshotId']) { $expected = [string]$tp.horizonSnapshotId }
 
     $checks = @(Test-GIPoolHealth -Config $Config -Run $Run -PoolName $Config.Pools.Test.Name -ExpectedSnapshotId $expected `
-        -Manifest $manifest -IncludeGuest -IncludeAppVolumes)
+        -Manifest $manifest -IncludeGuest -IncludeAppVolumes -AllowRecreate)
     $failed = @($checks | Where-Object { -not $_.passed })
     $Run.validation = [pscustomobject]@{ passed = ($checks.Count -gt 0 -and $failed.Count -eq 0); checks = $checks }
     Save-GIRun -Config $Config -Run $Run

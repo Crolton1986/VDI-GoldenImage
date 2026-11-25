@@ -197,6 +197,66 @@ Describe 'Test-GIPoolHealth (Horizon)' {
     }
 }
 
+Describe 'Stuck machine recreation' {
+    BeforeEach {
+        Set-ModVar Pools @(New-TestPool -Id 'p-t' -Name 'TST-W11' -Snap 'snap-1')
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPool { $global:GITestCtx.Pools | Select-Object -First 1 }
+        Mock -ModuleName VDI-GIPipeline Start-Sleep {}
+        Mock -ModuleName VDI-GIPipeline Write-GILog {}
+        Set-ModVar Deleted @()
+        Set-ModVar Polls 0
+        Mock -ModuleName VDI-GIPipeline Remove-GIHorizonMachines { $global:GITestCtx.Deleted += $MachineId }
+        $c = New-TestConfig
+        $c.Validation.MachineReadyTimeoutMin = 5
+        $c.Validation.StuckMachineGraceMin = 0
+        $c.Validation.AutoRecreateStuckMachines = $true
+        $c.Validation.MaxRecreateAttempts = 2
+        Set-ModVar Cfg $c
+    }
+
+    It 'deletes a stuck clone, waits for its replacement and reports a Recreated check' {
+        # first poll: stuck clone; later polls: the replacement is AVAILABLE
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPoolMachines {
+            $global:GITestCtx.Polls++
+            if ($global:GITestCtx.Polls -eq 1) { [pscustomobject]@{ id = 'm-1'; name = 'TST-W11-1'; state = 'AGENT_UNREACHABLE' } }
+            else { [pscustomobject]@{ id = 'm-2'; name = 'TST-W11-2'; state = 'AVAILABLE' } }
+        }
+        $r = Test-GIPoolHealth -Config $global:GITestCtx.Cfg -Run $run -PoolName 'TST-W11' -AllowRecreate
+        $global:GITestCtx.Deleted | Should -Be @('m-1')
+        ($r | Where-Object name -eq 'Recreated').passed | Should -BeTrue
+        ($r | Where-Object name -eq 'MachineState').passed | Should -BeTrue
+    }
+
+    It 'does nothing unless the caller allows recreation' {
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPoolMachines { [pscustomobject]@{ id = 'm-1'; name = 'TST-W11-1'; state = 'AGENT_UNREACHABLE' } }
+        $r = Test-GIPoolHealth -Config $global:GITestCtx.Cfg -Run $run -PoolName 'TST-W11'
+        $global:GITestCtx.Deleted | Should -BeNullOrEmpty
+        ($r | Where-Object name -eq 'MachineState').passed | Should -BeFalse
+    }
+
+    It 'does nothing when AutoRecreateStuckMachines is off' {
+        $global:GITestCtx.Cfg.Validation.AutoRecreateStuckMachines = $false
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPoolMachines { [pscustomobject]@{ id = 'm-1'; name = 'TST-W11-1'; state = 'ERROR' } }
+        Test-GIPoolHealth -Config $global:GITestCtx.Cfg -Run $run -PoolName 'TST-W11' -AllowRecreate | Out-Null
+        $global:GITestCtx.Deleted | Should -BeNullOrEmpty
+    }
+
+    It 'stops after MaxRecreateAttempts and leaves the machine failing' {
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPoolMachines { [pscustomobject]@{ id = 'm-1'; name = 'TST-W11-1'; state = 'AGENT_UNREACHABLE' } }
+        $r = Test-GIPoolHealth -Config $global:GITestCtx.Cfg -Run $run -PoolName 'TST-W11' -AllowRecreate
+        @($global:GITestCtx.Deleted).Count | Should -Be 2
+        ($r | Where-Object name -eq 'MachineState').passed | Should -BeFalse
+    }
+
+    It 'leaves a clone alone while it is inside the grace period' {
+        $global:GITestCtx.Cfg.Validation.StuckMachineGraceMin = 10
+        $global:GITestCtx.Cfg.Validation.MachineReadyTimeoutMin = 0   # give up straight away
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPoolMachines { [pscustomobject]@{ id = 'm-1'; name = 'TST-W11-1'; state = 'AGENT_UNREACHABLE' } }
+        Test-GIPoolHealth -Config $global:GITestCtx.Cfg -Run $run -PoolName 'TST-W11' -AllowRecreate | Out-Null
+        $global:GITestCtx.Deleted | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Test-GIPoolHealth -IncludeGuest' {
     BeforeEach {
         Set-ModVar Pools @(New-TestPool -Id 'p-t' -Name 'TST-W11' -Snap 'snap-1')

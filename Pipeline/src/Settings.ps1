@@ -32,9 +32,9 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
-            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /.' }
-            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/' }
-            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/' }
+            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /. Default: /app_volumes/sessions. Do not use /cv_api/ paths, they return 404 on 4.x.' }
+            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Help = 'Default: /app_volumes/online_entities' }
+            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/'; Help = 'Default: /app_volumes/app_attachments' }
         )
     }
     GoldenImage = @{
@@ -83,6 +83,11 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'GuestSampleCount'; Label = 'Machines sampled'; Type = 'int'; Min = 0; Max = 20; Required = $true; Help = 'Guest-level checks run on this many test machines (0 = none).' }
             @{ Key = 'RequiredServices'; Label = 'Required services'; Type = 'list'; Help = 'Windows service names that must be running, one per line.' }
             @{ Key = 'MachineReadyTimeoutMin'; Label = 'Machine ready timeout (min)'; Type = 'int'; Min = 5; Max = 600; Required = $true }
+            @{ Key = 'StuckMachineGraceMin'; Label = 'Stuck machine grace (min)'; Type = 'int'; Min = 0; Max = 120; Default = 10; Required = $true
+               Help = 'How long a test clone may sit in AGENT_UNREACHABLE or ERROR before it counts as stuck.' }
+            @{ Key = 'AutoRecreateStuckMachines'; Label = 'Recreate stuck test machines'; Type = 'bool'; Default = $true
+               Warning = 'Deletes test pool machines that are still stuck after the grace period so Horizon provisions new ones. Never applied to production pools.' }
+            @{ Key = 'MaxRecreateAttempts'; Label = 'Recreate attempts'; Type = 'int'; Min = 1; Max = 5; Default = 2; Required = $true }
             @{ Key = 'GuestCredentialSecret'; Label = 'Guest credential'; Type = 'secret'; DefaultName = 'GI-CloneGuestAdmin'
                Help = 'Account used inside the test clones. Falls back to the golden image guest credential when not set.' }
         )

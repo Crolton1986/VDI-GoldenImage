@@ -163,7 +163,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | AppVolumes | Server, CredentialSecret, SkipCertificateCheck, TestPackages, Endpoints | TestPackages are the packages assigned to the test pool's computers. Endpoints are the REST paths and differ between releases. |
 | GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
-| Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
+| Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin, StuckMachineGraceMin, AutoRecreateStuckMachines, MaxRecreateAttempts | Services are checked on that many test machines. A test clone still in AGENT_UNREACHABLE or ERROR after the grace period is deleted so Horizon recreates it (test pool only, never production). Each deletion shows as a Recreated check in the report. |
 | Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors | Retention. See Safety behavior. |
 | Promotion | AutoPromote, MaintenanceWindow | MaintenanceWindow has Days and StartTime. The next matching window is used when you don't pass `-StartTime`. |
 | Email | Enabled, SmtpServer, Port, From, To, UseSsl | Run report by mail. |

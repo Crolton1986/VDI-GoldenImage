@@ -168,6 +168,24 @@ function Get-GIHorizonPoolMachines {
     return Invoke-GIHorizonApi -Path '/inventory/v1/machines' -Query @{ filter = $filter } -All
 }
 
+function Remove-GIHorizonMachines {
+    <#
+    .SYNOPSIS
+      Deletes machines from a pool (POST /inventory/v1/machines/action/delete). Instant-clone pools
+      provision a replacement automatically. Used to clear clones stuck in AGENT_UNREACHABLE or ERROR.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)] [string[]] $MachineId)
+    if ($PSCmdlet.ShouldProcess(($MachineId -join ','), 'Delete Horizon machine(s)')) {
+        Invoke-GIHorizonApi -Path '/inventory/v1/machines/action/delete' -Method Post -Body @{
+            machine_ids                        = @($MachineId)
+            delete_from_disk                   = $true
+            force_logoff_session               = $true
+            allow_delete_from_multi_desktop_pools = $true
+        } | Out-Null
+    }
+}
+
 function Get-GIHorizonVCenterId {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [hashtable] $Config)

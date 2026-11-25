@@ -140,6 +140,9 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     GuestSampleCount = 2
     RequiredServices = @('wsnm','svservice','frxsvc')
     MachineReadyTimeoutMin = 60
+    StuckMachineGraceMin = 10            # minutes a clone may sit in AGENT_UNREACHABLE / ERROR before it counts as stuck
+    AutoRecreateStuckMachines = $true    # test pool only: delete stuck clones so Horizon provisions fresh ones
+    MaxRecreateAttempts = 2
   }
   Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }   # Prune=$false => report only
   Promotion = @{
