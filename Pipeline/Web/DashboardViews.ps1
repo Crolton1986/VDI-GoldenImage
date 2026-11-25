@@ -177,6 +177,7 @@ a{color:var(--link)}
 .icon{font-weight:700;margin-right:4px}
 .icon.st-ok{color:#1e8a44}.icon.st-bad{color:#c0392b}.icon.st-running{color:#1b6fd1}.icon.st-pending,.icon.st-skip{color:#9aa5b1}
 tr.cat td{background:#eef2f6;font-weight:600}
+tr.substeps>td{padding-top:0;border-bottom:1px solid var(--line)}table.steps th,table.steps td{padding:3px 6px;font-size:13px;border-bottom:1px dashed var(--line)}table.steps tr:last-child td{border-bottom:0}
 .err{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;white-space:pre-wrap}
 .muted{color:var(--mut)}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px}
@@ -208,6 +209,11 @@ pre.detail{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;pad
 .setup-step fieldset{border:0;padding:0;margin:0}.setup-step .choice{margin:8px 0}
 .banner-ok{border-left:5px solid #1e8a44;background:#eef8f1;padding:8px 12px;margin:10px 0;font-weight:600}
 .waits{color:var(--mut);font-style:italic}
+tr.steplogrow>td{padding-top:0}
+details.steplog>summary{cursor:pointer;color:var(--mut);font-size:12px}
+.logbox{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:4px 8px;margin:4px 0;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.logbox .ll{margin:0}.logbox .lt{color:var(--mut);margin-right:8px}
+.logbox .lv-out{color:var(--mut)}.logbox .lv-info{color:var(--fg)}.logbox .lv-warn{color:#8a5a00}.logbox .lv-error{color:#c0392b;font-weight:600}
 '@
 }
 
@@ -421,6 +427,99 @@ function New-GIRunListPage {
     New-GIPage -Title 'Golden image runs' -BodyHtml $body -RefreshSeconds $RefreshSeconds
 }
 
+function Get-GIStepLogLinesHtml {
+    <# Log lines as <div class="ll lv-*"> rows. Everything from the log is HTML-encoded. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param($Lines)
+    $rows = foreach ($l in @($Lines)) {
+        if ($null -eq $l) { continue }
+        $lv = ([string](Get-GIValue $l 'level' 'INFO')).ToLowerInvariant()
+        if ($lv -notin @('info', 'warn', 'error', 'out')) { $lv = 'info' }
+        $at = [string](Get-GIValue $l 'at' '')
+        $t = if ($at -match 'T(\d\d:\d\d:\d\d)') { $Matches[1] } else { '' }
+        "<div class=""ll lv-$lv""><span class=""lt"">$(ConvertTo-GIHtml $t)</span>$(ConvertTo-GIHtml (Get-GIValue $l 'text'))</div>"
+    }
+    @($rows) -join ''
+}
+
+function Get-GIStepLogScript {
+    # Polls open step logs of Running steps; log text only ever goes in through textContent.
+    @'
+(function(){
+var MAXL=2000,EVERY=10000;
+function stamp(a){var m=/T(\d\d:\d\d:\d\d)/.exec(a||'');return m?m[1]:''}
+function add(box,l){
+var d=document.createElement('div');
+var lv=(l.level||'INFO').toLowerCase();if(['info','warn','error','out'].indexOf(lv)<0){lv='info'}
+d.className='ll lv-'+lv;
+var t=document.createElement('span');t.className='lt';t.textContent=stamp(l.at);
+d.appendChild(t);d.appendChild(document.createTextNode(l.text==null?'':String(l.text)));
+box.appendChild(d);
+while(box.childNodes.length>MAXL){box.removeChild(box.firstChild)}
+}
+function key(d){return 'giLogOpen:'+d.getAttribute('data-run')+':'+d.getAttribute('data-step')}
+function poll(d){
+if(d.getAttribute('data-running')!=='1'||d.getAttribute('data-busy')==='1'){return}
+d.setAttribute('data-busy','1');
+var box=d.querySelector('.logbox');
+var url='/runs/'+d.getAttribute('data-run')+'/steps/'+d.getAttribute('data-step')+'/log?offset='+encodeURIComponent(d.getAttribute('data-offset')||'0');
+fetch(url,{credentials:'same-origin',headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null}).then(function(j){
+d.removeAttribute('data-busy');
+if(!j){return}
+var atEnd=box.scrollTop+box.clientHeight>=box.scrollHeight-8;
+if(j.offset<parseInt(d.getAttribute('data-offset')||'0',10)){while(box.firstChild){box.removeChild(box.firstChild)}}
+(j.lines||[]).forEach(function(l){add(box,l)});
+d.setAttribute('data-offset',String(j.offset));
+if(atEnd){box.scrollTop=box.scrollHeight}
+if(!j.running){d.setAttribute('data-running','0')}
+}).catch(function(){d.removeAttribute('data-busy')});
+}
+function all(){return document.querySelectorAll('details.steplog')}
+function tick(){Array.prototype.forEach.call(all(),function(d){if(d.open){poll(d)}})}
+document.addEventListener('DOMContentLoaded',function(){
+Array.prototype.forEach.call(all(),function(d){
+var box=d.querySelector('.logbox');if(box){box.scrollTop=box.scrollHeight}
+try{if(sessionStorage.getItem(key(d))==='1'){d.open=true}}catch(e){}
+d.addEventListener('toggle',function(){
+try{sessionStorage.setItem(key(d),d.open?'1':'0')}catch(e){}
+if(d.open){poll(d)}
+});
+});
+setInterval(tick,EVERY);
+});
+})();
+'@
+}
+
+function Get-GIStepTableHtml {
+    <#
+    Nested table of Maintain sub-steps (run.stages.Maintain.steps); '' when there are none.
+    StepLogs maps step id -> @{ Lines; Offset } for the steps that get a live log; the caller reads the files so this stays pure.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param($Steps, [string]$RunId = '', $StepLogs = $null)
+    $list = @(@($Steps) | Where-Object { $null -ne $_ })
+    if (-not $list.Count) { return '' }
+    $rows = foreach ($st in $list) {
+        $s = [string](Get-GIValue $st 'status' 'Pending')
+        $started = Get-GIValue $st 'startedAt' $null
+        $ended = Get-GIValue $st 'endedAt' $null
+        $dur = if ($started) { ConvertTo-GIHtml (Format-GIDuration $started $ended) } else { '' }
+        "<tr><td>$(Get-GIStatusIcon $s)$(ConvertTo-GIHtml (Get-GIValue $st 'label' (Get-GIValue $st 'id')))</td><td>$(Get-GIStatusBadge $s)</td><td>$(Format-GIDate $started)</td><td>$dur</td><td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
+        $sid = [string](Get-GIValue $st 'id' '')
+        if ($StepLogs -is [System.Collections.IDictionary] -and $sid -and $RunId -and $StepLogs.Contains($sid)) {
+            $log = $StepLogs[$sid]
+            $lines = @(Get-GIValue $log 'Lines' @())
+            $isRunning = if ($s -eq 'Running') { '1' } else { '0' }
+            $summary = if ($lines.Count) { "Log ($($lines.Count) lines)" } else { 'Log' }
+            "<tr class=""steplogrow""><td colspan=""5""><details class=""steplog"" data-run=""$(ConvertTo-GIHtml ([uri]::EscapeDataString($RunId)))"" data-step=""$(ConvertTo-GIHtml ([uri]::EscapeDataString($sid)))"" data-offset=""$([int64](Get-GIValue $log 'Offset' 0))"" data-running=""$isRunning""><summary>$summary</summary><div class=""logbox"">$(Get-GIStepLogLinesHtml $lines)</div></details></td></tr>"
+        }
+    }
+    "<table class=""steps""><thead><tr><th>Step</th><th>Status</th><th>Started</th><th>Duration</th><th>Message</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table>"
+}
+
 function New-GIRunDetailPage {
     [CmdletBinding()]
     [OutputType([string])]
@@ -428,7 +527,8 @@ function New-GIRunDetailPage {
         [Parameter(Mandatory)]$Run,
         [int]$RefreshSeconds = 0,
         [string]$ApprovalFormHtml = '',   # already-encoded form HTML, only passed for approvers
-        [string]$NoticeHtml = ''          # already-encoded notice (e.g. result of an approve/reject)
+        [string]$NoticeHtml = '',         # already-encoded notice (e.g. result of an approve/reject)
+        $StepLogs = $null                 # hashtable step id -> @{ Lines; Offset }, read by the route (views do no file access)
     )
     $id = ConvertTo-GIHtml (Get-GIValue $Run 'runId')
     $status = [string](Get-GIValue $Run 'status')
@@ -463,6 +563,8 @@ function New-GIRunDetailPage {
         $body += "<td>$(Format-GIDate $started)</td><td>$(Format-GIDate $ended)</td>"
         $body += "<td>$(ConvertTo-GIHtml (Format-GIDuration $started $ended))</td>"
         $body += "<td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
+        $stepHtml = Get-GIStepTableHtml (Get-GIValue $st 'steps' @()) -RunId ([string](Get-GIValue $Run 'runId')) -StepLogs $StepLogs
+        if ($stepHtml) { $body += "<tr class=""substeps""><td></td><td colspan=""5"">$stepHtml</td></tr>" }
     }
     $body += '</tbody></table></section>'
 
@@ -519,6 +621,7 @@ function New-GIRunDetailPage {
         $body += '</tbody></table></section>'
     }
 
+    if ($body.Contains('class="steplog"')) { $body += "<script>$(Get-GIStepLogScript)</script>" }
     New-GIPage -Title "Run $(Get-GIValue $Run 'runId')" -BodyHtml $body -RefreshSeconds $RefreshSeconds
 }
 
