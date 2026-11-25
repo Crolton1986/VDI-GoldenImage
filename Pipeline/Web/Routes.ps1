@@ -57,7 +57,8 @@ function Send-GIImageRoute {
     Set-GINavContext -Context $Context -WebEvent $WebEvent
     $d = Get-GIImageRouteData $Context $WebEvent; if (-not $d) { return }
     $notice = if ($WebEvent.Query['created']) { "$($d.Summary.name) created. Start the first run when you are ready." } else { '' }
-    Send-GIHtml (New-GIImageOverviewPage -Summary $d.Summary -Ctx (Get-GIViewContext) -SnapshotsKept ([int]$d.ImageConfig.Snapshots.Keep) -Notice $notice)
+    $prune = if ($d.ImageConfig.Snapshots -and $d.ImageConfig.Snapshots.ContainsKey('Prune')) { [bool]$d.ImageConfig.Snapshots.Prune } else { $null }
+    Send-GIHtml (New-GIImageOverviewPage -Summary $d.Summary -Ctx (Get-GIViewContext) -SnapshotsKept ([int]$d.ImageConfig.Snapshots.Keep) -Notice $notice -LastPushed (Get-GIPoolLastPushed -ImageConfig $d.ImageConfig) -Prune $prune)
 }
 
 function Send-GIImageRunsRoute {

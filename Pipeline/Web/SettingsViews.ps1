@@ -353,7 +353,7 @@ function New-GISettingsSectionPage {
         $imgAttr = ''
         if ($ImageName) { $imgAttr = " data-image-name=""$(ConvertTo-GIHtml $ImageName)""" }
         $h += "<form method=""post"" action=""$act"" class=""settings-form"" id=""settings-form""$(if (-not $Disabled) { ' data-savebar' })$imgAttr>$(Get-GITokenInput $Token)"
-        $adv = ''; $advOpen = $false; $needInv = $false
+        $adv = ''; $advOpen = $false; $needInv = $false; $dialogs = ''
         foreach ($f in $fields) {
             $fk = [string]$f.Key
             $type = [string](Get-GIValue $f 'Type' 'string')
@@ -371,10 +371,17 @@ function New-GISettingsSectionPage {
             $h += '<div class="field">'
             switch ($type) {
                 'bool' {
-                    $h += "<label for=""$fid"">$(Get-GIControlHtml -Field $f -Name $fk -Value $v) $label</label>"
-                    if (Get-GIValue $f 'Confirm' $false) {
+                    $needConfirm = [bool](Get-GIValue $f 'Confirm' $false)
+                    $confAttr = ''
+                    if ($needConfirm) { $confAttr = " data-confirm-dialog=""dlg-confirm-$fid""" }
+                    $ctl = Get-GIControlHtml -Field $f -Name $fk -Value $v -Extra $confAttr
+                    $h += "<label for=""$fid"">$ctl $label</label>"
+                    if ($needConfirm) {
+                        # Without JS the tick box is the confirmation; with JS it is hidden and the dialog below ticks it
                         $cid = Get-GIHtmlId 'f' ("confirm_$fk")
-                        $h += "<div><label for=""$cid""><input type=""checkbox"" id=""$cid"" name=""$(ConvertTo-GIHtml "confirm_$fk")"" value=""on""> I understand and confirm this change</label></div>"
+                        $h += "<div class=""confirmbox""><label for=""$cid""><input type=""checkbox"" id=""$cid"" name=""$(ConvertTo-GIHtml "confirm_$fk")"" value=""on""> I understand and confirm this change</label></div>"
+                        $why = [string](Get-GIValue $f 'Warning' 'This changes how new images reach production.')
+                        $dialogs += New-GIModal -Id "dlg-confirm-$fid" -Title "Change $(Get-GIValue $f 'Label' $fk)?" -BodyHtml "<p>$(ConvertTo-GIHtml $why)</p><p>Changes apply from the next run.</p>" -ConfirmLabel 'Yes, change it' -ConfirmYes
                     }
                 }
                 'list' {
@@ -425,7 +432,7 @@ function New-GISettingsSectionPage {
         if ($Disabled) {
             $h = $h.Substring(0, $formStart) + ($h.Substring($formStart) -replace '<(input|select|textarea|button)(?![^>]*\bdisabled\b)([ >])', '<$1 disabled$2')
         } else { $h += New-GISaveBar -FormId 'settings-form' }
-        $h += $secretBlocks
+        $h += $secretBlocks + $dialogs
         if (@($fields | Where-Object { $_.Type -eq 'table' }).Count -gt 0) { $h += Get-GIAddRowScript }
         if ($needInv -and -not $Disabled) { $h += '<p class="help" id="inv-status" role="status" aria-live="polite"></p>' + (Get-GIInventoryScript) }
     }

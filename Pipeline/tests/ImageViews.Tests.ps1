@@ -151,6 +151,33 @@ Describe 'Image page' {
     }
 }
 
+Describe 'Overview: last pushed, retention, inline status (gap 6)' {
+    It 'shows when each pool last received an image, from the run history' {
+        $lp = @{ 'TST-W11' = @{ at = '2026-11-25T02:30:00'; snapshot = 'Baseline 3'; runId = 'r1' }; 'PRD-W11-1' = @{ at = '2026-11-22T22:00:00'; snapshot = 'Baseline 2<x>'; runId = 'r0' } }
+        $h = New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx) -LastPushed $lp
+        $h | Should -Match 'data-pool="TST-W11"[^>]*>.*?data-col="pushed" class="muted">2026-11-25 02:30:00 <span class="mono small">Baseline 3</span>'
+        $h | Should -Match 'data-col="pushed" class="muted">2026-11-22 22:00:00 <span class="mono small">Baseline 2&lt;x&gt;</span>'
+        $h | Should -Match 'data-pool="PRD-W11-2".*?data-col="pushed" class="muted">None recorded'
+    }
+    It 'explains the Outside retention tag and says when pruning is off' {
+        (New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx) -SnapshotsKept 2 -Prune $true) | Should -Match 'marked Outside retention are the ones the next retention pass would remove\.'
+        (New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx) -SnapshotsKept 2 -Prune $true) | Should -Not -Match 'Pruning is off'
+        (New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx) -SnapshotsKept 2 -Prune $false) | Should -Match 'Pruning is off, so nothing is removed'
+        (Get-GIOverviewScript -ImageId 'a') | Should -Match "textContent='Outside retention'"
+    }
+    It 'answers actions inline: the dialogs close and write a status line, nothing reloads' {
+        $h = New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx)
+        foreach ($d in 'dlg-power-on', 'dlg-power-off', 'dlg-revert', 'dlg-rollback') {
+            $h | Should -Match "id=`"$d`".*?data-then=`"inline`""
+        }
+        $h | Should -Match 'data-done="Power on requested for GI-W11-01\.'
+        $h | Should -Match 'id="gi-action-status" role="status" aria-live="polite"'
+        (New-GIImageOverviewPage -Summary (Img) -Ctx (Ctx) -Notice 'Created') | Should -Match 'class="notice" role="status">Created</div><div id="gi-action-status"'
+        (Get-GIOverviewScript -ImageId 'a') | Should -Match "addEventListener\('gi:changed'"
+        (Get-Content (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1') -Raw) | Should -Match "t==='inline'"
+    }
+}
+
 Describe 'Run page' {
     BeforeAll {
         function script:Detail([string]$Status, [string]$Stage, $Steps = @(), $Approval = $null, $Validation = $null) {
@@ -215,6 +242,34 @@ Describe 'Run page' {
         $a | Should -Match '1 step succeeded'
         foreach ($r in 'Approver', 'Viewer') { (Buttons (New-GIRunPage -Detail $d -Summary (Img) -Ctx (Ctx $r))) | Should -Not -Contain 'Retry from this step' }
     }
+    It 'tags steps kept from an earlier attempt as Resumed, with the suffix moved out of the message (gap 12)' {
+        $kept = Step 'SafetySnapshot' 'Safety snapshot' 'Succeeded'; $kept.message = 'taken (earlier attempt)'; $kept.resumed = $true
+        $old = Step 'WU' 'Windows Update' 'Succeeded'; $old.message = '2 passes (earlier attempt)'   # saved before the flag existed
+        $new = Step 'PowerOn' 'Power on' 'Succeeded'; $new.message = 'on'
+        $h = New-GIRunPage -Detail (Detail 'Running' 'Maintain' @($kept, $old, $new, (Step 'X' 'Reboot' 'Running'))) -Summary (Img) -Ctx (Ctx)
+        ([regex]::Matches($h, 'chip idle">Resumed</span><span class="sr-only"> \(kept from an earlier attempt\)</span>')).Count | Should -Be 2
+        $h | Should -Match '<td>taken</td>'
+        $h | Should -Not -Match '\(earlier attempt\)</td>'
+        $h | Should -Match '<th scope="row">Power on</th><td><span class="chip ok">Succeeded</span></td>'
+    }
+    It 'result block says what happened to the test pool and each production pool, not just a count (gap 12)' {
+        $d = Detail 'Completed' 'PostCheck'
+        $d.run.promotion = [pscustomobject]@{ pools = @([pscustomobject]@{ poolName = 'PRD-W11-1'; status = 'Succeeded' }, [pscustomobject]@{ poolName = 'PRD-W11-2'; status = 'Failed' }, [pscustomobject]@{ poolName = 'PRD-W11-3'; status = 'Cancelled' }) }
+        $h = New-GIRunPage -Detail $d -Summary (Img) -Ctx (Ctx)
+        $h | Should -Match '<dt>Test pool</dt><dd>TST-W11 received the snapshot</dd>'
+        $h | Should -Match '<dt>Production pools</dt><dd>1 of 3 updated, 2 failed or cancelled</dd>'
+        $h | Should -Match '<dt>Promoted</dt>'
+        $h | Should -Not -Match 'Pools updated'
+        $s = Detail 'Scheduled' 'Promote'
+        $s.run.promotion = [pscustomobject]@{ pools = @([pscustomobject]@{ poolName = 'PRD-W11-1'; status = 'Scheduled' }, [pscustomobject]@{ poolName = 'PRD-W11-2'; status = 'InProgress' }) }
+        $hs = New-GIRunPage -Detail $s -Summary (Img) -Ctx (Ctx)
+        $hs | Should -Match '<dt>Production pools</dt><dd>2 scheduled or pushing</dd>'
+        $hs | Should -Match '<dt>Approved</dt>'
+        $n = Detail 'Completed' 'PostCheck'
+        (New-GIRunPage -Detail $n -Summary (Img) -Ctx (Ctx)) | Should -Match '<dt>Production pools</dt><dd>None recorded</dd>'
+        $n.run.stages.TestPush.status = 'Failed'
+        (New-GIRunPage -Detail $n -Summary (Img) -Ctx (Ctx)) | Should -Match 'Not updated \(Failed\)'
+    }
     It 'running: step count comes from the run, with skipped steps summarized' {
         $steps = @((Step 'A' 'Revert' 'Skipped'), (Step 'B' 'Snapshot' 'Succeeded'), (Step 'C' 'Windows Update' 'Running' 5), (Step 'D' 'Reboot' 'Pending'), (Step 'E' 'Manifest' 'Pending'))
         $h = New-GIRunPage -Detail (Detail 'Running' 'Maintain' $steps) -Summary (Img) -Ctx (Ctx 'Viewer')
@@ -256,8 +311,22 @@ Describe 'Wizard, audit and global settings' {
         $h = New-GIWizardPage -Ctx (Ctx) -Installers $inst
         @([regex]::Matches($h, '<fieldset class="wizstep')).Count | Should -Be 5
         $h | Should -Match 'Basics'; $h | Should -Match 'Windows Update and packages'; $h | Should -Match 'Promote automatically'
-        $h | Should -Match 'I understand new images will reach production without approval'
+        $h | Should -Not -Match 'id="AutoOk"'   # the confirmation is a dialog now
+        $h | Should -Match 'id="dlg-auto-promote"'
+        $h | Should -Match 'Promote automatically\?'
+        $h | Should -Match 'data-confirm data-confirm-yes'
         $h | Should -Match 'tabindex="-1"'
+    }
+    It 'wizard packages table has installer status, a recheck button, and asks the server on every Next (gap 13)' {
+        $inst = [pscustomobject]@{ Packages = @([pscustomobject]@{ Action = 'Horizon'; Name = 'Horizon <Agent>'; Mask = '*.exe' }) }
+        $h = New-GIWizardPage -Ctx (Ctx) -Installers $inst
+        $h | Should -Match '<th scope="col">Installer on host</th><th scope="col">Status</th>'
+        $h | Should -Match 'data-pkg-file="Horizon"><span class="muted">-</span></td><td data-pkg-state="Horizon"><span class="chip idle">Not checked</span></td>'
+        $h | Should -Match 'id="pkg-recheck">Check again</button>'
+        $h | Should -Match "/api/images\?dryRun=1&step='\+cur"
+        $h | Should -Match "/api/packages\?folder='\+encodeURIComponent"
+        $h | Should -Match "window\.GI\.open\('dlg-auto-promote'"
+        $h | Should -Not -Match '<script[^>]+src='
     }
     It 'audit page: filters, role in muted text, results and no secret in details' {
         $e = [pscustomobject]@{ at = '2026-11-25T10:00:00'; user = 'LAB\jwood'; role = 'Admin'; action = 'settings.update'; target = 'Packages'; image = 'win11-corp'; detail = [pscustomobject]@{ section = 'Packages'; password = 'hunter2'; keys = @('Actions') }; result = 'Saved' }

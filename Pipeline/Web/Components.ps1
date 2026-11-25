@@ -198,13 +198,19 @@ function New-GIModal {
         [string]$FormAction = '',          # classic POST form
         [string]$FormHtml = '',            # extra hidden inputs (token etc.), already encoded
         [string]$Api = '',                 # 'POST /api/images/x/runs'
-        [string]$Then = 'reload'           # 'reload' or a URL
+        [string]$Then = 'reload',          # 'reload', 'inline' (close, show DoneText in #gi-action-status, refresh live values) or a URL
+        [string]$DoneText = '',            # status line for -Then inline
+        [switch]$ConfirmYes                # no form: the confirm button only answers yes (the page script decides what happens next)
     )
     $i = ConvertTo-GIHtml $Id
     $err = if ($Api) { '<p class="error" data-error role="alert" tabindex="-1"></p>' } else { '' }
-    $confirm = "<button type=""submit"" class=""btn $ConfirmVariant"" data-confirm>$(ConvertTo-GIHtml $ConfirmLabel)</button>"
+    $btnType = if ($ConfirmYes) { 'button' } else { 'submit' }
+    $yes = if ($ConfirmYes) { ' data-confirm-yes' } else { '' }
+    $confirm = "<button type=""$btnType"" class=""btn $ConfirmVariant"" data-confirm$yes>$(ConvertTo-GIHtml $ConfirmLabel)</button>"
     $inner = "<h2 id=""$i-title"">$(ConvertTo-GIHtml $Title)</h2>$BodyHtml$err<div class=""actions""><button type=""button"" class=""btn sec"" data-close>Cancel</button>$confirm</div>"
-    if ($Api) { $inner = "<form data-api=""$(ConvertTo-GIHtml $Api)"" data-then=""$(ConvertTo-GIHtml $Then)"" data-conflict=""reload"">$FormHtml$inner</form>" }
+    $done = ''
+    if ($DoneText) { $done = " data-done=""$(ConvertTo-GIHtml $DoneText)""" }
+    if ($Api) { $inner = "<form data-api=""$(ConvertTo-GIHtml $Api)"" data-then=""$(ConvertTo-GIHtml $Then)""$done data-conflict=""reload"">$FormHtml$inner</form>" }
     elseif ($FormAction) { $inner = "<form method=""post"" action=""$(ConvertTo-GIHtml $FormAction)"">$FormHtml$inner</form>" }
     "<div class=""modal-backdrop"" id=""$i"" hidden><div class=""modal"" role=""dialog"" aria-modal=""true"" aria-labelledby=""$i-title"">$inner</div></div>"
 }
@@ -273,6 +279,7 @@ if(k==='api'){var f=b.querySelector('form[data-api]');if(f){f.setAttribute('data
 function openDlg(id,from){var b=d.getElementById(id);if(!b){return}opener=from||d.activeElement;fill(b,from);b.hidden=false;var gf=b.querySelector('form');if(gf&&gf.querySelector('[data-confirm]')&&window.GI.gate){window.GI.gate(gf)}
 var m=b.querySelector('.modal'),f=m.querySelector('input:not([type=hidden]):not(:disabled),select:not(:disabled),textarea:not(:disabled)')||m.querySelector('[data-close]');if(f){f.focus()}}
 function closeDlg(b){b.hidden=true;if(opener&&opener.focus){opener.focus()}opener=null}
+window.GI.open=openDlg;window.GI.close=closeDlg;
 d.addEventListener('click',function(e){var t=e.target;if(!t||!t.closest){return}
 var o=t.closest('[data-opens]');if(o){e.preventDefault();openDlg(o.getAttribute('data-opens'),o);return}
 var c=t.closest('[data-close]');if(c){var b=c.closest('.modal-backdrop');if(b){closeDlg(b)}return}
@@ -284,6 +291,18 @@ if(e.shiftKey&&d.activeElement===a){e.preventDefault();z.focus()}else if(!e.shif
 
 /* Save bar and unsaved-changes warning for forms marked data-savebar. */
 var dirtyForms=[];
+/* Confirm on change: a checkbox with data-confirm-dialog asks in a dialog before its form saves a change to it. The plain
+   checkbox named confirm_<name> stays in the page for browsers without JS; here it is hidden and ticked by the dialog. */
+d.querySelectorAll('.confirmbox').forEach(function(x){x.hidden=true});
+d.addEventListener('submit',function(e){var f=e.target;if(!f||!f.querySelectorAll||f.getAttribute('data-api')){return}
+var boxes=f.querySelectorAll('input[data-confirm-dialog]');
+for(var i=0;i<boxes.length;i++){var c=boxes[i],cf=f.querySelector('input[name="confirm_'+c.name+'"]');
+if(c.checked!==c.defaultChecked&&cf&&!cf.checked){e.preventDefault();var bd=d.getElementById(c.getAttribute('data-confirm-dialog'));
+if(bd){bd.setAttribute('data-for-form',f.id);openDlg(bd.id,e.submitter||d.activeElement)}if(dirtyForms.indexOf(f)<0){dirtyForms.push(f)}return}}});
+d.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-confirm-yes]');if(!b){return}
+var bd=b.closest('.modal-backdrop'),f=bd&&d.getElementById(bd.getAttribute('data-for-form')||'');if(!f){return}
+f.querySelectorAll('input[data-confirm-dialog]').forEach(function(c){var cf=f.querySelector('input[name="confirm_'+c.name+'"]');if(cf&&c.checked!==c.defaultChecked){cf.checked=true}});
+closeDlg(bd);if(f.requestSubmit){f.requestSubmit()}else{f.submit()}});
 function snap(f){var o={};new FormData(f).forEach(function(v,k){if(k!=='token'){o[k]=(o[k]===undefined?'':o[k]+',')+v}});return o}
 d.querySelectorAll('form[data-savebar]').forEach(function(f){
 var base=snap(f),bar=d.querySelector('[data-savebar-for="'+f.id+'"]');if(!bar){return}
@@ -323,7 +342,10 @@ f.querySelectorAll('input[type=checkbox]').forEach(function(c){if(c.name&&!c.che
 if(btn){btn.disabled=true;btn.setAttribute('data-label',btn.textContent);btn.textContent='Working...'}
 if(err){err.textContent=''}
 window.GI.send(spec[0],spec[1],body).then(function(r){
-if(r.ok){var t=f.getAttribute('data-then')||'reload';var loc=t;if(r.data&&r.data.redirect){loc=r.data.redirect}if(loc==='reload'){location.reload()}else{location.href=loc}return}
+if(r.ok){var t=f.getAttribute('data-then')||'reload';
+if(t==='inline'){var bd=f.closest('.modal-backdrop');if(bd){closeDlg(bd)}f.reset();if(btn){btn.disabled=false;btn.textContent=btn.getAttribute('data-label')||'Confirm'}if(window.GI.gate&&f.querySelector('[data-confirm]')){window.GI.gate(f)}
+var so=d.getElementById('gi-action-status'),dn=f.getAttribute('data-done')||'Done.';if(so){so.textContent=dn}live(dn);d.dispatchEvent(new CustomEvent('gi:changed'));return}
+var loc=t;if(r.data&&r.data.redirect){loc=r.data.redirect}if(loc==='reload'){location.reload()}else{location.href=loc}return}
 if(r.status===409){var c=f.getAttribute('data-conflict');if(err){err.textContent=r.error}if(c==='reload'){setTimeout(function(){location.reload()},1500)}}
 else if(err){err.textContent=r.error}else{alert(r.error)}
 if(btn){btn.disabled=false;btn.textContent=btn.getAttribute('data-label')||'Confirm'}

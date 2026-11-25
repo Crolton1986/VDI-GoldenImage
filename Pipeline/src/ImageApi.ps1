@@ -13,6 +13,7 @@ function Get-GIApiRouteTable {
         @{ M = 'DELETE'; P = '^/images/(?<id>[^/]+)$';                                      R = 'Admin';    H = 'Remove-GIApiImage' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/live$';                                 R = 'Viewer';   H = 'Get-GIApiImageLive' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/packages$';                             R = 'Viewer';   H = 'Get-GIApiPackages' }
+        @{ M = 'GET';    P = '^/packages$';                                                 R = 'Admin';    H = 'Get-GIApiHostPackages' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/runs$';                                 R = 'Viewer';   H = 'Get-GIApiRuns' }
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs$';                                 R = 'Admin';    H = 'Start-GIApiRun' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)$';                   R = 'Viewer';   H = 'Get-GIApiRun' }
@@ -141,6 +142,19 @@ function Get-GIApiPackages {
         } }
 }
 
+function Get-GIApiHostPackages {
+    <# Installer status for a folder on the pipeline host (the wizard, before the image exists). Admin only; read only. #>
+    param($Req)
+    $folder = ([string]$Req.Query['folder']).Trim()
+    if ($folder.Length -gt 260 -or $folder -match '[\x00-\x1f]') { return (New-GIApiError 400 'Folder is not a valid path.') }
+    $cfg = Merge-GIHashtable -Base $Req.Config -Overlay @{ GoldenImage = @{ Actions = @(); InstallerSourceDir = $folder } }
+    $st = Get-GIInstallerStatus -Config $cfg
+    @{ Code = 200; Body = [ordered]@{
+            folder = $st.Folder; folderError = $st.FolderError
+            packages = @($st.Packages | ForEach-Object { [ordered]@{ id = $_.Action; name = $_.Name; state = $_.State; file = $_.File; version = $_.Version; sizeMB = $_.SizeMB; modified = $_.Modified; autoDownload = $_.AutoDownload } })
+        } }
+}
+
 function Get-GIApiRuns {
     param($Req)
     $img = Resolve-GIApiImage $Req; if ($img.Error) { return $img.Error }
@@ -173,6 +187,7 @@ function Get-GIApiRun {
     $body = [ordered]@{
         run = $run; imageId = $img.Id; steps = @($steps | ForEach-Object {
                 $o = [ordered]@{ id = $_.id; label = $_.label; status = $_.status; startedAt = $_.startedAt; endedAt = $_.endedAt; message = $_.message
+                    resumed = [bool]((Get-GIWatcherProp $_ 'resumed' $false) -or ([string]$_.message -match ' \(earlier attempt\)$'))
                     logLines = if ($logLines.ContainsKey([string]$_.id)) { $logLines[[string]$_.id] } else { 0 }
                     fixApplied = @(if ($_.PSObject.Properties['fixes']) { $_.fixes } else { @() }) }
                 $o })
@@ -298,6 +313,38 @@ function Invoke-GILiveSource {
     }
 }
 
+function Get-GILiveOutsideRetention {
+    <#
+    .SYNOPSIS
+      Which snapshots the next retention pass would remove, for the Overview table: the same decision function as
+      Invoke-GISnapshotLifecycle (Get-GISnapshotPruneCandidates), fed with what the pools use now, what a push is pending
+      for, the last known good and the snapshots of an unfinished run. Returns @{ name; reason } for each. Removes nothing.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$ImageConfig, [object[]]$Snapshots = @(), [object[]]$Pools = @(), [string]$LastKnownGood = '')
+    $cfg = $ImageConfig.Snapshots; if (-not $cfg) { $cfg = @{} }
+    $keep = if ($cfg['Keep']) { [int]$cfg['Keep'] } else { 2 }
+    $mode = if ($cfg['Mode'] -in 'Tree', 'Chain') { [string]$cfg['Mode'] } else { 'Chain' }
+    $pa = if ($cfg.ContainsKey('ProtectAncestors')) { [bool]$cfg['ProtectAncestors'] } else { $true }
+    $protected = [System.Collections.Generic.List[string]]::new()
+    $pending = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in $Pools) {
+        $s = [string](Get-GIWatcherProp $p 'snapshot' ''); if ($s) { $protected.Add($s) }
+        $n = [string](Get-GIWatcherProp $p 'pending' ''); if ($n) { $pending.Add($n) }
+    }
+    if ($LastKnownGood) { $protected.Add($LastKnownGood) }
+    $lastRun = @(Get-GIRunList -Config $ImageConfig -Last 1) | Select-Object -First 1
+    if ($lastRun -and [string](Get-GIWatcherProp $lastRun 'status' '') -in 'Running', 'AwaitingApproval', 'Scheduled') {
+        foreach ($n in @([string](Get-GIWatcherProp (Get-GIWatcherProp $lastRun 'snapshot' $null) 'name' ''), [string](Get-GIWatcherProp (Get-GIWatcherProp $lastRun 'safetySnapshot' $null) 'name' ''))) { if ($n) { $protected.Add($n) } }
+    }
+    $snaps = @($Snapshots | ForEach-Object {
+            [pscustomobject]@{ Id = [string](Get-GIWatcherProp $_ 'id' (Get-GIWatcherProp $_ 'name' '')); Name = [string](Get-GIWatcherProp $_ 'name' ''); Created = [string](Get-GIWatcherProp $_ 'created' '')
+                ParentId = $(if (Get-GIWatcherProp $_ 'parentId' '') { [string](Get-GIWatcherProp $_ 'parentId' '') } else { $null }) }
+        })
+    $plan = @(Get-GISnapshotPruneCandidates -Snapshots $snaps -ProtectedNames @($protected) -PendingNames @($pending) -Keep $keep -ProtectAncestors $pa -Mode $mode -BaselinePatterns (Get-GIBaselineSnapshotPatterns -Config $ImageConfig))
+    return @($plan | Where-Object { $_.Action -eq 'Remove' } | ForEach-Object { [ordered]@{ name = $_.Name; reason = $_.Reason } })
+}
+
 function Get-GIImageLiveState {
     <#
     .SYNOPSIS
@@ -315,7 +362,7 @@ function Get-GIImageLiveState {
         $vm = Get-VM -Name $cfg.GoldenImage.VmName -ErrorAction Stop
         [pscustomobject]@{
             power = [string]$vm.PowerState
-            snapshots = @(Get-Snapshot -VM $vm -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = $_.Name; created = $_.Created.ToString('o'); isCurrent = [bool]$_.IsCurrent } })
+            snapshots = @(Get-Snapshot -VM $vm -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = $_.Name; created = $_.Created.ToString('o'); isCurrent = [bool]$_.IsCurrent; id = [string]$_.Id; parentId = $(if ($_.ParentSnapshotId) { [string]$_.ParentSnapshotId } else { '' }) } })
         }
     }
     $hzWork = {
@@ -343,9 +390,11 @@ function Get-GIImageLiveState {
                 [ordered]@{ pool = $_.pool; snapshot = [string](Get-GIWatcherProp $_ 'snapshot' ''); pending = [string](Get-GIWatcherProp $_ 'pending' ''); state = [string](Get-GIWatcherProp $_ 'state' ''); matchesLatest = [bool]($latest -and (Get-GIWatcherProp $_ 'snapshot' '') -eq $latest) }
             })
     }
+    $outside = $null   # unknown unless both vCenter and Horizon answered (pool usage protects snapshots)
+    if ($vc.Ok -and $vc.Data -and $hz.Ok -and $hz.Data) { try { $outside = @(Get-GILiveOutsideRetention -ImageConfig $ImageConfig -Snapshots @($vc.Data.snapshots) -Pools @($hz.Data.pools) -LastKnownGood $(if ($lkg) { [string]$lkg.snapshotName } else { '' })) } catch { Write-Verbose "Retention preview failed: $($_.Exception.Message)" } }
     [ordered]@{
         checkedAt = Get-GIApiTimestamp
-        vm = if ($vc.Ok) { [ordered]@{ name = $ImageConfig.GoldenImage.VmName; power = [string]$vc.Data.power; snapshots = @($vc.Data.snapshots); latestSnapshot = $latest } } else { $null }
+        vm = if ($vc.Ok) { [ordered]@{ name = $ImageConfig.GoldenImage.VmName; power = [string]$vc.Data.power; snapshots = @($vc.Data.snapshots | ForEach-Object { [ordered]@{ name = $_.name; created = $_.created; isCurrent = $_.isCurrent } }); latestSnapshot = $latest; outsideRetention = $outside } } else { $null }
         pools = $pools
         lastKnownGood = if ($lkg) { [string]$lkg.snapshotName } else { '' }
         errors = @(@(if (-not $vc.Ok) { $vc.Error }) + @(if (-not $hz.Ok) { $hz.Error }))
@@ -368,16 +417,28 @@ function New-GIApiImage {
     $payload = @{}
     if ($Req.Body -is [System.Collections.IDictionary]) { foreach ($k in $Req.Body.Keys) { if ($k -ne 'token') { $payload[$k] = $Req.Body[$k] } } }
     if ($Req.Query['dryRun']) {
-        # Validate only (wizard review step): same rules, nothing is saved
+        # Validate only (wizard): same rules, nothing is saved. With step=1..4 only the problems of that wizard step are
+        # reported (the wizard asks on every Next); without it, every problem (the Review step).
+        $step = 0
+        if ($Req.Query['step'] -and -not [int]::TryParse([string]$Req.Query['step'], [ref]$step)) { return (New-GIApiError 400 'step must be a number from 1 to 4.') }
+        if ($Req.Query['step'] -and $step -notin 1..4) { return (New-GIApiError 400 'step must be a number from 1 to 4.') }
         try {
             $existing = @(Get-GIImageEntries -Config $Req.Config)
-            $entry = @{ Name = ([string]$payload['Name']).Trim() }
+            $name = ([string]$payload['Name']).Trim()
+            $entry = @{ Name = $name }
             foreach ($b in ($script:GIImageBlocks + 'AppVolumes')) { if ($payload.ContainsKey($b)) { $entry[$b] = Copy-GIValue $payload[$b] } }
-            $entry.Id = New-GIImageId -Name $entry.Name -Existing @($existing | ForEach-Object { $_.Id })
-            if (-not $entry.Name) { throw 'Image not saved, 1 problem(s): Name: required' }
-            Assert-GIImageEntryValid -Entry $entry -Others $existing
+            # A step may be checked before the later blocks are filled in
+            if (-not $entry.ContainsKey('GoldenImage')) { $entry.GoldenImage = @{} }
+            if (-not $entry.ContainsKey('Pools')) { $entry.Pools = @{ Test = @{}; Production = @() } }
+            $entry.Id = if ($name) { New-GIImageId -Name $name -Existing @($existing | ForEach-Object { $_.Id }) } else { 'x' }
+            $found = [System.Collections.Generic.List[object]]::new()
+            if (-not $name) { $found.Add([pscustomobject]@{ Step = 1; Message = 'Name: required' }) }
+            elseif ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9 _-]*$') { $found.Add([pscustomobject]@{ Step = 1; Message = 'Name: use letters, numbers and dashes' }) }
+            if ($name) { foreach ($p in (Get-GIImageEntryProblems -Entry $entry -Others $existing)) { $found.Add($p) } }
+            $mine = @($found | Where-Object { -not $step -or $_.Step -eq $step })
+            if ($mine.Count) { throw "Image not saved, $($mine.Count) problem(s): $((@($mine | ForEach-Object { $_.Message })) -join '; ')" }
         } catch { return (New-GIApiError 400 $_.Exception.Message) }
-        return @{ Code = 200; Body = [ordered]@{ valid = $true } }
+        return @{ Code = 200; Body = [ordered]@{ valid = $true; step = $step } }
     }
     try { $e = New-GIImageFromPayload -Config $Req.Config -Payload $payload -By $Req.User }
     catch { return (New-GIApiError 400 $_.Exception.Message) }

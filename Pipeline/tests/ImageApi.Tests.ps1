@@ -291,3 +291,131 @@ Describe 'Live state' {
         }
     }
 }
+
+Describe 'Wizard validation per step (gap 13)' {
+    BeforeEach { $script:root = New-Root }
+    AfterEach { Remove-Item $script:root -Recurse -Force -ErrorAction SilentlyContinue }
+    function script:Dry([int]$Step, $Body, [string]$Role = 'Admin') {
+        $q = @{ dryRun = '1' }; if ($Step) { $q.step = [string]$Step }
+        Api POST '/api/images' $Body -Role $Role -Query $q
+    }
+    BeforeAll {
+        function script:Good { Payload 'Win10-Lab' 'GI-W10-01' 'TST-W10' 'PRD-W10' }
+    }
+    It 'step 1 reports only the name problems, and nothing about VM or pools that are still empty' {
+        $r = Dry 1 @{ Name = ''; GoldenImage = @{ VmName = '' }; Pools = @{ Test = @{ Name = '' }; Production = @() } }
+        $r.Code | Should -Be 400; $r.Body.error | Should -Match 'Name: required'; $r.Body.error | Should -Not -Match 'VM|pool'
+        (Dry 1 @{ Name = '<b>x</b>' }).Body.error | Should -Match 'letters, numbers and dashes'
+        (Dry 1 @{ Name = 'W11-GI-01' }).Body.error | Should -Match 'is used twice'   # the existing image's name
+        (Dry 1 (Good)).Code | Should -Be 200
+    }
+    It 'step 2 reports VM and pool problems, including ones used by another image' {
+        $r = Dry 2 @{ Name = 'Win10-Lab'; GoldenImage = @{ VmName = '' }; Pools = @{ Test = @{ Name = 'TST-W10'; LogoffPolicy = 'FORCE_LOGOFF' }; Production = @(@{ Name = 'TST-W10'; LogoffPolicy = 'WAIT_FOR_LOGOFF' }) } }
+        $r.Code | Should -Be 400; $r.Body.error | Should -Match 'no VM name'; $r.Body.error | Should -Match 'both test pool and production pool'
+        $cfg = Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01'
+        $taken = Payload 'Win10-Lab' $cfg.GoldenImage.VmName 'TST-W10' $cfg.Pools.Test.Name
+        $t = Dry 2 $taken
+        $t.Code | Should -Be 400; $t.Body.error | Should -Match 'belongs to image'
+        (Dry 2 (Good)).Code | Should -Be 200
+    }
+    It 'step 3 and 4 report their own sections only' {
+        $b = Good; $b.GoldenImage.PowerOffTimeoutMin = 1; $b.Promotion = @{ AutoPromote = $false; MaintenanceWindow = @{ Days = @(); StartTime = '25:99' } }
+        $s3 = Dry 3 $b; $s3.Code | Should -Be 400; $s3.Body.error | Should -Match 'GoldenImage\.PowerOffTimeoutMin'; $s3.Body.error | Should -Not -Match 'Promotion'
+        $s4 = Dry 4 $b; $s4.Code | Should -Be 400; $s4.Body.error | Should -Match 'Promotion\.'; $s4.Body.error | Should -Not -Match 'PowerOffTimeoutMin'
+        (Dry 2 $b).Code | Should -Be 200   # step 2 does not care about steps 3 and 4
+        (Dry 0 $b).Body.error | Should -Match 'PowerOffTimeoutMin'   # the review step reports everything
+        (Dry 0 $b).Body.error | Should -Match 'Promotion\.'
+    }
+    It 'refuses a step outside 1 to 4, saves nothing, and stays Admin only' {
+        (Dry 9 (Good)).Code | Should -Be 400
+        (Api POST '/api/images' (Good) -Query @{ dryRun = '1'; step = 'x' }).Code | Should -Be 400
+        (Dry 2 (Good) 'Approver').Code | Should -Be 403
+        (Dry 2 (Good) 'Viewer').Code | Should -Be 403
+        @((Api GET '/api/images' -Role Viewer).Body.images).Count | Should -Be 1
+    }
+}
+
+Describe 'Installer status for the wizard (gap 13)' {
+    BeforeEach { $script:root = New-Root }
+    AfterEach { Remove-Item $script:root -Recurse -Force -ErrorAction SilentlyContinue }
+    It 'lists known packages for a folder on the pipeline host, Admin only, read only' {
+        $dir = Join-Path $script:root 'inst'; New-Item -ItemType Directory $dir | Out-Null
+        Set-Content (Join-Path $dir 'VMware-tools-12.5.0-x86_64.exe') 'x'
+        $r = Api GET '/api/packages' -Query @{ folder = $dir }
+        $r.Code | Should -Be 200
+        $r.Body.folder | Should -Be $dir
+        ($r.Body.packages | Where-Object id -eq 'VmTools').state | Should -Be 'Found'
+        ($r.Body.packages | Where-Object id -eq 'VmTools').file | Should -Be 'VMware-tools-12.5.0-x86_64.exe'
+        ($r.Body.packages | Where-Object id -eq 'Horizon').state | Should -Be 'Missing'
+        ($r.Body.packages | Where-Object id -eq 'MsTeams').state | Should -Be 'Download'
+        (Api GET '/api/packages' -Role Viewer -Query @{ folder = $dir }).Code | Should -Be 403
+        (Api GET '/api/packages' -Role Approver -Query @{ folder = $dir }).Code | Should -Be 403
+    }
+    It 'says so when the folder is missing, and refuses control characters and very long paths' {
+        $r = Api GET '/api/packages' -Query @{ folder = (Join-Path $script:root 'nope') }
+        $r.Body.folderError | Should -Match 'not found on the pipeline host'
+        ($r.Body.packages | Select-Object -First 1).state | Should -Be 'Missing'
+        (Api GET '/api/packages' -Query @{ folder = "a`nb" }).Code | Should -Be 400
+        (Api GET '/api/packages' -Query @{ folder = ('x' * 300) }).Code | Should -Be 400
+        (Api GET '/api/packages' -Query @{ folder = '' }).Body.packages[0].state | Should -Be 'NoFolder'
+    }
+}
+
+Describe 'Overview data: retention preview, last pushed, resumed steps (gaps 6 and 12)' {
+    BeforeEach { $script:root = New-Root }
+    AfterEach { Remove-Item $script:root -Recurse -Force -ErrorAction SilentlyContinue }
+    It 'marks snapshots the next retention pass would remove, using the real decision function' {
+        $ic = Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01'
+        $ic.Snapshots.Keep = 1; $ic.Snapshots.Mode = 'Chain'
+        $snaps = @(
+            [pscustomobject]@{ name = 'Baseline 1'; created = '2026-10-01T00:00:00'; id = 's1'; parentId = '' }
+            [pscustomobject]@{ name = 'Baseline 2'; created = '2026-10-08T00:00:00'; id = 's2'; parentId = 's1' }
+            [pscustomobject]@{ name = 'Baseline 3'; created = '2026-10-15T00:00:00'; id = 's3'; parentId = 's2' }
+            [pscustomobject]@{ name = 'Baseline 4'; created = '2026-10-22T00:00:00'; id = 's4'; parentId = 's3' }
+            [pscustomobject]@{ name = 'Manual keep'; created = '2026-10-23T00:00:00'; id = 's5'; parentId = 's4' })
+        $pools = @([pscustomobject]@{ pool = 'TST-W11'; snapshot = 'Baseline 4'; pending = '' }, [pscustomobject]@{ pool = 'PRD-W11'; snapshot = 'Baseline 2'; pending = '' })
+        $out = InModuleScope VDI-GIPipeline -Parameters @{ ic = $ic; snaps = $snaps; pools = $pools } { param($ic, $snaps, $pools) Get-GILiveOutsideRetention -ImageConfig $ic -Snapshots $snaps -Pools $pools -LastKnownGood '' }
+        # Keep 1: Baseline 4 is the newest and in use, Baseline 2 is in use, Baseline 1 is the root, 'Manual keep' is not a pipeline snapshot. Only Baseline 3 goes.
+        @($out | ForEach-Object { $_.name }) | Should -Be @('Baseline 3')
+        @($out)[0].reason | Should -Be 'Older than retention'
+    }
+    It 'adds outsideRetention to the live answer only when vCenter and Horizon both answered' {
+        $vc = { param($n, $w, $a, $t) if ($n -eq 'vCenter') { @{ Ok = $true; Data = [pscustomobject]@{ power = 'PoweredOff'; snapshots = @([pscustomobject]@{ name = 'Baseline 1'; created = '2026-10-01T00:00:00'; isCurrent = $false; id = 's1'; parentId = '' }) } } } else { @{ Ok = $false; Error = 'Horizon down' } } }
+        $b = (Api GET '/api/images/w11-gi-01/live' -Role Viewer -Options @{ LiveInvoker = $vc }).Body
+        $b.vm.outsideRetention | Should -BeNullOrEmpty
+        $b.vm.snapshots[0].Keys | Should -Not -Contain 'id'   # vCenter ids are not passed on to the page
+        $both = { param($n, $w, $a, $t) if ($n -eq 'vCenter') { @{ Ok = $true; Data = [pscustomobject]@{ power = 'PoweredOff'; snapshots = @([pscustomobject]@{ name = 'Baseline 1'; created = '2026-10-01T00:00:00'; isCurrent = $false; id = 's1'; parentId = '' }) } } } else { @{ Ok = $true; Data = [pscustomobject]@{ pools = @() } } } }
+        $c = (Api GET '/api/images/w11-gi-01/live' -Role Viewer -Options @{ LiveInvoker = $both }).Body
+        $c.vm.Keys | Should -Contain 'outsideRetention'
+    }
+    It 'finds when each pool last received an image from the run history, newest first' {
+        $ic = Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01'
+        $old = New-GIRun -Config $ic -RunId '20261101-020000'
+        $old.snapshot = [pscustomobject]@{ name = 'Baseline 1' }
+        $old.stages.TestPush.status = 'Succeeded'; $old.stages.TestPush.endedAt = '2026-11-01T02:30:00'
+        $old.promotion = [pscustomobject]@{ pools = @([pscustomobject]@{ poolName = 'PRD-W11'; status = 'Succeeded'; scheduledStart = '2026-11-03T22:00:00' }) }
+        Save-GIRun -Config $ic -Run $old
+        $new = New-GIRun -Config $ic -RunId '20261115-020000'
+        $new.snapshot = [pscustomobject]@{ name = 'Baseline 2' }
+        $new.stages.TestPush.status = 'Succeeded'; $new.stages.TestPush.endedAt = '2026-11-15T02:30:00'
+        $new.promotion = [pscustomobject]@{ pools = @([pscustomobject]@{ poolName = 'PRD-W11'; status = 'Cancelled'; scheduledStart = '2026-11-17T22:00:00' }) }
+        Save-GIRun -Config $ic -Run $new
+        $lp = InModuleScope VDI-GIPipeline -Parameters @{ ic = $ic } { param($ic) Get-GIPoolLastPushed -ImageConfig $ic }
+        $lp['TST-W11'].snapshot | Should -Be 'Baseline 2'; $lp['TST-W11'].runId | Should -Be '20261115-020000'
+        $lp['PRD-W11'].snapshot | Should -Be 'Baseline 1'; ([datetime]$lp['PRD-W11'].at).Date | Should -Be ([datetime]'2026-11-03')   # the cancelled push does not count
+        (InModuleScope VDI-GIPipeline -Parameters @{ ic = (Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01') } { param($ic) Get-GIPoolLastPushed -ImageConfig $ic -Last 1 })['PRD-W11'] | Should -BeNullOrEmpty
+    }
+    It 'tags steps kept from an earlier attempt as resumed in the run detail' {
+        $ic = Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01'
+        $run = New-GIRun -Config $ic -RunId '20261120-020000'
+        Add-Member -InputObject $run.stages.Maintain -NotePropertyName steps -NotePropertyValue @(
+            [pscustomobject]@{ id = 'SafetySnapshot'; label = 'Safety snapshot'; status = 'Succeeded'; startedAt = $null; endedAt = $null; message = 'taken (earlier attempt)'; resumed = $true }
+            [pscustomobject]@{ id = 'PowerOn'; label = 'Power on'; status = 'Succeeded'; startedAt = $null; endedAt = $null; message = 'on' }
+            [pscustomobject]@{ id = 'OldRun'; label = 'Old format'; status = 'Succeeded'; startedAt = $null; endedAt = $null; message = 'ok (earlier attempt)' }) -Force
+        Save-GIRun -Config $ic -Run $run
+        $s = (Api GET '/api/images/w11-gi-01/runs/20261120-020000' -Role Viewer).Body.steps
+        ($s | Where-Object id -eq 'SafetySnapshot').resumed | Should -BeTrue
+        ($s | Where-Object id -eq 'PowerOn').resumed | Should -BeFalse
+        ($s | Where-Object id -eq 'OldRun').resumed | Should -BeTrue   # runs saved before the flag existed
+    }
+}

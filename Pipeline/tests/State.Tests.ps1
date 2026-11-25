@@ -214,6 +214,8 @@ Describe 'Maintain steps' {
         (Get-GIStep -Run $run -Id 'SafetySnapshot').status | Should -Be 'Succeeded'
         (Get-GIStep -Run $run -Id 'WindowsUpdate').status | Should -Be 'Succeeded'
         (Get-GIStep -Run $run -Id 'WindowsUpdate').message | Should -Be 'ok WindowsUpdate (earlier attempt)'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').resumed | Should -BeTrue                  # kept from the earlier attempt
+        (Get-GIStep -Run $run -Id 'PowerOn').PSObject.Properties['resumed'] | Should -BeNullOrEmpty   # runs again, not tagged
         (Get-GIStep -Run $run -Id 'Pkg:VmTools').status | Should -Be 'Succeeded'
         (Get-GIStep -Run $run -Id 'PowerOn').status | Should -Be 'Pending'
         (Get-GIStep -Run $run -Id 'Pkg:Horizon').status | Should -Be 'Pending'

@@ -63,9 +63,11 @@ Describe 'Settings section page' {
     It 'renders bool checkbox, with confirm gate and warning' {
         $h = Page
         $h | Should -Match 'name="Enabled" value="on" checked'
-        $h | Should -Match 'name="AutoPromote" value="on">'
-        $h | Should -Match 'name="confirm_AutoPromote"'
+        $h | Should -Match 'name="AutoPromote" value="on" data-confirm-dialog="dlg-confirm-f_AutoPromote">'
+        $h | Should -Match 'name="confirm_AutoPromote"'   # the no-JS fallback stays in the page
         $h | Should -Match 'Promotes without approval'
+        $h | Should -Match '<div class="confirmbox">'
+        $h | Should -Match 'id="dlg-confirm-f_AutoPromote".*?Change Auto promote\?.*?Promotes without approval.*?data-confirm data-confirm-yes'
     }
     It 'renders list textarea one per line' { (Page) | Should -Match '(?s)<textarea[^>]*name="Hosts"[^>]*>h1\nh2</textarea>' }
     It 'renders enum select with selection' { (Page) | Should -Match '<option value="Force" selected>' }
@@ -246,5 +248,20 @@ Describe 'Advanced group and connection chip (gap 10)' {
         (New-GITestConnectionCard -Section Pools -ImageId 'w11-gi-01') | Should -Match 'data-test-section="Pools" data-test-url="/api/images/w11-gi-01/settings/Pools/test"'
         (New-GITestConnectionCard -Section vCenter) | Should -Not -Match 'data-test-url'
         (Get-Content (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1') -Raw) | Should -Match "getAttribute\('data-test-url'\)"
+    }
+}
+
+Describe 'Confirm dialog script (gap 11)' {
+    BeforeAll { $script:ui = Get-Content (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1') -Raw }
+    It 'asks in a dialog when a confirm checkbox changes, ticks the hidden box and submits' {
+        $ui | Should -Match "input\[data-confirm-dialog\]"
+        $ui | Should -Match "e\.preventDefault\(\);var bd=d\.getElementById\(c\.getAttribute\('data-confirm-dialog'\)\)"
+        $ui | Should -Match "cf\.checked=true"
+        $ui | Should -Match "f\.requestSubmit"
+        $ui | Should -Match "\.confirmbox'\)\.forEach\(function\(x\)\{x\.hidden=true\}"
+    }
+    It 'has no external script and no hex colour' {
+        $ui | Should -Not -Match '<script[^>]+src='
+        (($ui -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n") | Should -Not -Match '#[0-9a-fA-F]{6}\b'
     }
 }

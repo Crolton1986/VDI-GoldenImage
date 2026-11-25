@@ -220,6 +220,7 @@ function Initialize-GIMaintainSteps {
         } elseif ($resume -and $p.Resumable -and $i -lt $cut -and $old -and $old.status -eq 'Succeeded') {
             $row.status = 'Succeeded'; $row.startedAt = $old.startedAt; $row.endedAt = $old.endedAt
             $row.message = ([string]$old.message -replace ' \(earlier attempt\)$', '') + ' (earlier attempt)'
+            $row.resumed = $true   # kept from an earlier attempt of this run, not run again
             if ($old.PSObject.Properties['attempt']) { $row.attempt = $old.attempt }
             if ($old.PSObject.Properties['fixes']) { $row.fixes = $old.fixes }
         }

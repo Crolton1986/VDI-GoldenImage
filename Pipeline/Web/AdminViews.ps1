@@ -176,7 +176,7 @@ function New-GIWizardPage {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Installers, [string[]]$Days = @('Saturday'))
     $steps = @('Basics', 'Guest VM and pools', 'Windows Update and packages', 'Schedule and promotion', 'Review')
     $rows = foreach ($p in @($Installers.Packages)) {
-        "<tr><td><input type=""checkbox"" id=""pk-$(ConvertTo-GIHtml $p.Action)"" name=""pkg"" value=""$(ConvertTo-GIHtml $p.Action)""></td><td><label for=""pk-$(ConvertTo-GIHtml $p.Action)"">$(ConvertTo-GIHtml $p.Name)</label><div class=""muted small mono"">$(ConvertTo-GIHtml $p.Action) · $(ConvertTo-GIHtml $p.Mask)</div></td></tr>"
+        "<tr><td><input type=""checkbox"" id=""pk-$(ConvertTo-GIHtml $p.Action)"" name=""pkg"" value=""$(ConvertTo-GIHtml $p.Action)""></td><td><label for=""pk-$(ConvertTo-GIHtml $p.Action)"">$(ConvertTo-GIHtml $p.Name)</label><div class=""muted small mono"">$(ConvertTo-GIHtml $p.Action) · $(ConvertTo-GIHtml $p.Mask)</div></td><td data-pkg-file=""$(ConvertTo-GIHtml $p.Action)""><span class=""muted"">-</span></td><td data-pkg-state=""$(ConvertTo-GIHtml $p.Action)"">$(New-GIChip -Text 'Not checked' -Variant idle)</td></tr>"
     }
     $dayBoxes = foreach ($d in 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday') { "<label><input type=""checkbox"" name=""day"" value=""$d""$(if ($Days -contains $d) { ' checked' })> $d</label> " }
     $s1 = (New-GIField -Name 'Name' -Label 'Name' -Required -Help 'Letters, numbers and dashes. Shown on the card and in the audit log.') + (New-GIField -Name 'Description' -Label 'Description') + '<p id="name-status" class="muted" role="status"></p>'
@@ -189,16 +189,17 @@ function New-GIWizardPage {
 "@
     $s3 = (New-GIField -Name 'WuMax' -Label 'Windows Update maximum passes' -Type number -Value '5' -Help 'Each pass installs updates, then reboots if needed.') + '<div class="field"><label><input type="checkbox" id="WuOn" checked> Run Windows Update</label></div>' +
     (New-GIField -Name 'InstallerDir' -Label 'Installer folder on pipeline host' -Help 'Optional. Files here are copied into the Install folder in the guest before packages run. Leave empty if you stage installers in the guest yourself.') + (New-GIField -Name 'Timeout' -Label 'Package timeout (min)' -Type number -Value '60') +
-    "<div class=""tablewrap""><table><thead><tr><th scope=""col"">Maintain</th><th scope=""col"">Package</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table></div><p class=""muted small"">The package list is built into the pipeline. Supporting a new package needs a script added by an administrator of the pipeline, so it can't be added here.</p>" +
+    "<div class=""tablewrap""><table><thead><tr><th scope=""col"">Maintain</th><th scope=""col"">Package</th><th scope=""col"">Installer on host</th><th scope=""col"">Status</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table></div><p><button type=""button"" class=""linkbtn"" id=""pkg-recheck"">Check again</button> <span class=""muted"" id=""pkg-status"" role=""status"" aria-live=""polite"">Enter the installer folder above to check which installers are there.</span></p><p class=""muted small"">The package list is built into the pipeline. Supporting a new package needs a script added by an administrator of the pipeline, so it can't be added here.</p>" +
     (New-GIField -Name 'TestPackages' -Label 'App Volumes packages to test' -Type textarea -Help 'One package name per line. Validate checks these on the test pool.') + '<p class="muted">You can change these later under Settings.</p>'
     $s4 = "<fieldset class=""field""><legend class=""lbl"">Who approves new images?</legend><label><input type=""radio"" name=""Promote"" value=""approver"" checked> Wait for an Approver (recommended)</label><br><label><input type=""radio"" name=""Promote"" value=""auto""> Promote automatically</label></fieldset><div class=""field""><div class=""lbl"">Maintenance window days</div><div class=""days"">$(@($dayBoxes) -join '')</div></div>" + (New-GIField -Name 'StartTime' -Label 'Start time (24 hour, server time)' -Type time -Value '22:00')
-    $s5 = '<div id="review"></div><div class="field" id="auto-confirm" hidden><label><input type="checkbox" id="AutoOk"> I understand new images will reach production without approval.</label></div><p id="review-status" role="status"></p>'
+    $s5 = '<div id="review"></div><p id="review-status" role="status"></p>'
     $bodies = @($s1, $s2, $s3, $s4, $s5)
     $sets = for ($i = 0; $i -lt 5; $i++) { "<fieldset class=""wizstep card"" data-step=""$($i + 1)""$(if ($i -gt 0) { ' hidden' })><legend><h2 tabindex=""-1"">$($steps[$i])</h2></legend>$($bodies[$i])</fieldset>" }
     $foot = "<div class=""wizfoot""><button type=""button"" class=""btn sec"" id=""wiz-back"">Cancel and go back</button><div><span class=""muted"" id=""wiz-count"">Step 1 of 5</span> <button type=""button"" class=""btn pri"" id=""wiz-next"">Next: Guest VM and pools</button></div></div>"
     $stepper = "<div id=""wiz-stepper"">$(New-GIStepper -Steps $steps -Current 1)</div>"
     $labels = ConvertTo-Json -InputObject @($steps) -Compress
-    $body = "<h1>Add golden image</h1>$stepper<form id=""wizard"" novalidate>$(@($sets) -join '')$foot</form><div id=""wiz-error"" class=""alert"" role=""alert"" hidden></div><script>$(Get-GIWizardScript -Labels $labels)</script>"
+    $autoDlg = New-GIModal -Id 'dlg-auto-promote' -Title 'Promote automatically?' -BodyHtml '<p>New images will reach every production pool without anyone approving them first. Active sessions follow each pool''s logoff policy.</p>' -ConfirmLabel 'Yes, promote automatically' -ConfirmYes
+    $body = "<h1>Add golden image</h1>$stepper<form id=""wizard"" novalidate>$(@($sets) -join '')$foot</form><div id=""wiz-error"" class=""alert"" role=""alert"" hidden></div>$autoDlg<script>$(Get-GIWizardScript -Labels $labels)</script>"
     New-GIPage -Title 'Add golden image' -BodyHtml $body
 }
 
@@ -207,7 +208,7 @@ function Get-GIWizardScript {
     param([Parameter(Mandatory)][string]$Labels)
     @"
 document.addEventListener('DOMContentLoaded',function(){
-var L=$Labels,cur=1,inv=null,stepper=document.getElementById('wiz-stepper'),form=document.getElementById('wizard'),dirty=false;
+var L=$Labels,cur=1,inv=null,autoOk=false,pkgState={},stepper=document.getElementById('wiz-stepper'),form=document.getElementById('wizard'),dirty=false;
 function q(id){return document.getElementById(id)}
 function steps(){return [].slice.call(form.querySelectorAll('fieldset.wizstep'))}
 function val(n){return (form.elements[n]||{}).value||''}
@@ -241,9 +242,9 @@ function card(t,step,lines){var d=document.createElement('section');d.className=
 var a=document.createElement('a');a.href='#';a.textContent='Edit '+t;a.addEventListener('click',function(e){e.preventDefault();cur=step;render()});d.appendChild(a);r.appendChild(d)}
 card('Basics',1,[p.Name,p.Description||'No description']);
 card('Guest VM and pools',2,['Guest VM: '+p.GoldenImage.VmName,'Test pool: '+p.Pools.Test.Name,'Production pools: '+p.Pools.Production.map(function(x){return x.Name+' ('+(x.LogoffPolicy==='FORCE_LOGOFF'?'force logoff':'wait for logoff')+')'}).join(', ')]);
-card('Windows Update and packages',3,['Windows Update: '+(p.GoldenImage.WindowsUpdate.Enabled?'on, up to '+p.GoldenImage.WindowsUpdate.MaxPasses+' passes':'off'),'Packages: '+(p.GoldenImage.Actions.join(', ')||'none'),'App Volumes tests: '+(p.AppVolumes.TestPackages.join(', ')||'none')]);
+card('Windows Update and packages',3,['Windows Update: '+(p.GoldenImage.WindowsUpdate.Enabled?'on, up to '+p.GoldenImage.WindowsUpdate.MaxPasses+' passes':'off'),'Packages: '+(p.GoldenImage.Actions.join(', ')||'none')+(function(){var m=p.GoldenImage.Actions.filter(function(a){return pkgState[a]&&pkgState[a].state==='Missing'});return m.length?' (no installer on the host for '+m.join(', ')+')':''})(),'App Volumes tests: '+(p.AppVolumes.TestPackages.join(', ')||'none')]);
 card('Schedule and promotion',4,[p.Promotion.AutoPromote?'Promote automatically':'Wait for an Approver','Window: '+p.Promotion.MaintenanceWindow.Days.join(', ')+' '+p.Promotion.MaintenanceWindow.StartTime]);
-q('auto-confirm').hidden=!p.Promotion.AutoPromote;
+if(!p.Promotion.AutoPromote){autoOk=false}
 var st=q('review-status');st.textContent='Checking...';
 window.GI.send('POST','/api/images?dryRun=1',p).then(function(x){if(x.ok){st.className='';st.textContent='Ready: All checks passed. Nothing runs until you start the first run from the image page. Set the guest administrator password under Settings, Guest VM.'}else{st.className='error';st.textContent=x.error}})}
 function fillInv(){var vs=q('VmSelect'),ts=q('TestSelect'),st=q('inv-status');
@@ -262,13 +263,31 @@ var c4=document.createElement('td'),sel=document.createElement('select');sel.set
 sel.disabled=true;cb.addEventListener('change',function(){sel.disabled=!cb.checked});c4.appendChild(sel);tr.appendChild(c4);q('ProdRows').appendChild(tr)})}
 function load(){q('inv-status').textContent='Loading from vCenter and Horizon...';window.GI.getJson('/api/inventory').then(function(r){inv=r.ok?r.data:{vms:[],pools:[],errors:[r.error||'Could not load vCenter and Horizon.']};fillInv()})}
 q('inv-retry').addEventListener('click',load);
+q('dlg-auto-promote').addEventListener('click',function(e){var y=e.target.closest&&e.target.closest('[data-confirm-yes]');if(!y){return}autoOk=true;window.GI.close(q('dlg-auto-promote'));q('wiz-next').click()});
+function paintPkgs(){form.querySelectorAll('[data-pkg-state]').forEach(function(td){var a=td.getAttribute('data-pkg-state'),p=pkgState[a],on=form.querySelector('input[name=pkg][value="'+a+'"]').checked,t='Not checked',v='idle';
+if(p){if(p.state==='Found'){t='Found';v='ok'}else if(p.state==='Download'){t='Downloads automatically'}else if(p.state==='Missing'){t='Missing';v=on?'bad':'idle'}}
+td.textContent='';var c=document.createElement('span');c.className='chip '+v;c.textContent=t;td.appendChild(c)})}
+function checkPkgs(){var dir=val('InstallerDir').trim(),st=q('pkg-status');pkgState={};
+if(!dir){st.textContent='No installer folder set, so installers cannot be checked. They must already be in the Install folder inside the guest.';form.querySelectorAll('[data-pkg-file]').forEach(function(td){td.textContent='-'});paintPkgs();return}
+st.textContent='Checking...';
+window.GI.getJson('/api/packages?folder='+encodeURIComponent(dir)).then(function(r){
+if(!r.ok){st.textContent='Could not check the folder ('+r.error+').';paintPkgs();return}
+var d=r.data;(d.packages||[]).forEach(function(p){pkgState[p.id]=p;var td=form.querySelector('[data-pkg-file="'+p.id+'"]');if(td){td.textContent=p.file?p.file+(p.version?' (v'+p.version+')':''):'-'}});
+var n=new Date(),hm=('0'+n.getHours()).slice(-2)+':'+('0'+n.getMinutes()).slice(-2);
+st.textContent=d.folderError?d.folderError:'Checked '+d.folder+' at '+hm+'.';if(d.folderError){pkgState={}}paintPkgs()})}
+q('pkg-recheck').addEventListener('click',checkPkgs);
+form.querySelector('[name=InstallerDir]').addEventListener('change',checkPkgs);
+form.addEventListener('change',function(e){if(e.target&&e.target.name==='pkg'){paintPkgs()}});
 form.addEventListener('input',function(){dirty=true});
 window.addEventListener('beforeunload',function(e){if(dirty&&!created){e.preventDefault();e.returnValue=''}});
 var created=false;
 q('wiz-back').addEventListener('click',function(){if(cur>1){cur--;showErr('');render();return}if(!dirty||confirm('Discard what you entered?')){created=true;location.href='/'}});
 q('wiz-next').addEventListener('click',function(){showErr('');var m=problem(cur);if(m){showErr(m);return}
-if(cur<5){cur++;render();return}
-if(payload().Promotion.AutoPromote&&!q('AutoOk').checked){showErr('Tick the box to confirm that new images reach production without approval.');return}
+var nb=q('wiz-next');
+if(cur<5){nb.disabled=true;nb.textContent='Checking...';
+window.GI.send('POST','/api/images?dryRun=1&step='+cur,payload()).then(function(x){nb.disabled=false;
+if(!x.ok){nb.textContent=cur===5?'Create golden image':'Next: '+L[cur];showErr(x.error);return}cur++;render()});return}
+if(payload().Promotion.AutoPromote&&!autoOk){window.GI.open('dlg-auto-promote',nb);return}
 var b=q('wiz-next');b.disabled=true;b.textContent='Creating...';
 window.GI.send('POST','/api/images',payload()).then(function(r){if(r.ok){created=true;location.href='/images/'+r.data.id+'?created=1'}else{b.disabled=false;b.textContent='Create golden image';showErr(r.error)}})});
 render();load();

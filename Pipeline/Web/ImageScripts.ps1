@@ -113,7 +113,8 @@ var list=d.vm.snapshots.slice().sort(function(a,b){return a.created<b.created?1:
 if(!list.length){var tr0=document.createElement('tr'),c0=td('No snapshots yet.','muted');c0.colSpan=5;tr0.appendChild(c0);rows.appendChild(tr0)}
 list.forEach(function(s){var tr=document.createElement('tr');tr.appendChild(td(s.name,'mono'));tr.appendChild(td(s.created.replace('T',' ').substring(0,16)));
 tr.appendChild(td(used[s.name]?used[s.name]+(used[s.name]===1?' pool':' pools'):'None'));
-var tg=document.createElement('td');if(d.lastKnownGood===s.name){var c=document.createElement('span');c.className='chip ok';c.textContent='Last known good';tg.appendChild(c)}tr.appendChild(tg);
+var tg=document.createElement('td');if(d.lastKnownGood===s.name){var c=document.createElement('span');c.className='chip ok';c.textContent='Last known good';tg.appendChild(c)}
+var og=(d.vm.outsideRetention||[]).filter(function(o){return o.name===s.name})[0];if(og){var oc=document.createElement('span');oc.className='chip idle';oc.textContent='Outside retention';oc.title=og.reason;tg.appendChild(oc)}tr.appendChild(tg);
 var ac=document.createElement('td');ac.className='right';if(ADMIN){ac.appendChild(revertBtn(s.name))}tr.appendChild(ac);rows.appendChild(tr)});
 if(sel){var keep=sel.value;sel.textContent='';var o=document.createElement('option');o.value='';o.textContent='Last known good'+(d.lastKnownGood?' ('+d.lastKnownGood+')':'');sel.appendChild(o);
 list.forEach(function(s){var op=document.createElement('option');op.value=s.name;op.textContent=s.name;sel.appendChild(op)});sel.value=keep}}
@@ -123,6 +124,7 @@ var b=document.createElement('button');b.type='button';b.className='btn small';b
 var chip=document.getElementById('gi-statechip');if(chip&&chip.textContent.trim()==='Checking...'){if(e.length){setChip(chip,'Can\'t reach '+errKind(e),'warn')}else{setChip(chip,'Up to date','ok')}}
 last=Date.now();tick()}
 function load(){return window.GI.getJson('/api/images/'+ID+'/live').then(apply)}
+document.addEventListener('gi:changed',function(){load();setTimeout(load,5000);setTimeout(load,15000)});
 document.addEventListener('click',function(ev){var b=ev.target.closest&&ev.target.closest('[data-opens=dlg-rollback]');if(b){var n=b.getAttribute('data-fill-pool');var f=document.querySelector('#dlg-rollback form');if(f){f.querySelector('[data-must-match]').setAttribute('data-must-match',n)}}});
 window.GI.poll(load,60);
 });

@@ -168,13 +168,15 @@ function Test-GIImageConstraints {
         $nk = ([string]$e.Name).Trim().ToLowerInvariant()
         if (-not $nk) { $err.Add("Image '$id' has no name.") }
         elseif ($names.ContainsKey($nk)) { $err.Add("Image name '$($e.Name)' is used twice.") } else { $names[$nk] = $true }
-        $vm = ([string]$e.GoldenImage.VmName).Trim()
+        # Safe reads: the wizard checks entries that are only partly filled in
+        $vm = ([string](Get-GIWatcherProp (Get-GIWatcherProp $e 'GoldenImage' $null) 'VmName' '')).Trim()
         if (-not $vm) { $err.Add("Image $label has no VM name.") }
         elseif ($vms.ContainsKey($vm.ToLowerInvariant())) { $err.Add("VM '$vm' belongs to image '$($vms[$vm.ToLowerInvariant()])' and $label. A VM can belong to one image.") }
         else { $vms[$vm.ToLowerInvariant()] = $e.Name }
-        $test = [string]$e.Pools.Test.Name
+        $poolsBlock = Get-GIWatcherProp $e 'Pools' $null
+        $test = [string](Get-GIWatcherProp (Get-GIWatcherProp $poolsBlock 'Test' $null) 'Name' '')
         if (-not $test) { $err.Add("Image $label has no test pool.") }
-        $prod = @(@($e.Pools.Production) | ForEach-Object { [string]$_.Name } | Where-Object { $_ })
+        $prod = @(@(Get-GIWatcherProp $poolsBlock 'Production' @()) | ForEach-Object { [string](Get-GIWatcherProp $_ 'Name' '') } | Where-Object { $_ })
         if ($prod.Count -eq 0) { $err.Add("Image $label has no production pool.") }
         if ($test -and ($prod | Where-Object { $_ -ieq $test })) { $err.Add("Image $label uses '$test' as both test pool and production pool.") }
         foreach ($p in @(@($test) + $prod | Where-Object { $_ } | Select-Object -Unique)) {
@@ -202,10 +204,16 @@ function Write-GIImageOverlayList {
     $null = Update-GISettingsOverlay -Config $Config -Set @(@{ Path = 'GoldenImages'; Value = @($List) })
 }
 
-function Assert-GIImageEntryValid {
-    # Throws one message listing every problem, using the same rules as the settings schema for the per-image sections.
+function Get-GIImageEntryProblems {
+    <#
+    .SYNOPSIS
+        Every problem of an image entry as @{ Step; Message }, Step being the wizard step (1 Basics, 2 Guest VM and pools,
+        3 Windows Update and packages, 4 Schedule and promotion) the problem belongs to. Same rules as the settings schema
+        for the per-image sections, plus the constraints against the other images.
+    #>
+    [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @())
-    $problems = [System.Collections.Generic.List[string]]::new()
+    $problems = [System.Collections.Generic.List[object]]::new()
     $merged = Merge-GIHashtable -Base (Get-GIImageDefaults) -Overlay $Entry
     foreach ($section in 'GoldenImage', 'Pools', 'Validation', 'Snapshots', 'Promotion') {
         if (-not $Entry.ContainsKey($section)) { continue }
@@ -218,9 +226,22 @@ function Assert-GIImageEntryValid {
             if ($n.Found) { $form[$f.Key] = $n.Value }
         }
         $errs = Test-GISettingsSection -Section $section -Values $form
-        foreach ($k in $errs.Keys) { $problems.Add("${section}.${k}: $($errs[$k])") }
+        foreach ($k in $errs.Keys) {
+            $step = switch ($section) { 'Pools' { 2 } 'Promotion' { 4 } 'GoldenImage' { $(if ($k -eq 'VmName') { 2 } else { 3 }) } default { 3 } }
+            $problems.Add([pscustomobject]@{ Step = $step; Message = "${section}.${k}: $($errs[$k])" })
+        }
     }
-    foreach ($m in (Test-GIImageConstraints -Entries (@($Others) + @($merged)))) { $problems.Add($m) }
+    foreach ($m in (Test-GIImageConstraints -Entries (@($Others) + @($merged)))) {
+        $step = if ($m -match "invalid id|has no name|name '.*' is used twice|id '.*' is used twice") { 1 } else { 2 }
+        $problems.Add([pscustomobject]@{ Step = $step; Message = $m })
+    }
+    return $problems.ToArray()
+}
+
+function Assert-GIImageEntryValid {
+    # Throws one message listing every problem, using the same rules as the settings schema for the per-image sections.
+    param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @())
+    $problems = @(Get-GIImageEntryProblems -Entry $Entry -Others $Others | ForEach-Object { $_.Message })
     if ($problems.Count) { throw "Image not saved, $($problems.Count) problem(s): $($problems -join '; ')" }
 }
 
@@ -390,6 +411,34 @@ function Get-GIRunSummary {
         stages = @(foreach ($sn in 'Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate', 'Approval', 'Promote', 'PostCheck') { [string](Get-GIWatcherProp (Get-GIWatcherProp (Get-GIWatcherProp $Run 'stages' $null) $sn $null) 'status' 'Pending') })
         stepsDone = @($steps | Where-Object { $_.status -in 'Succeeded', 'Skipped' }).Count; stepsTotal = $steps.Count
     }
+}
+
+function Get-GIPoolLastPushed {
+    <#
+    .SYNOPSIS
+        When each pool of an image last received a pushed image, from the run history only (no Horizon call):
+        the test pool when a run's TestPush succeeded, a production pool when its promotion entry succeeded.
+        Returns @{ '<pool>' = @{ at; snapshot; runId } }. Rollbacks are not runs and are not counted.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$ImageConfig, [int]$Last = 50)
+    $out = @{}
+    $testName = [string](Get-GIConfigValue $ImageConfig 'Pools.Test.Name' '')
+    foreach ($run in @(Get-GIRunList -Config $ImageConfig -Last $Last)) {   # newest first
+        $snap = [string](Get-GIWatcherProp (Get-GIWatcherProp $run 'snapshot' $null) 'name' '')
+        $rid = [string](Get-GIWatcherProp $run 'runId' '')
+        $tp = Get-GIWatcherProp (Get-GIWatcherProp $run 'stages' $null) 'TestPush' $null
+        if ($testName -and -not $out.ContainsKey($testName) -and [string](Get-GIWatcherProp $tp 'status' '') -eq 'Succeeded') {
+            $out[$testName] = @{ at = [string](Get-GIWatcherProp $tp 'endedAt' ''); snapshot = $snap; runId = $rid }
+        }
+        foreach ($p in @(Get-GIWatcherProp (Get-GIWatcherProp $run 'promotion' $null) 'pools' @())) {
+            $pn = [string](Get-GIWatcherProp $p 'poolName' '')
+            if ($pn -and -not $out.ContainsKey($pn) -and [string](Get-GIWatcherProp $p 'status' '') -eq 'Succeeded') {
+                $out[$pn] = @{ at = [string](Get-GIWatcherProp $p 'scheduledStart' ''); snapshot = $snap; runId = $rid }
+            }
+        }
+    }
+    return $out
 }
 
 function Get-GIImageSummary {

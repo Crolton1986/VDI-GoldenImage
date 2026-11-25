@@ -248,7 +248,7 @@ function Get-GIImageSettingsLink { param($Summary, [string]$Section = '') "/imag
 function New-GIImageOverviewPage {
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)]$Summary, [Parameter(Mandatory)]$Ctx, [int]$SnapshotsKept = 0, [string]$Notice = '')
+    param([Parameter(Mandatory)]$Summary, [Parameter(Mandatory)]$Ctx, [int]$SnapshotsKept = 0, [string]$Notice = '', [hashtable]$LastPushed = @{}, $Prune = $null)
     $id = ConvertTo-GIHtml $Summary.id
     $act = $Summary.activeRun; $last = $Summary.lastRun
     $head = New-GIImageHeader -Summary $Summary -Ctx $Ctx -Tab overview
@@ -264,7 +264,8 @@ function New-GIImageOverviewPage {
     } else {
         $strip = "<div class=""strip""><span>No runs yet. The first run patches the guest, takes a snapshot, and pushes it to the test pool. Pools show ""No image pushed yet"" until then.</span></div>"
     }
-    $notice = if ($Notice) { "<div class=""notice"" role=""status"">$(ConvertTo-GIHtml $Notice)</div>" } else { '<div id="gi-action-status" role="status" aria-live="polite" class="muted"></div>' }
+    $noticeHtml = '<div id="gi-action-status" role="status" aria-live="polite" class="muted"></div>'
+    if ($Notice) { $noticeHtml = "<div class=""notice"" role=""status"">$(ConvertTo-GIHtml $Notice)</div>$noticeHtml" }
     $liveErr = New-GIBanner -Text 'Live check failed.' -Variant error -Id 'gi-live-error' -Hidden
     # Pools table: rows are filled by the page script (live), each with Roll back for admins
     $poolRows = @(@($Summary.testPool) + @($Summary.productionPools) | Where-Object { $_ }) | ForEach-Object -Begin { $i = 0 } -Process {
@@ -273,10 +274,17 @@ function New-GIImageOverviewPage {
         $act2 = ''
         if ($Ctx.IsAdmin) { $act2 = New-GIButton -Label 'Roll back' -Variant dangerline -Small -OpensDialog 'dlg-rollback' -Disabled:$locked -Reason $busyReason -AriaLabel "Roll back $_" }
         $act2 = $act2 -replace '<button ', "<button data-fill-pool=""$pn"" data-fill-match=""$pn"" data-fill-api=""POST /api/images/$id/pools/$([uri]::EscapeDataString($_))/rollback"" "
-        "<tr data-pool=""$pn"" data-test=""$($test.ToString().ToLower())""><td>$pn$(if ($test) { ' <span class="muted">(test)</span>' })</td><td class=""mono"" data-col=""snapshot"">$(New-GISkeleton -Label 'Snapshot' -Width 120)</td><td data-col=""state"">$(New-GISkeleton -Label 'State' -Width 60)</td><td data-col=""pushed"" class=""muted"">-</td><td class=""right"">$act2</td></tr>"
+        $pushed = 'None recorded'
+        if ($LastPushed.ContainsKey([string]$_) -and $LastPushed[[string]$_].at) {
+            $lp = $LastPushed[[string]$_]
+            $pushed = "$(Format-GIDate $lp.at)$(if ($lp.snapshot) { ' <span class=""mono small"">' + (ConvertTo-GIHtml $lp.snapshot) + '</span>' })"
+        }
+        "<tr data-pool=""$pn"" data-test=""$($test.ToString().ToLower())""><td>$pn$(if ($test) { ' <span class="muted">(test)</span>' })</td><td class=""mono"" data-col=""snapshot"">$(New-GISkeleton -Label 'Snapshot' -Width 120)</td><td data-col=""state"">$(New-GISkeleton -Label 'State' -Width 60)</td><td data-col=""pushed"" class=""muted"">$pushed</td><td class=""right"">$act2</td></tr>"
     }
     $pools = New-GICard -Title 'Pools' -BodyHtml "<div class=""tablewrap""><table class=""poolsfull""><thead><tr><th scope=""col"">Pool</th><th scope=""col"">Snapshot</th><th scope=""col"">State</th><th scope=""col"">Last pushed</th><th scope=""col""><span class=""sr-only"">Actions</span></th></tr></thead><tbody>$(@($poolRows) -join '')</tbody></table></div>"
     $keep = if ($SnapshotsKept -gt 0) { "Retention keeps the last $SnapshotsKept golden image snapshots. Older ones are removed after each run." } else { 'Retention settings are on the Snapshots section of this image''s settings.' }
+    $keep += ' Snapshots marked Outside retention are the ones the next retention pass would remove.'
+    if ($null -ne $Prune -and -not [bool]$Prune) { $keep += ' Pruning is off, so nothing is removed until you turn it on under Settings, Snapshots.' }
     $snaps = New-GICard -Title 'Snapshots' -BodyHtml "<div class=""tablewrap""><table><thead><tr><th scope=""col"">Snapshot</th><th scope=""col"">Created</th><th scope=""col"">Used by</th><th scope=""col"">Tag</th><th scope=""col""><span class=""sr-only"">Actions</span></th></tr></thead><tbody id=""gi-snap-rows""><tr><td colspan=""5"">$(New-GISkeleton -Label 'Snapshots' -Width 200)</td></tr></tbody></table></div><p class=""muted small"">$(ConvertTo-GIHtml $keep)</p>"
     # Right column
     $pw = ''
@@ -290,13 +298,13 @@ function New-GIImageOverviewPage {
     # Dialogs
     $dialogs = ''
     if ($Ctx.IsAdmin) {
-        $dialogs += New-GIModal -Id 'dlg-power-on' -Title "Power on $($Summary.vm)?" -BodyHtml '<p>The guest VM starts. Nothing else changes.</p><input type="hidden" name="action" value="on">' -ConfirmLabel 'Power on' -Api "POST /api/images/$id/vm/power"
-        $dialogs += New-GIModal -Id 'dlg-power-off' -Title "Power off $($Summary.vm)?" -BodyHtml '<p>The guest operating system is asked to shut down. Unsaved work in the guest is lost.</p><input type="hidden" name="action" value="off">' -ConfirmLabel 'Power off' -ConfirmVariant danger -Api "POST /api/images/$id/vm/power"
-        $dialogs += New-GIModal -Id 'dlg-revert' -Title "Revert $($Summary.vm) to a snapshot?" -ConfirmLabel 'Revert VM' -ConfirmVariant danger -Api "POST /api/images/$id/vm/revert" -BodyHtml "<p>Snapshot: <span class=""mono"" data-fill=""snapshot""></span>. The VM's current state and every change since that snapshot will be lost. This cannot be undone.</p><input type=""hidden"" name=""snapshot"" value=""""><div class=""field""><label for=""rv-confirm"">Type <strong>$(ConvertTo-GIHtml $Summary.name)</strong> to confirm</label><input type=""text"" id=""rv-confirm"" autocomplete=""off"" data-must-match=""$(ConvertTo-GIHtml $Summary.name)""></div>"
-        $dialogs += New-GIModal -Id 'dlg-rollback' -Title 'Roll back a pool?' -ConfirmLabel 'Roll back' -ConfirmVariant danger -Api "POST /api/images/$id/pools/x/rollback" -BodyHtml "<p>Pool: <strong data-fill=""pool""></strong>. The pool is pushed to the snapshot you pick. This does not create a run.</p><div class=""field""><label for=""rb-snap"">Snapshot</label><select id=""rb-snap"" name=""snapshot""><option value="""">Last known good</option></select></div><div class=""field""><label><input type=""checkbox"" name=""forceLogoff"" value=""on""> Force logoff</label><div class=""help"">Ends active sessions on this pool.</div></div><div class=""field""><label for=""rb-start"">Start</label><input type=""datetime-local"" id=""rb-start"" name=""startTime""><div class=""help"">Leave empty to start now.</div></div><div class=""field""><label for=""rb-confirm"">Type the pool name to confirm</label><input type=""text"" id=""rb-confirm"" autocomplete=""off"" data-must-match=""""></div>"
+        $dialogs += New-GIModal -Id 'dlg-power-on' -Title "Power on $($Summary.vm)?" -BodyHtml '<p>The guest VM starts. Nothing else changes.</p><input type="hidden" name="action" value="on">' -ConfirmLabel 'Power on' -Api "POST /api/images/$id/vm/power" -Then inline -DoneText "Power on requested for $($Summary.vm). The state below updates in a few seconds."
+        $dialogs += New-GIModal -Id 'dlg-power-off' -Title "Power off $($Summary.vm)?" -BodyHtml '<p>The guest operating system is asked to shut down. Unsaved work in the guest is lost.</p><input type="hidden" name="action" value="off">' -ConfirmLabel 'Power off' -ConfirmVariant danger -Api "POST /api/images/$id/vm/power" -Then inline -DoneText "Shutdown requested for $($Summary.vm). The state below updates in a few seconds."
+        $dialogs += New-GIModal -Id 'dlg-revert' -Title "Revert $($Summary.vm) to a snapshot?" -ConfirmLabel 'Revert VM' -ConfirmVariant danger -Api "POST /api/images/$id/vm/revert" -Then inline -DoneText 'Revert requested. The state below updates in a few seconds.' -BodyHtml "<p>Snapshot: <span class=""mono"" data-fill=""snapshot""></span>. The VM's current state and every change since that snapshot will be lost. This cannot be undone.</p><input type=""hidden"" name=""snapshot"" value=""""><div class=""field""><label for=""rv-confirm"">Type <strong>$(ConvertTo-GIHtml $Summary.name)</strong> to confirm</label><input type=""text"" id=""rv-confirm"" autocomplete=""off"" data-must-match=""$(ConvertTo-GIHtml $Summary.name)""></div>"
+        $dialogs += New-GIModal -Id 'dlg-rollback' -Title 'Roll back a pool?' -ConfirmLabel 'Roll back' -ConfirmVariant danger -Api "POST /api/images/$id/pools/x/rollback" -Then inline -DoneText 'Rollback scheduled. The pool state below updates as Horizon starts the push.' -BodyHtml "<p>Pool: <strong data-fill=""pool""></strong>. The pool is pushed to the snapshot you pick. This does not create a run.</p><div class=""field""><label for=""rb-snap"">Snapshot</label><select id=""rb-snap"" name=""snapshot""><option value="""">Last known good</option></select></div><div class=""field""><label><input type=""checkbox"" name=""forceLogoff"" value=""on""> Force logoff</label><div class=""help"">Ends active sessions on this pool.</div></div><div class=""field""><label for=""rb-start"">Start</label><input type=""datetime-local"" id=""rb-start"" name=""startTime""><div class=""help"">Leave empty to start now.</div></div><div class=""field""><label for=""rb-confirm"">Type the pool name to confirm</label><input type=""text"" id=""rb-confirm"" autocomplete=""off"" data-must-match=""""></div>"
     }
     $cols = "<div class=""twocol""><div class=""col main"">$pools$snaps</div><div class=""col side"">$vmCard$sched</div></div>"
-    $body = "$head$notice$liveErr$strip$cols$dialogs<script>$(Get-GIOverviewScript -ImageId $Summary.id -IsAdmin ([bool]$Ctx.IsAdmin) -Locked $locked)</script>"
+    $body = "$head$noticeHtml$liveErr$strip$cols$dialogs<script>$(Get-GIOverviewScript -ImageId $Summary.id -IsAdmin ([bool]$Ctx.IsAdmin) -Locked $locked)</script>"
     New-GIPage -Title "$($Summary.name) - Overview" -BodyHtml $body
 }
 

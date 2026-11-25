@@ -117,6 +117,25 @@ function New-GIRunProgressHtml {
     "<section class=""card"" data-region=""progress""><ol class=""stages"" aria-label=""Stages"">$(@($items) -join '')</ol><div class=""nowline"">$now$stale</div></section>"
 }
 
+function Get-GIRunPoolResult {
+    <# What the Result block says about pools: the test pool from the TestPush stage, the production pools by their own
+       promotion status (updated, scheduled, failed), not just how many there are. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Run, [string]$TestPool = '')
+    $stages = Get-GIValue $Run 'stages' $null
+    $tp = [string](Get-GIValue (Get-GIValue $stages 'TestPush' $null) 'status' 'Pending')
+    $test = if ($tp -eq 'Succeeded') { "$(if ($TestPool) { "$TestPool " })received the snapshot" } elseif ($tp -eq 'Skipped') { 'Skipped' } else { "Not updated ($tp)" }
+    $pools = @(Get-GIValue (Get-GIValue $Run 'promotion' $null) 'pools' @())
+    $by = { param($st) @($pools | Where-Object { [string](Get-GIValue $_ 'status' '') -in $st }).Count }
+    $ok = & $by @('Succeeded'); $sch = & $by @('Scheduled', 'InProgress'); $bad = & $by @('Failed', 'Cancelled')
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($ok) { $parts.Add("$ok of $($pools.Count) updated") }
+    if ($sch) { $parts.Add("$sch scheduled or pushing") }
+    if ($bad) { $parts.Add("$bad failed or cancelled") }
+    $prod = if ($pools.Count -eq 0) { 'None recorded' } else { $parts -join ', ' }
+    [pscustomobject]@{ Test = $test; Production = $prod }
+}
+
 function New-GIStepTableHtml {
     param($Steps, [string]$ImageId, [string]$RunId)
     $rows = foreach ($s in $Steps) {
@@ -125,7 +144,9 @@ function New-GIStepTableHtml {
         if ([int]$s.logLines -gt 0) { $log = "<details class=""steplog"" data-step-log=""$(ConvertTo-GIHtml $s.id)""><summary>Log ($($s.logLines) lines)</summary><pre class=""logbox"" tabindex=""0"" aria-label=""Log for $(ConvertTo-GIHtml $s.label)""></pre></details>" }
         $fix = ''
         foreach ($f in @($s.fixApplied)) { if ($f) { $fid = [string](Get-GIWatcherProp $f 'id' ''); if ($fid) { $fix += "<div class=""small"">Fixed by <a href=""/settings/Fixes"">$(ConvertTo-GIHtml $fid)</a>, attempt $(ConvertTo-GIHtml (Get-GIWatcherProp $f 'attempt' ''))</div>" } } }
-        "<tr><th scope=""row"">$(ConvertTo-GIHtml $s.label)</th><td>$(New-GIChip -Text ([string]$s.status) -Variant $v)</td><td>$(Format-GIDate $s.startedAt)</td><td>$(ConvertTo-GITimeSpanText $s.startedAt $s.endedAt)</td><td>$(ConvertTo-GIHtml $s.message)$fix$log</td></tr>"
+        $res = ''; $msg = [string]$s.message
+        if ($s.resumed -or $msg -match ' \(earlier attempt\)$') { $res = ' ' + (New-GIChip -Text 'Resumed' -Variant idle) + '<span class="sr-only"> (kept from an earlier attempt)</span>'; $msg = $msg -replace ' \(earlier attempt\)$', '' }
+        "<tr><th scope=""row"">$(ConvertTo-GIHtml $s.label)</th><td>$(New-GIChip -Text ([string]$s.status) -Variant $v)$res</td><td>$(Format-GIDate $s.startedAt)</td><td>$(ConvertTo-GITimeSpanText $s.startedAt $s.endedAt)</td><td>$(ConvertTo-GIHtml $msg)$fix$log</td></tr>"
     }
     "<div class=""tablewrap""><table><thead><tr><th scope=""col"">Step</th><th scope=""col"">Status</th><th scope=""col"">Started</th><th scope=""col"">Duration</th><th scope=""col"">Message</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table></div>"
 }
@@ -258,8 +279,8 @@ function New-GIRunPage {
     # Succeeded block
     $result = ''
     if ($run.status -in 'Completed', 'Scheduled') {
-        $pp = @(Get-GIValue (Get-GIValue $run 'promotion' $null) 'pools' @())
-        $result = "<section class=""card"" data-region=""result""><h2>Result</h2><dl class=""kv""><dt>Snapshot</dt><dd class=""mono"">$(ConvertTo-GIHtml $snapName)</dd><dt>Pools updated</dt><dd>$($pp.Count)</dd><dt>Promoted</dt><dd>$(Format-GIDate $run.updatedAt)</dd></dl></section>"
+        $pr = Get-GIRunPoolResult -Run $run -TestPool ([string]$Summary.testPool)
+        $result = "<section class=""card"" data-region=""result""><h2>Result</h2><dl class=""kv""><dt>Snapshot</dt><dd class=""mono"">$(ConvertTo-GIHtml $snapName)</dd><dt>Test pool</dt><dd>$(ConvertTo-GIHtml $pr.Test)</dd><dt>Production pools</dt><dd>$(ConvertTo-GIHtml $pr.Production)</dd><dt>$(if ($run.status -eq 'Scheduled') { 'Approved' } else { 'Promoted' })</dt><dd>$(Format-GIDate $run.updatedAt)</dd></dl></section>"
     }
     # Stage list
     $names = Get-GIViewStageOrder
