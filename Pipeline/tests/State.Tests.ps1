@@ -146,3 +146,133 @@ Describe 'State' {
         }
     }
 }
+
+Describe 'Maintain steps' {
+    BeforeAll {
+        function script:New-Plan {
+            @(
+                [pscustomobject]@{ Id = 'SafetySnapshot'; Label = 'Safety snapshot'; Resumable = $true; Applies = $true; SkipReason = '' }
+                [pscustomobject]@{ Id = 'PowerOn'; Label = 'Power on'; Resumable = $false; Applies = $true; SkipReason = '' }
+                [pscustomobject]@{ Id = 'CopyInstallers'; Label = 'Copy installers'; Resumable = $false; Applies = $false; SkipReason = 'No installer folder set' }
+                [pscustomobject]@{ Id = 'WindowsUpdate'; Label = 'Windows Update'; Resumable = $true; Applies = $true; SkipReason = '' }
+                [pscustomobject]@{ Id = 'Pkg:VmTools'; Label = 'Install VMware Tools'; Resumable = $true; Applies = $true; SkipReason = '' }
+                [pscustomobject]@{ Id = 'Pkg:Horizon'; Label = 'Install Horizon Agent'; Resumable = $true; Applies = $true; SkipReason = '' }
+                [pscustomobject]@{ Id = 'Finalize'; Label = 'Finalize'; Resumable = $false; Applies = $true; SkipReason = '' }
+            )
+        }
+        function script:Set-AllUpTo($Run, $FailId) {
+            foreach ($s in $Run.stages.Maintain.steps) {
+                if ($s.status -eq 'Skipped') { continue }
+                if ($s.id -eq $FailId) { $s.status = 'Failed'; $s.startedAt = (Get-Date).ToString('o'); break }
+                $s.status = 'Succeeded'; $s.startedAt = (Get-Date).AddMinutes(-5).ToString('o'); $s.endedAt = (Get-Date).ToString('o'); $s.message = "ok $($s.id)"
+            }
+        }
+    }
+    BeforeEach {
+        $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $dir
+        $script:cfg = @{ Paths = @{ State = $dir }; GoldenImage = @{ VmName = 'W11-GI-01' } }
+        $script:run = New-GIRun -Config $cfg -RunId '20261124-213005'
+    }
+
+    It 'starts fresh with every applicable step Pending and the rest Skipped' {
+        $start = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        $start | Should -Be ''
+        @(Get-GIStepList -Run $run).id | Should -Be @('SafetySnapshot', 'PowerOn', 'CopyInstallers', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Finalize')
+        (Get-GIStep -Run $run -Id 'CopyInstallers').status | Should -Be 'Skipped'
+        (Get-GIStep -Run $run -Id 'CopyInstallers').message | Should -Be 'No installer folder set'
+        @(Get-GIStepList -Run $run | Where-Object status -eq 'Pending').Count | Should -Be 6
+        (Get-GIRun -Config $cfg -RunId $run.runId).stages.Maintain.steps.Count | Should -Be 7
+    }
+
+    It 'Set-GIStep stores attempt and fixes only when given, and a resume keeps them' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Status Running -Message 'm'
+        (Get-GIStep -Run $run -Id 'Pkg:VmTools').PSObject.Properties['attempt'] | Should -BeNullOrEmpty
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Attempt 2 -Fixes @([pscustomobject]@{ id = 'FixA'; outcome = 'Applied' })
+        $s = Get-GIStep -Run $run -Id 'Pkg:VmTools'
+        $s.attempt | Should -Be 2
+        $s.fixes[0].id | Should -Be 'FixA'
+        $s.message | Should -Be 'm'
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:VmTools' -Status Succeeded -Message 'ok'
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan) -ResumeFrom 'Pkg:Horizon'
+        $r = Get-GIStep -Run $run -Id 'Pkg:VmTools'
+        $r.status | Should -Be 'Succeeded'
+        $r.attempt | Should -Be 2
+        $r.fixes[0].id | Should -Be 'FixA'
+    }
+
+    It 'returns nothing for a run without steps' {
+        @(Get-GIStepList -Run $run).Count | Should -Be 0
+    }
+
+    It 'resumes after a failure: keeps finished resumable steps, reruns the others' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-AllUpTo $run 'Pkg:Horizon'
+        $start = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        $start | Should -Be 'PowerOn'
+        (Get-GIStep -Run $run -Id 'SafetySnapshot').status | Should -Be 'Succeeded'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').status | Should -Be 'Succeeded'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').message | Should -Be 'ok WindowsUpdate (earlier attempt)'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').resumed | Should -BeTrue                  # kept from the earlier attempt
+        (Get-GIStep -Run $run -Id 'PowerOn').PSObject.Properties['resumed'] | Should -BeNullOrEmpty   # runs again, not tagged
+        (Get-GIStep -Run $run -Id 'Pkg:VmTools').status | Should -Be 'Succeeded'
+        (Get-GIStep -Run $run -Id 'PowerOn').status | Should -Be 'Pending'
+        (Get-GIStep -Run $run -Id 'Pkg:Horizon').status | Should -Be 'Pending'
+    }
+
+    It 'resumes from a chosen step, rerunning finished steps after it' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-AllUpTo $run 'Pkg:Horizon'
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan) -ResumeFrom 'WindowsUpdate'
+        (Get-GIStep -Run $run -Id 'SafetySnapshot').status | Should -Be 'Succeeded'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').status | Should -Be 'Pending'
+        (Get-GIStep -Run $run -Id 'Pkg:VmTools').status | Should -Be 'Pending'
+    }
+
+    It 'restarts everything from SafetySnapshot' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-AllUpTo $run 'Pkg:Horizon'
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan) -ResumeFrom 'SafetySnapshot'
+        @(Get-GIStepList -Run $run | Where-Object status -eq 'Succeeded').Count | Should -Be 0
+    }
+
+    It 'starts fresh when the earlier attempt finished cleanly' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-AllUpTo $run 'none'
+        $start = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        $start | Should -Be ''
+        @(Get-GIStepList -Run $run | Where-Object status -eq 'Succeeded').Count | Should -Be 0
+    }
+
+    It 'rejects an unknown resume step' {
+        { Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan) -ResumeFrom 'Pkg:Nope' } | Should -Throw "*no step 'Pkg:Nope'*"
+    }
+
+    It 'Set-GIStep stamps times and mirrors progress; a message-only update keeps the start time' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:Horizon' -Status Running -Message ''
+        $s = Get-GIStep -Run $run -Id 'Pkg:Horizon'
+        $started = $s.startedAt
+        $started | Should -Not -BeNullOrEmpty
+        $run.progress | Should -Be 'Install Horizon Agent'
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:Horizon' -Message 'Running 5 min (timeout 60 min)'
+        $s.startedAt | Should -Be $started
+        $run.progress | Should -Be 'Install Horizon Agent: Running 5 min (timeout 60 min)'
+        Set-GIStep -Config $cfg -Run $run -Id 'Pkg:Horizon' -Status Failed -Message 'exited 1603'
+        $s.endedAt | Should -Not -BeNullOrEmpty
+        (Get-GIRun -Config $cfg -RunId $run.runId).stages.Maintain.steps[5].status | Should -Be 'Failed'
+    }
+
+    It 'Set-GIProgress also updates the running step message' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        Set-GIStep -Config $cfg -Run $run -Id 'WindowsUpdate' -Status Running -Message ''
+        Set-GIProgress -Config $cfg -Run $run -Message 'Windows Update pass 2 of 5: searching and installing'
+        (Get-GIStep -Run $run -Id 'WindowsUpdate').message | Should -Be 'Windows Update pass 2 of 5: searching and installing'
+    }
+
+    It 'throws for an unknown step id' {
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan (New-Plan)
+        { Set-GIStep -Config $cfg -Run $run -Id 'Nope' -Status Running } | Should -Throw "*Unknown Maintain step*"
+    }
+}

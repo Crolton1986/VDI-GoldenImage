@@ -1,6 +1,8 @@
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
-    # Stubs for commands that may not exist on this box (or are defined by a concurrent src file)
+    # Plain stubs, always defined in module scope. Pester mocks the stub instead of the real cmdlet:
+    # the real Install-Module computes a dynamic -Scope parameter from an install location that is null
+    # on Linux, and Set-PowerCLIConfiguration only exists where PowerCLI is installed.
     InModuleScope VDI-GIPipeline {
         $stubs = @{
             'Install-Module'            = { param($Name, $MinimumVersion, $MaximumVersion, $Scope, [switch]$Force, [switch]$AllowClobber, [switch]$SkipPublisherCheck, $ErrorAction) }
@@ -12,10 +14,11 @@ BeforeAll {
             'Write-GISetupProgress'     = { param($Config, $Step, $Line) }
             'Set-GISetupStepData'       = { param($Config, $Step, $Data) }
         }
+        # These two are real module functions: stub them only if the module does not define them.
+        $onlyIfMissing = @('Write-GISetupProgress', 'Set-GISetupStepData')
         foreach ($n in $stubs.Keys) {
-            if (-not (Get-Command $n -ErrorAction SilentlyContinue)) {
-                Set-Item -Path "function:script:$n" -Value $stubs[$n]
-            }
+            if ($n -in $onlyIfMissing -and (Get-Command $n -ErrorAction SilentlyContinue)) { continue }
+            Set-Item -Path "function:script:$n" -Value $stubs[$n]
         }
     }
     function script:Mod($n, $v) { [pscustomobject]@{ Name = $n; Version = [version]$v } }

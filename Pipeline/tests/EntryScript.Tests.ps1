@@ -60,6 +60,13 @@ Describe 'Invoke-GIPipeline.ps1' {
             Test-Path $e.Lock | Should -BeFalse
         }
 
+        It '-FromStep without Maintain exits non-zero and leaves no lock' {
+            $r = Invoke-Entry $e @('-FromStage', 'TestPush', '-RunId', '20261124-213005', '-FromStep', 'Pkg:Horizon')
+            $r.Exit | Should -Not -Be 0
+            $r.Output | Should -Match 'FromStep only works with'
+            Test-Path $e.Lock | Should -BeFalse
+        }
+
         It '-FromStage without -RunId exits non-zero and leaves no lock' {
             $r = Invoke-Entry $e @('-FromStage', 'TestPush')
             $r.Exit | Should -Not -Be 0

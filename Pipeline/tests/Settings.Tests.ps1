@@ -101,6 +101,27 @@ Describe 'ConvertFrom-GISettingsForm' {
         $rows[1].LogoffPolicy | Should -Be 'WAIT_FOR_LOGOFF'
     }
 
+    It 'drops spare rows whose only value is the dropdown default (what a browser actually posts)' {
+        $form = @{
+            'Production[0].Name' = 'JWPRDTest'; 'Production[0].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[1].Name' = '';          'Production[1].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[2].Name' = ' ';         'Production[2].LogoffPolicy' = 'FORCE_LOGOFF'
+        }
+        $r = ConvertFrom-GISettingsForm -Section Pools -Form $form
+        @($r.Values.Production).Count | Should -Be 1
+        $r.Values.Production[0].Name | Should -Be 'JWPRDTest'
+        $r.Errors.Count | Should -Be 0
+    }
+
+    It 'drops rows with remove checked' {
+        $form = @{
+            'Production[0].Name' = 'PRD-A'; 'Production[0].LogoffPolicy' = 'WAIT_FOR_LOGOFF'
+            'Production[1].Name' = 'PRD-B'; 'Production[1].LogoffPolicy' = 'WAIT_FOR_LOGOFF'; 'Production[1]._remove' = 'on'
+        }
+        $r = ConvertFrom-GISettingsForm -Section Pools -Form $form
+        @($r.Values.Production).Name | Should -Be @('PRD-A')
+    }
+
     It 'excludes secret fields' {
         $r = ConvertFrom-GISettingsForm -Section vCenter -Form @{ Server = 'vc'; CredentialSecret = 'x'; Password = 'secret' }
         $r.Values.Keys | Should -Not -Contain 'CredentialSecret'
@@ -149,10 +170,10 @@ Describe 'Test-GISettingsSection' {
         $e.ContainsKey('Endpoints.OnlineEntities') | Should -BeFalse
     }
     It 'whitelists guest actions' {
-        $v = @{ VmName = 'vm'; ScriptPathInGuest = 'C:\x.ps1'; GuestWorkDir = 'C:\w'; CopyScript = $true; Actions = @('VmTools', 'Bogus'); FinalizeAction = 'Finalize'; PowerOffTimeoutMin = 90 }
-        (Test-GISettingsSection -Section GoldenImage -Values $v).Actions | Should -BeLike '*Bogus*'
+        $v = @{ InstallerSourceDir = ''; Actions = @('VmTools', 'Bogus'); ActionTimeoutMin = 60 }
+        (Test-GISettingsSection -Section Packages -Values $v).Actions | Should -BeLike '*Bogus*'
         $v.Actions = @('VmTools', 'OneDrive', 'GoogleDrive', 'HorizonRec')
-        (Test-GISettingsSection -Section GoldenImage -Values $v).Count | Should -Be 0
+        (Test-GISettingsSection -Section Packages -Values $v).Count | Should -Be 0
     }
     It 'rejects duplicate production pools' {
         $v = Valid-Pools
@@ -255,7 +276,7 @@ Describe 'Save-GISettingsSection' {
         $a[0].user | Should -Be 'DOMAIN\bob'
         @($a[0].detail.changes).Count | Should -Be 1
         $a[0].detail.changes[0].key | Should -Be 'Keep'
-        $a[0].detail.changes[0].old | Should -Be 3
+        $a[0].detail.changes[0].old | Should -Be 2
         $a[0].detail.changes[0].new | Should -Be 4
     }
 
@@ -279,7 +300,7 @@ Describe 'Save-GISettingsSection' {
     }
 
     It 'does nothing (no write, no audit) when nothing changed' {
-        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ Keep = '3'; MaxChainDepth = '10'; ProtectAncestors = 'on' }).Values
+        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = '2'; MaxChainDepth = '10'; ProtectAncestors = 'on'; ConsolidateTimeoutMin = '60'; MinFreeSpacePercent = '15'; CleanupFailedRuns = 'on' }).Values
         (Save-GISettingsSection -Config $cfg -Section Snapshots -Values $v).Changed.Count | Should -Be 0
         Test-Path $settingsFile | Should -BeFalse
     }
@@ -287,6 +308,36 @@ Describe 'Save-GISettingsSection' {
     It 'throws a clear error when the existing settings.json is invalid' {
         Write-Overlay $p '{ nope'
         { Save-GISettingsSection -Config $cfg -Section vCenter -Values @{ Server = 'x' } } | Should -Throw '*not valid JSON*'
+    }
+}
+
+Describe 'Connection test results' {
+    BeforeEach { $script:cp = New-SettingsConfig; $script:cc = Get-GIConfig -Path $script:cp }
+    It 'reads Not tested before anything was recorded' {
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+    }
+    It 'records ok and failed per section with a time, and forgets one section' {
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        Set-GIConnectionStatus -Config $cc -Section Horizon -Ok $false
+        $v = Get-GIConnectionStatus -Config $cc -Section vCenter
+        $v.State | Should -Be 'Connected'; ([datetimeoffset]::Parse($v.At)) | Should -BeOfType [datetimeoffset]
+        (Get-GIConnectionStatus -Config $cc -Section Horizon).State | Should -Be 'Failed'
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Clear
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+        (Get-GIConnectionStatus -Config $cc -Section Horizon).State | Should -Be 'Failed'
+    }
+    It 'treats a damaged file as Not tested and recovers on the next write' {
+        Set-Content -LiteralPath (Get-GIConnectionStatePath -Config $cc) -Value '{ nope'
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'NotTested'
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        (Get-GIConnectionStatus -Config $cc -Section vCenter).State | Should -Be 'Connected'
+    }
+    It 'is cleared when a section changes, and kept when nothing changed' {
+        Set-GIConnectionStatus -Config $cc -Section vCenter -Ok $true
+        $null = Save-GISettingsSection -Config $cc -Section vCenter -Values @{ Server = (Get-GIConfig -Path $cp).vCenter.Server }
+        (Get-GIConnectionStatus -Config (Get-GIConfig -Path $cp) -Section vCenter).State | Should -Be 'Connected'
+        $null = Save-GISettingsSection -Config $cc -Section vCenter -Values @{ Server = 'changed.example.com' }
+        (Get-GIConnectionStatus -Config (Get-GIConfig -Path $cp) -Section vCenter).State | Should -Be 'NotTested'
     }
 }
 
@@ -318,14 +369,14 @@ Describe 'Schema vs pipeline.config.psd1' {
                 foreach ($part in (@($def.ConfigPath.Split('.')) + @($f.Key.Split('.')))) {
                     if ($node -is [System.Collections.IDictionary] -and $node.Contains($part)) { $node = $node[$part] } else { $found = $false; break }
                 }
-                $hasDefault = $f.Contains('Default') -or $f.Contains('DefaultName') -or $f.Type -in 'bool', 'list', 'days', 'table'
+                $hasDefault = $f.Contains('Default') -or $f.Contains('DefaultName') -or $f.Type -in 'bool', 'list', 'days', 'table', 'packages'
                 if (-not $found -and -not $hasDefault) { "$($sec.Key).$($f.Key)" }
             }
         }
         @($problems) | Should -BeNullOrEmpty
     }
     It 'defines the documented sections and read-only Dashboard' {
-        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
+        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Packages', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
         (Get-GISettingsSchema).Dashboard.ReadOnly | Should -BeTrue
         (Get-GISettingsSchema).Promotion.Title | Should -Be 'Schedule & promotion'
     }
@@ -336,5 +387,41 @@ Describe 'Production pool safety default' {
         Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
         $prod = (Get-GISettingsSchema)['Pools'].Fields | Where-Object Key -eq 'Production'
         ($prod.Columns | Where-Object Key -eq 'LogoffPolicy').Values[0] | Should -Be 'WAIT_FOR_LOGOFF'
+    }
+}
+
+Describe 'Packages section' {
+    It 'owns Actions and InstallerSourceDir; Golden image no longer lists them' {
+        $s = Get-GISettingsSchema
+        $s.Packages.ConfigPath | Should -Be 'GoldenImage'
+        @($s.Packages.Fields.Key) | Should -Be @('InstallerSourceDir', 'Actions', 'ActionTimeoutMin')
+        @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'Actions'
+        @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'InstallerSourceDir'
+    }
+    It 'parses ticked boxes into catalog order and keeps unknown names for validation' {
+        $r = ConvertFrom-GISettingsForm -Section Packages -Form @{ Actions = @('MsTeams', 'VmTools', 'Bogus'); InstallerSourceDir = ' D:\Inst ' }
+        $r.Values.Actions | Should -Be @('VmTools', 'MsTeams', 'Bogus')
+        $r.Values.InstallerSourceDir | Should -Be 'D:\Inst'
+        (Test-GISettingsSection -Section Packages -Values $r.Values).Actions | Should -BeLike '*Bogus*'
+    }
+    It 'treats no ticked boxes as an empty selection' {
+        (ConvertFrom-GISettingsForm -Section Packages -Form @{ InstallerSourceDir = '' }).Values.Actions.Count | Should -Be 0
+    }
+    It 'saves to GoldenImage.Actions and GoldenImage.InstallerSourceDir' {
+        $p = New-SettingsConfig
+        $null = Save-GISettingsSection -Config (Get-GIConfig -Path $p) -Section Packages -Values @{ Actions = @('VmTools', 'Horizon'); InstallerSourceDir = 'D:\Inst'; ActionTimeoutMin = 60 }
+        $c = Get-GIConfig -Path $p
+        $c.GoldenImage.Actions | Should -Be @('VmTools', 'Horizon')
+        $c.GoldenImage.InstallerSourceDir | Should -Be 'D:\Inst'
+        $c.GoldenImage.VmName | Should -Be 'W11-GI-01'
+    }
+    It 'requires a package timeout between 5 and 600 minutes' {
+        (Test-GISettingsSection -Section Packages -Values @{ Actions = @(); InstallerSourceDir = ''; ActionTimeoutMin = 2 }).ActionTimeoutMin | Should -BeLike 'Must be between 5 and 600*'
+    }
+    It 'returns installer status with the section values' {
+        $d = (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section Packages)
+        $d.Installers | Should -Not -BeNullOrEmpty
+        @($d.Installers.Packages).Count | Should -Be 9
+        (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section vCenter).ContainsKey('Installers') | Should -BeFalse
     }
 }

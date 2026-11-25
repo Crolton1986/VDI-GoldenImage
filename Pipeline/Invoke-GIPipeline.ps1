@@ -8,10 +8,16 @@
   -Stage Rollback   push the last-known-good snapshot (or -SnapshotName) to -PoolName
   -Stage Status     print the newest runs
   -FromStage <name> continue an existing run (-RunId) from that stage through Validate
-  -FromRequest      run the request queued by the dashboard (state/run-request.json); used by the VDI-GI-Runner task
+  -FromStep <id>    with -FromStage Maintain or -Stage Maintain: resume Maintain at that sub-step (e.g. Pkg:Horizon;
+                    SafetySnapshot restarts it). Without it, a failed Maintain resumes at its first unfinished step.
+  -FromRequest      run the request queued by the dashboard (state/<imageId>/run-request.json); used by the VDI-GI-Runner task
+  -ImageId <id>     the golden image to work on. Without it: one image = that image; several images = All, PostCheck, Status
+                    and -FromRequest go through every image in turn (paused images are skipped for All), other stages need -ImageId.
   Every invocation except Status holds state/pipeline.lock, so scheduled, CLI and dashboard runs never overlap.
 .EXAMPLE
   PS> .\Invoke-GIPipeline.ps1 -FromStage TestPush -RunId 20261124-213005
+.EXAMPLE
+  PS> .\Invoke-GIPipeline.ps1 -FromStage Maintain -FromStep Pkg:Horizon -RunId 20261124-213005
 .EXAMPLE
   PS> .\Invoke-GIPipeline.ps1 -Stage All
 .EXAMPLE
@@ -31,11 +37,36 @@ param(
     [string] $SnapshotName,
     [switch] $ForceLogoff,
     [ValidateSet('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate')] [string] $FromStage,
-    [switch] $FromRequest
+    [ValidatePattern('^[A-Za-z]+(:[A-Za-z]+)?$')] [string] $FromStep,
+    [switch] $FromRequest,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]*$')] [string] $ImageId
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'VDI-GIPipeline.psd1') -Force
-$config = if ($ConfigPath) { Get-GIConfig -Path $ConfigPath } else { Get-GIConfig }
+$rootArgs = @{}; if ($ConfigPath) { $rootArgs.Path = $ConfigPath }
+$rootConfig = Get-GIConfig @rootArgs
+# The dashboard migrates a single-image config at startup; until then the legacy layout (state in the root folders) still works
+$images = @(Get-GIImageEntries -Config $rootConfig)
+if (-not $ImageId) {
+    if ($images.Count -eq 1) { $ImageId = $images[0].Id }
+    elseif ($images.Count -eq 0) { throw 'No golden images are configured.' }
+    elseif ($Stage -in 'All', 'PostCheck', 'Status' -or $FromRequest) {
+        # Several images: run each in turn in its own process so locks and state stay per image
+        $worst = 0
+        foreach ($img in $images) {
+            if ($Stage -eq 'All' -and -not $FromRequest -and $img.Paused) { Write-Host "Skipping paused image '$($img.Id)'."; continue }
+            $argList = @{}
+            foreach ($k in $PSBoundParameters.Keys) { $argList[$k] = $PSBoundParameters[$k] }
+            $argList.ImageId = $img.Id
+            & $PSCommandPath @argList
+            if ($LASTEXITCODE -gt $worst) { $worst = $LASTEXITCODE }
+        }
+        exit $worst
+    }
+    else { throw "More than one golden image is configured; pass -ImageId ($(($images | ForEach-Object { $_.Id }) -join ', '))." }
+}
+$config = Get-GIImageConfig -Config $rootConfig -ImageId $ImageId
+if ($config.ImagePaused -and $Stage -eq 'All' -and -not $FromRequest -and -not $FromStage) { Write-Warning "Golden image '$ImageId' is paused."; exit 0 }
 
 if ($Stage -eq 'Status') {
     Get-GIRunList -Config $config -Last 10 |
@@ -68,8 +99,8 @@ if ($FromRequest) {
     $requestedBy = [string]$req.requestedBy
     switch ($req.action) {
         'All'       { $Stage = 'All' }
-        'FromStage' { $FromStage = $req.stage; $RunId = $req.runId }
-        'Stage'     { $Stage = $req.stage; $RunId = $req.runId }
+        'FromStage' { $FromStage = $req.stage; $RunId = $req.runId; if ($req.PSObject.Properties['step'] -and $req.step) { $FromStep = [string]$req.step } }
+        'Stage'     { $Stage = $req.stage; $RunId = $req.runId; if ($req.PSObject.Properties['step'] -and $req.step) { $FromStep = [string]$req.step } }
         'PostCheck' { $Stage = 'PostCheck' }
         'Rollback'  { $Stage = 'Rollback'; $PoolName = $req.pool; $SnapshotName = $req.snapshotName; $ForceLogoff = [bool]$req.forceLogoff }
     }
@@ -78,6 +109,9 @@ if ($FromRequest) {
     Write-Host "Running queued request $($req.id): $($req.action) from $requestedBy"
 }
 if ($FromStage -and -not $RunId) { Exit-GIPipelineLock -Config $config; throw '-FromStage needs -RunId.' }
+if ($FromStep -and -not ($FromStage -eq 'Maintain' -or (-not $FromStage -and $Stage -eq 'Maintain'))) {
+    Exit-GIPipelineLock -Config $config; throw '-FromStep only works with -FromStage Maintain or -Stage Maintain.'
+}
 
 function Resolve-Run {
     if ($RunId) { return Get-GIRun -Config $config -RunId $RunId }
@@ -117,12 +151,15 @@ try {
         if ($run.status -in 'Scheduled', 'Completed', 'RolledBack') { throw "Run $($run.runId) is $($run.status); start a new run instead." }
         $run.goldenVm = $config.GoldenImage.VmName
         Update-GIPipelineLock -Config $config -RunId $run.runId
+        Remove-Item -LiteralPath (Get-GIStopFlagPath -Config $config -RunId $run.runId) -Force -ErrorAction SilentlyContinue
         Write-GILog -Config $config -RunId $run.runId -Message "Pipeline $lockStage started by $requestedBy (stages: $($stages -join ', '))"
         Connect-GIServices -Config $config -SkipAppVolumes:($stages -notcontains 'Validate')
 
         foreach ($s in $stages) {
             # Literal scriptblock stays bound to this script's scope ($config/$run); closure captures $s
-            $action = { & "Invoke-GIStage$s" -Config $config -Run $run }.GetNewClosure()
+            $stageArgs = @{ Config = $config; Run = $run }
+            if ($s -eq 'Maintain' -and $FromStep) { $stageArgs.FromStep = $FromStep }
+            $action = { & "Invoke-GIStage$s" @stageArgs }.GetNewClosure()
             Invoke-GIStage -Config $config -Run $run -Stage $s -Action $action
         }
         if ($stages -contains 'Validate') { $run = Enter-GIApprovalGate -Config $config -Run $run }

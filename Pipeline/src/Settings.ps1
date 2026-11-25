@@ -2,7 +2,20 @@
 # Edits are stored as a sparse overlay in <Root>/config/settings.json; Get-GIConfig merges it over the psd1.
 
 $script:GIDayNames = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
-$script:GIGuestActions = @('VmTools', 'Horizon', 'DEM', 'AppVolumes', 'HorizonRec', 'FSLogix', 'MsTeams', 'OneDrive', 'GoogleDrive')
+# Packages the guest script can maintain, in the order they run. Mask mirrors $SwSet.<Action>.SrcFile in
+# VDI-GoldenImage.ps1 (a test keeps them in sync). AutoDownload: the guest script fetches it from the web when missing.
+$script:GIGuestPackages = [ordered]@{
+    VmTools     = @{ Name = 'VMware Tools';                Mask = 'VMware-tools-*64.exe';                 AutoDownload = $false }
+    Horizon     = @{ Name = 'Horizon Agent';               Mask = '*Horizon-Agent-x86_64-*.exe';          AutoDownload = $false }
+    DEM         = @{ Name = 'Dynamic Environment Manager'; Mask = '*Dynamic*Environment*Manager*x64.msi'; AutoDownload = $false }
+    AppVolumes  = @{ Name = 'App Volumes Agent';           Mask = '*AppVolumes*Agent*.msi';               AutoDownload = $false }
+    HorizonRec  = @{ Name = 'Horizon Recording Agent';     Mask = 'HorizonRecordingAgent-*.exe';          AutoDownload = $false }
+    FSLogix     = @{ Name = 'Microsoft FSLogix Apps';      Mask = 'FSLogix_*.zip';                        AutoDownload = $true }
+    MsTeams     = @{ Name = 'Microsoft Teams for VDI';     Mask = 'teamsbootstrapper.exe';                AutoDownload = $true }
+    OneDrive    = @{ Name = 'Microsoft OneDrive';          Mask = 'OneDriveSetup.exe';                    AutoDownload = $true }
+    GoogleDrive = @{ Name = 'Google Drive';                Mask = 'GoogleDriveSetup.exe';                 AutoDownload = $true }
+}
+$script:GIGuestActions = @($script:GIGuestPackages.Keys)
 $script:GITimePattern = '^([01]\d|2[0-3]):[0-5]\d$'
 
 $script:GISettingsSchema = [ordered]@{
@@ -32,24 +45,34 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
-            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Help = 'API paths differ between App Volumes releases. Must start with /. Default: /app_volumes/sessions. Do not use /cv_api/ paths, they return 404 on 4.x.' }
-            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Help = 'Default: /app_volumes/online_entities' }
-            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/'; Help = 'Default: /app_volumes/app_attachments' }
+            @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'API paths differ between App Volumes releases. Must start with /. Default: /app_volumes/sessions. Test connection tries the other known path on a 404 and tells you which one worked.' }
+            @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'Default: /app_volumes/online_entities' }
+            @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'Default: /app_volumes/app_attachments (not /cv_api/..., which returns 404 on 4.x).' }
         )
     }
     GoldenImage = @{
         Title = 'Golden image'; ConfigPath = 'GoldenImage'; Test = 'GoldenImage'; ReadOnly = $false
-        Description = 'The golden image VM and the actions run inside it.'
+        Description = 'The golden image VM and how the pipeline reaches it. Pick the maintained software under Packages.'
         Fields = @(
-            @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Required = $true }
+            @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Required = $true; Inventory = 'vms'
+               Help = 'Choose from the VMs in vCenter, or type the name if the list does not load.' }
             @{ Key = 'GuestCredentialSecret'; Label = 'Guest administrator'; Type = 'secret'; Help = 'Local administrator inside the golden image.' }
             @{ Key = 'ScriptPathInGuest'; Label = 'Script path in guest'; Type = 'string'; Required = $true }
             @{ Key = 'GuestWorkDir'; Label = 'Guest work folder'; Type = 'string'; Default = 'C:\ProgramData\VDI\Pipeline'; Required = $true }
             @{ Key = 'CopyScript'; Label = 'Copy script into guest before each run'; Type = 'bool'; Default = $true }
-            @{ Key = 'Actions'; Label = 'Actions'; Type = 'list'; ItemValues = $script:GIGuestActions
-               Help = "One per line, run in order with -Unattended after updates. Valid: $($script:GIGuestActions -join ', ')." }
             @{ Key = 'FinalizeAction'; Label = 'Finalize action'; Type = 'enum'; Values = @('Finalize', 'FinalizeFast'); Required = $true }
             @{ Key = 'PowerOffTimeoutMin'; Label = 'Power-off timeout (min)'; Type = 'int'; Min = 5; Max = 600; Required = $true }
+        )
+    }
+    Packages = @{
+        Title = 'Packages'; ConfigPath = 'GoldenImage'; Test = $null; ReadOnly = $false
+        Description = 'The software maintained in the golden image, and whether each installer is on the pipeline host. Ticked packages run in the order shown with -Unattended after Windows Update.'
+        Fields = @(
+            @{ Key = 'InstallerSourceDir'; Label = 'Installer folder on pipeline host'; Type = 'string'
+               Help = 'Optional. Files here are copied into the Install folder next to the guest script before the packages run; unchanged files are skipped. Relative paths resolve from the Pipeline folder. Leave empty if you stage installers in the guest yourself.' }
+            @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = $script:GIGuestActions }
+            @{ Key = 'ActionTimeoutMin'; Label = 'Package timeout (min)'; Type = 'int'; Min = 5; Max = 600; Default = 60; Required = $true
+               Help = 'A package install still running after this long is stopped and its Maintain step fails, instead of blocking the run.' }
         )
     }
     WindowsUpdate = @{
@@ -65,12 +88,12 @@ $script:GISettingsSchema = [ordered]@{
         Title = 'Pools'; ConfigPath = 'Pools'; Test = 'Pools'; ReadOnly = $false
         Description = 'The test pool receives every new snapshot; production pools only after approval.'
         Fields = @(
-            @{ Key = 'Test.Name'; Label = 'Test pool name'; Type = 'string'; Required = $true }
+            @{ Key = 'Test.Name'; Label = 'Test pool name'; Type = 'string'; Required = $true; Inventory = 'pools' }
             @{ Key = 'Test.LogoffPolicy'; Label = 'Test pool logoff policy'; Type = 'enum'; Values = @('FORCE_LOGOFF', 'WAIT_FOR_LOGOFF'); Required = $true; Default = 'FORCE_LOGOFF' }
             @{ Key = 'Production'; Label = 'Production pools'; Type = 'table'; Required = $true; UniqueBy = 'Name'; DistinctFrom = 'Test.Name'
                Help = 'Names must be unique and different from the test pool.'
                Columns = @(
-                   @{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Required = $true }
+                   @{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Required = $true; Inventory = 'pools' }
                    @{ Key = 'LogoffPolicy'; Label = 'Logoff policy'; Type = 'enum'; Values = @('WAIT_FOR_LOGOFF', 'FORCE_LOGOFF'); Required = $true; Default = 'WAIT_FOR_LOGOFF' }
                ) }
             @{ Key = 'PushTimeoutMin'; Label = 'Push timeout (min)'; Type = 'int'; Min = 10; Max = 1440; Required = $true }
@@ -94,13 +117,24 @@ $script:GISettingsSchema = [ordered]@{
     }
     Snapshots = @{
         Title = 'Snapshots'; ConfigPath = 'Snapshots'; Test = $null; ReadOnly = $false
-        Description = 'Snapshot retention on the golden image VM.'
+        Description = 'Snapshot naming and retention on the golden image VM. Retention runs after a production push passes its checks.'
         Fields = @(
-            @{ Key = 'Keep'; Label = 'Snapshots to keep'; Type = 'int'; Min = 1; Max = 50; Required = $true }
+            @{ Key = 'NamePrefix'; Label = 'Snapshot name prefix'; Type = 'string'; Default = 'Baseline'; Pattern = '^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$'
+               Help = "New snapshots are named '<prefix> yy.MM.dd.HHmm', e.g. 'Baseline 26.11.24.0131'. Existing snapshots with this prefix are managed by retention." }
+            @{ Key = 'Mode'; Label = 'Retention mode'; Type = 'enum'; Values = @('Chain', 'Tree'); Default = 'Chain'
+               Help = 'Chain keeps Master > previous Baseline > production Baseline and removes older Baselines under them. Tree never removes a parent of an in-use snapshot, so a straight chain keeps growing.' }
+            @{ Key = 'Keep'; Label = 'Baselines to keep'; Type = 'int'; Min = 1; Max = 50; Required = $true
+               Help = '2 keeps production plus the previous one for rollback. The root (Master) snapshot is never removed and does not count.' }
             @{ Key = 'MaxChainDepth'; Label = 'Maximum chain depth'; Type = 'int'; Min = 2; Max = 31; Required = $true }
-            @{ Key = 'Prune'; Label = 'Delete old snapshots'; Type = 'bool'; Warning = 'When off, retention only reports what it would delete. When on, old snapshots are removed.' }
-            @{ Key = 'ProtectAncestors'; Label = 'Protect ancestors of in-use snapshots'; Type = 'bool'; Confirm = $true
-               Warning = 'Turning this off can delete a parent snapshot that pools still depend on and break them.' }
+            @{ Key = 'Prune'; Label = 'Delete old snapshots'; Type = 'bool'; Warning = 'When off, retention only reports what it would delete. When on, old snapshots are removed and disks consolidated.' }
+            @{ Key = 'CleanupFailedRuns'; Label = 'Clean up after failed runs'; Type = 'bool'; Default = $true
+               Help = "At the start of Maintain: if the golden VM still sits on a failed run's pre-maint snapshot, revert to it first, then remove pre-maint snapshots of failed, rejected or rolled-back runs. When off, Maintain only reports what it would do." }
+            @{ Key = 'ProtectAncestors'; Label = 'Protect ancestors of pending pushes'; Type = 'bool'; Confirm = $true
+               Help = 'Chain mode: keeps every parent of a snapshot a push is still pending for. Tree mode: keeps every parent of any in-use snapshot.'
+               Warning = 'Turning this off can delete a parent snapshot that a pending push depends on.' }
+            @{ Key = 'ConsolidateTimeoutMin'; Label = 'Disk consolidation timeout (min)'; Type = 'int'; Min = 5; Max = 600; Default = 60 }
+            @{ Key = 'MinFreeSpacePercent'; Label = 'Warn below datastore free space (%)'; Type = 'int'; Min = 1; Max = 90; Default = 15
+               Help = 'Checked before each new snapshot. Warning only.' }
         )
     }
     Promotion = @{
@@ -205,7 +239,7 @@ function ConvertTo-GISettingsFieldValue {
             if ([int]::TryParse([string]$Value, [ref]$n)) { return $n }
             return $Value
         }
-        { $_ -in 'list', 'days' } {
+        { $_ -in 'list', 'days', 'packages' } {
             if (-not $Found -or $null -eq $Value) { return , @() }
             return , @(@($Value) | ForEach-Object { [string]$_ })
         }
@@ -263,7 +297,10 @@ function Get-GISettingsSection {
             $values[$f.Key] = @{ Name = (Get-GISettingsAttr $f 'DefaultName' $null); IsSet = $false; UserName = $null; Configured = $false }
         }
     }
-    return @{ Section = $Section; Values = $values }
+    $result = @{ Section = $Section; Values = $values }
+    # The Packages page shows which installers are in the host folder (a local directory read)
+    if ($Section -eq 'Packages') { $result.Installers = Get-GIInstallerStatus -Config $Config }
+    return $result
 }
 
 function Convert-GISettingsScalar {
@@ -317,6 +354,14 @@ function ConvertFrom-GISettingsForm {
                 $items = foreach ($r in @($raw)) { if ($null -ne $r) { ([string]$r) -split ',' } }
                 $values[$key] = @($items | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
             }
+            'packages' {
+                # Checkboxes post one value each; keep catalog order, put unknown names last so validation reports them.
+                $items = @(foreach ($r in @($raw)) { if ($null -ne $r) { ([string]$r) -split ',' } }) | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+                $order = @(Get-GISettingsAttr $f 'ItemValues' @())
+                $known = @($order | Where-Object { $items -ccontains $_ })
+                $unknown = @($items | Where-Object { $order -cnotcontains $_ } | Select-Object -Unique)
+                $values[$key] = @($known + $unknown)
+            }
             'table' {
                 $rx = '^' + [regex]::Escape($key) + '\[(\d+)\]\.(.+)$'
                 $byIndex = @{}
@@ -324,18 +369,29 @@ function ConvertFrom-GISettingsForm {
                     if ([string]$fk -match $rx) { $byIndex[[int]$Matches[1]] = $true }
                 }
                 $rows = [System.Collections.Generic.List[object]]::new()
+                # Dropdowns and checkboxes always post a value, so a spare row's selects don't make it a real row.
+                # A row counts only when a typed column (text, number, time) has a value. Tables with no typed
+                # column fall back to any non-bool value.
+                $typedCols = @($f.Columns | Where-Object { $_.Type -notin 'enum', 'bool' })
                 foreach ($i in ($byIndex.Keys | Sort-Object)) {
+                    $rmKey = "$key[$i]._remove"
+                    if ($Form.Contains($rmKey) -and [string]$Form[$rmKey] -in 'on', 'true', '1') { continue }
                     $row = [ordered]@{}
+                    $rowErrors = @{}
                     $nonEmpty = $false
                     foreach ($c in $f.Columns) {
                         $ck = "$key[$i].$($c.Key)"
                         $cr = if ($Form.Contains($ck)) { $Form[$ck] } else { $null }
                         $conv = Convert-GISettingsScalar $c $cr
-                        if ($conv.Error) { $errors[$ck] = $conv.Error }
+                        if ($conv.Error) { $rowErrors[$ck] = $conv.Error }
                         $row[$c.Key] = $conv.Value
-                        if ($c.Type -ne 'bool' -and $null -ne $conv.Value -and "$($conv.Value)" -ne '') { $nonEmpty = $true }
+                        $counts = if ($typedCols.Count) { $c.Type -notin 'enum', 'bool' } else { $c.Type -ne 'bool' }
+                        if ($counts -and ($conv.Error -or ($null -ne $conv.Value -and "$($conv.Value)" -ne ''))) { $nonEmpty = $true }
                     }
-                    if ($nonEmpty) { $rows.Add($row) }
+                    if ($nonEmpty) {
+                        $rows.Add($row)
+                        foreach ($ek in $rowErrors.Keys) { $errors[$ek] = $rowErrors[$ek] }
+                    }
                 }
                 $values[$key] = @($rows)
             }
@@ -411,7 +467,7 @@ function Test-GISettingsSection {
         if ($requiredIf -and $Values.Contains($requiredIf) -and $Values[$requiredIf] -eq $true) { $required = $true }
 
         switch ($f.Type) {
-            'list' {
+            { $_ -in 'list', 'packages' } {
                 $items = @(@($value) | Where-Object { $null -ne $_ -and ([string]$_).Trim() -ne '' } | ForEach-Object { ([string]$_).Trim() })
                 if ($items.Count -eq 0) {
                     if ($required) { $errors[$key] = 'At least one entry is required.' }
@@ -501,6 +557,51 @@ function Update-GISettingsOverlay {
     return $path
 }
 
+#----- Connection test results (shown as a chip on each global section) -----
+
+function Get-GIConnectionStatePath {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    $dir = if ($Config.Paths.ContainsKey('RootState') -and $Config.Paths.RootState) { $Config.Paths.RootState } else { $Config.Paths.State }
+    Join-Path $dir 'connection-tests.json'
+}
+
+function Get-GIConnectionStatus {
+    <# @{ State = Connected | Failed | NotTested; At } for one global section. Only the result and the time are kept, never the test detail. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Section)
+    $none = @{ State = 'NotTested'; At = $null }
+    $path = Get-GIConnectionStatePath -Config $Config
+    if (-not (Test-Path -LiteralPath $path)) { return $none }
+    try {
+        $all = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if ($all -is [System.Collections.IDictionary] -and $all.Contains($Section) -and $all[$Section] -is [System.Collections.IDictionary]) {
+            $e = $all[$Section]
+            return @{ State = $(if ($e['ok'] -eq $true) { 'Connected' } else { 'Failed' }); At = [string]$e['at'] }
+        }
+    } catch { Write-Verbose "connection-tests.json unreadable: $($_.Exception.Message)" }
+    return $none
+}
+
+function Set-GIConnectionStatus {
+    <# Records a test result for a section, or forgets it (-Clear) when the section's settings changed. Never throws. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Section, [bool]$Ok = $false, [switch]$Clear)
+    try {
+        $path = Get-GIConnectionStatePath -Config $Config
+        $all = @{}
+        if (Test-Path -LiteralPath $path) {
+            try { $r = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop; if ($r -is [System.Collections.IDictionary]) { $all = $r } } catch { $all = @{} }
+        }
+        if ($Clear) { if (-not $all.ContainsKey($Section)) { return }; $null = $all.Remove($Section) }
+        else { $all[$Section] = @{ ok = $Ok; at = (Get-Date).ToString('o') } }
+        $dir = Split-Path -Parent $path
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $tmp = "$path.tmp"
+        ConvertTo-Json -InputObject $all -Depth 4 | Set-Content -LiteralPath $tmp -Encoding utf8
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    } catch { Write-Warning "Could not record the connection test result: $($_.Exception.Message)" }
+}
+
 function Save-GISettingsSection {
     <#
     .SYNOPSIS
@@ -537,6 +638,7 @@ function Save-GISettingsSection {
     if ($set.Count -gt 0) {
         $path = Update-GISettingsOverlay -Config $Config -Set @($set)
         Write-GIAudit -Config $Config -User $By -Action 'settings.save' -Target $Section -Detail @{ changes = @($diff) }
+        Set-GIConnectionStatus -Config $Config -Section $Section -Clear   # new values: the last test no longer applies
     }
     return @{ Section = $Section; Changed = @($diff | ForEach-Object { $_.key }); Path = $path }
 }

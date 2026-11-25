@@ -136,6 +136,32 @@ function ConvertTo-GIReportHtml {
         }
     }
 
+    # Snapshot retention (after production)
+    $ret = Get-GIPropValue $Run 'retention'
+    if ($ret) {
+        [void]$sb.AppendLine("<h2 $h2>Snapshot retention</h2>")
+        [void]$sb.AppendLine("<table $tbl>")
+        $rows = [ordered]@{
+            'Mode'          = Get-GIPropValue $ret 'mode'
+            'Chain now'     = Get-GIPropValue $ret 'chain'
+            'Removed'       = (@(Get-GIPropValue $ret 'removed') -join ', ')
+            'Consolidation' = (@(Get-GIPropValue $ret 'consolidation') -join '; ')
+            'Used before'   = $(if ($null -ne (Get-GIPropValue $ret 'usedGbBefore')) { "$(Get-GIPropValue $ret 'usedGbBefore') GB" })
+            'Used after'    = $(if ($null -ne (Get-GIPropValue $ret 'usedGbAfter')) { "$(Get-GIPropValue $ret 'usedGbAfter') GB" })
+            'Freed'         = $(if ($null -ne (Get-GIPropValue $ret 'freedGb')) { "$(Get-GIPropValue $ret 'freedGb') GB" })
+            'Datastores'    = (@(Get-GIPropValue $ret 'datastores') -join '; ')
+            'Warnings'      = (@(Get-GIPropValue $ret 'warnings') -join ' ')
+            'Errors'        = (@(Get-GIPropValue $ret 'errors') -join ' ')
+        }
+        foreach ($k in $rows.Keys) {
+            $v = [string]$rows[$k]
+            if (-not $v) { continue }
+            $style = if ($k -eq 'Errors') { ' style="color:#b71c1c;"' } else { '' }
+            [void]$sb.AppendLine("<tr><th $th width=`"150`">$k</th><td $td><span$style>$(& $enc $v)</span></td></tr>")
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+
     # Stages
     $stages = Get-GIPropValue $Run 'stages'
     if ($stages) {

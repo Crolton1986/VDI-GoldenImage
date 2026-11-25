@@ -231,7 +231,7 @@ function New-GISetupPage {
             if ((Get-GISetupStatus $State $n) -notin 'done', 'skipped') { $active = $n; break }
         }
     }
-    $body = '<h2>Set up the golden image pipeline</h2>'
+    $body = '<h1>Setup</h1><p class="muted">Set up the golden image pipeline.</p>'
     if ($Notice) { $body += "<div class=""notice"" role=""status"">$(ConvertTo-GIHtml $Notice)</div>" }
     if ($IsComplete) {
         $body += '<div class="banner-ok">Setup is complete.</div><p class="links"><a href="/settings">Settings</a><a href="/">Dashboard</a></p>'

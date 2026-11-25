@@ -1,6 +1,10 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
+    # Page-wide assertions below look at markup only, not the shared page script
+    function Get-GIUiScript { '' }
     . (Join-Path $PSScriptRoot '..' 'Web' 'SettingsViews.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'AdminViews.ps1')
 
     $script:schema = [ordered]@{
         vCenter = @{
@@ -46,7 +50,7 @@ Describe 'Settings layout' {
 Describe 'Settings section page' {
     It 'posts to the section with hidden token' {
         $h = Page
-        $h | Should -Match '<form method="post" action="/settings/vCenter" class="settings-form"><input type="hidden" name="token" value="tok123">'
+        $h | Should -Match '<form method="post" action="/settings/vCenter" class="settings-form" id="settings-form" data-savebar><input type="hidden" name="token" value="tok123">'
     }
     It 'renders string and encodes values' {
         $h = Page
@@ -59,9 +63,11 @@ Describe 'Settings section page' {
     It 'renders bool checkbox, with confirm gate and warning' {
         $h = Page
         $h | Should -Match 'name="Enabled" value="on" checked'
-        $h | Should -Match 'name="AutoPromote" value="on">'
-        $h | Should -Match 'name="confirm_AutoPromote"'
+        $h | Should -Match 'name="AutoPromote" value="on" data-confirm-dialog="dlg-confirm-f_AutoPromote">'
+        $h | Should -Match 'name="confirm_AutoPromote"'   # the no-JS fallback stays in the page
         $h | Should -Match 'Promotes without approval'
+        $h | Should -Match '<div class="confirmbox">'
+        $h | Should -Match 'id="dlg-confirm-f_AutoPromote".*?Change Auto promote\?.*?Promotes without approval.*?data-confirm data-confirm-yes'
     }
     It 'renders list textarea one per line' { (Page) | Should -Match '(?s)<textarea[^>]*name="Hosts"[^>]*>h1\nh2</textarea>' }
     It 'renders enum select with selection' { (Page) | Should -Match '<option value="Force" selected>' }
@@ -96,7 +102,8 @@ Describe 'Settings section page' {
         $h | Should -Match 'type="password"[^>]*value=""[^>]*autocomplete="new-password"'
         $h | Should -Match 'name="username" value="svc&quot;&lt;u&gt;"'
         $h | Should -Match 'badge st-ok">set<'
-        $h | Should -Not -Match '\sdisabled[\s>]'
+        # The save bar starts with disabled buttons (nothing changed yet); no form field or credential control is disabled
+        ($h -replace '(?s)<div class="savebar".*?</div></div>', '') | Should -Not -Match '\sdisabled[\s>]'
     }
     It 'disables credential entry when not https' {
         $h = Page -https $false
@@ -124,100 +131,137 @@ Describe 'Settings section page' {
     }
 }
 
-Describe 'Run control page' {
+Describe 'Packages field' {
     BeforeAll {
-        $script:runs = @(1..25 | ForEach-Object { [pscustomobject]@{ runId = ('20261101-0000{0:00}' -f $_); status = 'Succeeded' } })
-        $script:stages = @('Preflight', 'Maintain', 'Validate')
-        function script:RC($lock = $null, $pending = $null) {
-            New-GIRunControlPage -Runs $script:runs -Lock $lock -PendingRequest $pending -Token 'tok' -Stages $script:stages -TestPool 'TST-W11' -ProdPools @('PRD-W11') -LastKnownGood 'GI-<lkg>'
-        }
+        $script:pf = @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = @('VmTools', 'Horizon', 'MsTeams', 'DEM') }
+        $script:inst = [pscustomobject]@{ Folder = 'D:\Inst'; FolderError = $null; Packages = @(
+                [pscustomobject]@{ Action = 'VmTools'; Name = 'VMware Tools'; Mask = 'VMware-tools-*64.exe'; Selected = $true; State = 'Found'; File = 'VMware-tools-12.5.0-x86_64.exe'; Version = '12.5.0'; SizeMB = 110.2; Modified = [datetime]'2026-11-01' }
+                [pscustomobject]@{ Action = 'Horizon'; Name = 'Horizon Agent'; Mask = '*Horizon-Agent-x86_64-*.exe'; Selected = $true; State = 'Missing'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+                [pscustomobject]@{ Action = 'MsTeams'; Name = 'Microsoft Teams for VDI'; Mask = 'teamsbootstrapper.exe'; Selected = $false; State = 'Download'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+                [pscustomobject]@{ Action = 'DEM'; Name = 'Dynamic Environment Manager'; Mask = '*.msi'; Selected = $false; State = 'Missing'; File = ''; Version = ''; SizeMB = $null; Modified = $null }
+            ) }
     }
-    It 'is idle and enabled without a lock' {
-        $h = RC
-        $h | Should -Match '<strong>Idle</strong>'
-        $h | Should -Not -Match '\sdisabled[\s>]'
-        $h | Should -Match 'action="/run/start"'
-        $h | Should -Match 'name="action" value="All"'
-        $h | Should -Match 'No stop button|no stop button'
-        $h | Should -Match 'VDI-GI-Runner'
+    It 'ticks the selected packages, one checkbox per package, all named after the field' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools', 'Horizon') -Installers $inst
+        ([regex]::Matches($h, 'type="checkbox" id="pkg_\w+" name="Actions"')).Count | Should -Be 4
+        $h | Should -Match 'id="pkg_VmTools" name="Actions" value="VmTools" data-pkg-name="VMware Tools" checked'
+        $h | Should -Not -Match 'value="MsTeams" checked'
     }
-    It 'limits run list to newest 20' {
-        $h = RC
-        ([regex]::Matches($h, '<option value="20261101-')).Count | Should -Be 20
-        $h | Should -Match '20261101-000025 \(Succeeded\)'
-        $h | Should -Not -Match '20261101-000001 '
+    It 'shows the host file and a status badge per package' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools', 'Horizon') -Installers $inst
+        $h | Should -Match 'VMware-tools-12\.5\.0-x86_64\.exe'
+        $h | Should -Match 'v12\.5\.0, 110\.2 MB, 2026-11-01'
+        $h | Should -Match 'chip bad">Missing'
+        $h | Should -Match 'chip idle">Missing'
+        $h | Should -Match 'chip ok">Found'
+        $h | Should -Match 'chip idle">Downloads automatically'
+        $h | Should -Match '1 ticked package\(s\) have no installer'
     }
-    It 'is busy and disabled with an active lock' {
-        $h = RC ([pscustomobject]@{ stage = 'Maintain'; runId = 'R<1>'; requestedBy = 'D\x'; startedAt = '2026-11-24T10:00:00'; stale = $false })
-        $h | Should -Match '<strong>Busy</strong>'
-        $h | Should -Match 'R&lt;1&gt;'
-        $h | Should -Match '\sdisabled[\s>]'
-        ([regex]::Matches($h, '<button type="submit"[^>]*disabled')).Count | Should -BeGreaterOrEqual 4
+    It 'renders only checkboxes without installer data' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools')
+        $h | Should -Not -Match 'Installer on host'
+        $h | Should -Not -Match 'badge'
     }
-    It 'is enabled with a stale lock' {
-        $h = RC ([pscustomobject]@{ stage = 'Maintain'; runId = 'R1'; requestedBy = 'x'; startedAt = '2026-11-24T10:00:00'; stale = $true })
-        $h | Should -Match 'Stale lock'
-        $h | Should -Not -Match '\sdisabled[\s>]'
+    It 'explains when no installer folder is set' {
+        $noFolder = [pscustomobject]@{ Folder = ''; FolderError = $null; Packages = @() }
+        Get-GIPackagesFieldHtml -Field $pf -Value @() -Installers $noFolder | Should -Match 'No installer folder set'
     }
-    It 'shows queued request and disables' {
-        $h = RC $null ([pscustomobject]@{ action = 'All'; requestedBy = 'x'; requestedAt = '2026-11-24T10:00:00' })
-        $h | Should -Match 'Queued, waiting for the runner'
-        $h | Should -Match 'action="/run/cancel-request"'
-        $h | Should -Match 'Cancel queued request'
-        $h | Should -Match '\sdisabled[\s>]'
+    It 'is rendered by the section page from SectionData.Installers' {
+        $sch = [ordered]@{ Packages = @{ Title = 'Packages'; ConfigPath = 'GoldenImage'; Test = $null; ReadOnly = $false; Fields = @($pf) } }
+        $h = New-GISettingsSectionPage -Schema $sch -SectionKey 'Packages' -SectionData @{ Values = @{ Actions = @('Horizon') }; Installers = $inst } -Token 't'
+        $h | Should -Match 'value="Horizon" data-pkg-name="Horizon Agent" checked'
+        $h | Should -Match 'Installer on host'
     }
-    It 'has modes and rollback form with confirmPool' {
-        $h = RC
-        $h | Should -Match 'name="action" value="FromStage"'
-        $h | Should -Match 'name="action" value="Stage"'
-        $h | Should -Match 'name="action" value="PostCheck"'
-        $h | Should -Match 'action="/run/rollback"'
-        $h | Should -Match 'name="confirmPool"'
-        $h | Should -Match 'name="forceLogoff"'
-        $h | Should -Match 'Ends active sessions on that pool'
-        $h | Should -Match 'GI-&lt;lkg&gt;'
-        $h | Should -Match '<option value="PRD-W11">'
-        $h | Should -Match '<option value="TST-W11">'
+    It 'says how many steps the ticked packages add, and updates the line when one is ticked' {
+        $h = Get-GIPackagesFieldHtml -Field $pf -Value @('VmTools', 'Horizon') -Installers $inst
+        $h | Should -Match 'id="pkg-steps" role="status" aria-live="polite">2 packages ticked: the run gets 2 install steps after Windows Update\.'
+        $h | Should -Match "Ticking '\+nm\+' adds 1 step \(Install '\+nm\+'\)"
+        (Get-GIPackageStepsText -Count 1) | Should -Be '1 package ticked: the run gets 1 install step after Windows Update.'
+        (Get-GIPackageStepsText -Count 0) | Should -Match '^No packages ticked'
     }
-    It 'every form carries the token' {
-        $h = RC
-        ([regex]::Matches($h, '<form ')).Count | Should -Be ([regex]::Matches($h, 'name="token" value="tok"')).Count
+    It 'offers Check again only when it knows where the page lives, and encodes the link' {
+        (Get-GIPackagesFieldHtml -Field $pf -Value @() -Installers $inst -RecheckHref '/images/a"b/settings/Packages') | Should -Match '<a class="linkbtn" href="/images/a&quot;b/settings/Packages">Check again</a>'
+        (Get-GIPackagesFieldHtml -Field $pf -Value @() -Installers $inst) | Should -Not -Match 'Check again'
+        (Get-GIPackagesFieldHtml -Field $pf -Value @()) | Should -Not -Match 'Check again'
+        $sch = [ordered]@{ Packages = @{ Title = 'Packages'; ConfigPath = 'GoldenImage'; Test = $null; ReadOnly = $false; Fields = @($pf) } }
+        (New-GISettingsSectionPage -Schema $sch -SectionKey 'Packages' -SectionData @{ Values = @{ Actions = @() }; Installers = $inst } -FormAction '/images/w11/settings/Packages' -BodyOnly) | Should -Match 'href="/images/w11/settings/Packages">Check again'
     }
 }
 
-Describe 'Audit page' {
-    It 'renders rows, diff lines and encodes' {
-        $e = @(
-            [pscustomobject]@{ at = '2026-11-24T10:00:00'; user = 'D\<a>'; action = 'settings.save'; target = 'vCenter'
-                detail = [pscustomobject]@{ changes = [pscustomobject]@{ Server = [pscustomobject]@{ old = 'a'; new = 'b<c' } } } },
-            @{ at = '2026-11-24T11:00:00'; user = 'u'; action = 'run.request'; target = 'All'; detail = @{ stage = 'Validate' } }
-        )
-        $h = New-GIAuditPage -Entries $e
-        $h | Should -Match 'Server: a -&gt; b&lt;c'
-        $h | Should -Match 'stage: Validate'
-        $h | Should -Match 'D\\&lt;a&gt;'
-        $h | Should -Match 'settings.save'
+
+Describe 'Inventory pickers (gap 9)' {
+    BeforeAll {
+        $script:isch = [ordered]@{ GoldenImage = @{ Title = 'Guest VM'; ConfigPath = 'GoldenImage'; Test = 'GoldenImage'; ReadOnly = $false; Fields = @(
+                    @{ Key = 'VmName'; Label = 'VM name'; Type = 'string'; Inventory = 'vms' }
+                    @{ Key = 'Prod'; Label = 'Production'; Type = 'table'; Columns = @(@{ Key = 'Name'; Label = 'Pool name'; Type = 'string'; Inventory = 'pools' }, @{ Key = 'Policy'; Label = 'Policy'; Type = 'string' }) }) } }
+        $script:idata = @{ Values = @{ VmName = 'GI-<W11>'; Prod = @(@{ Name = 'PRD-1'; Policy = 'x' }) } }
     }
-    It 'handles empty' { (New-GIAuditPage -Entries @()) | Should -Match 'No audit entries' }
+    It 'keeps the text input as the field and adds a hidden select next to it (typed fallback)' {
+        $h = New-GISettingsSectionPage -Schema $isch -SectionKey GoldenImage -SectionData $idata -Token t -BodyOnly -ImageName 'Win11 "A"'
+        $h | Should -Match '<input type="text" id="f_VmName" name="VmName" value="GI-&lt;W11&gt;" data-inv="vms"><select class="invpick" data-inv-pick="vms" hidden aria-label="VM name, choose from vCenter">'
+        $h | Should -Match 'name="Prod\[0\]\.Name" value="PRD-1"[^>]*data-inv="pools"><select class="invpick" data-inv-pick="pools" hidden'
+        ([regex]::Matches($h, 'data-inv-pick="pools"')).Count | Should -Be 3   # one per table row, two of them blank
+        $h | Should -Match 'data-image-name="Win11 &quot;A&quot;"'
+        $h | Should -Match 'id="inv-status" role="status" aria-live="polite"'
+        $h | Should -Match "fetch|getJson\('/api/inventory'\)"
+        $h | Should -Match 'op\.disabled=true|\{op\.disabled=true\}'
+    }
+    It 'adds no picker script for a section without inventory fields, nor for a read-only (Viewer) page' {
+        (New-GISettingsSectionPage -Schema $schema -SectionKey vCenter -SectionData $data -Token t -BodyOnly) | Should -Not -Match 'inv-status'
+        (New-GISettingsSectionPage -Schema $isch -SectionKey GoldenImage -SectionData $idata -Token t -BodyOnly -Disabled) | Should -Not -Match 'getJson\('
+    }
+    It 'uses no external script or hex colour' {
+        $h = New-GISettingsSectionPage -Schema $isch -SectionKey GoldenImage -SectionData $idata -Token t -BodyOnly
+        $h | Should -Not -Match '<script[^>]+src='
+        $h | Should -Not -Match '#[0-9a-fA-F]{6}\b'
+    }
 }
 
-Describe 'Run actions' {
-    It 'Failed shows retry and rerun' {
-        $h = New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = '20261124-213005'; status = 'Failed'; currentStage = 'Validate' }) -Token 'tk'
-        $h | Should -Match 'Retry from Validate'
-        $h | Should -Match 'Re-run Validate only'
-        $h | Should -Match 'value="FromStage"'
-        $h | Should -Match 'name="runId" value="20261124-213005"'
-        $h | Should -Match 'name="token" value="tk"'
-        $h | Should -Not -Match '\sdisabled[\s>]'
+Describe 'Advanced group and connection chip (gap 10)' {
+    BeforeAll {
+        $script:asch = [ordered]@{ AppVolumes = @{ Title = 'App Volumes'; ConfigPath = 'AppVolumes'; Test = 'AppVolumes'; ReadOnly = $false; Fields = @(
+                    @{ Key = 'Server'; Label = 'Manager'; Type = 'string' }
+                    @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced' }
+                    @{ Key = 'Endpoints.Attachments'; Label = 'Attachments endpoint'; Type = 'string'; Group = 'Advanced' }) } }
+        $script:adata = @{ Values = @{ Server = 'av1'; 'Endpoints.Session' = '/a'; 'Endpoints.Attachments' = '/b' } }
     }
-    It 'Scheduled shows PostCheck' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Scheduled' }) -Token 't') | Should -Match 'value="PostCheck"'
+    It 'collapses grouped fields into one closed details block after the other fields' {
+        $h = New-GISettingsSectionPage -Schema $asch -SectionKey AppVolumes -SectionData $adata -Token t -BodyOnly
+        $h | Should -Match '<details class="advanced"><summary>Advanced</summary>.*Session endpoint.*Attachments endpoint.*</details></form>'
+        ([regex]::Matches($h, '<details')).Count | Should -Be 1
+        $h.IndexOf('Manager') | Should -BeLessThan $h.IndexOf('<details')
+        $h.IndexOf('Session endpoint') | Should -BeGreaterThan $h.IndexOf('<details')
     }
-    It 'other statuses return empty' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Succeeded' }) -Token 't') | Should -Be ''
+    It 'opens the group when one of its fields has an error' {
+        $h = New-GISettingsSectionPage -Schema $asch -SectionKey AppVolumes -SectionData $adata -Token t -BodyOnly -Errors @{ 'Endpoints.Session' = 'Must start with /' }
+        $h | Should -Match '<details class="advanced" open>'
+        $h | Should -Match 'Must start with /'
     }
-    It 'disables when busy' {
-        (New-GIRunActionsHtml -Run ([pscustomobject]@{ runId = 'r'; status = 'Failed'; currentStage = 'X' }) -Token 't' -Busy $true) | Should -Match '\sdisabled[\s>]'
+    It 'shows the connection state beside the title in words' {
+        (New-GIConnectionChipHtml -State NotTested) | Should -Match 'chip idle" data-conn-chip>Not tested</span>'
+        (New-GIConnectionChipHtml -State Connected -At '2026-11-25T10:30:00+00:00') | Should -Match 'chip ok" data-conn-chip>Connected</span>.*Tested 2026-11-25'
+        (New-GIConnectionChipHtml -State Failed -At 'garbage') | Should -Match 'chip bad" data-conn-chip>Failed</span> <span class="muted small" data-conn-time></span>'
+        $h = New-GISettingsSectionPage -Schema $asch -SectionKey AppVolumes -SectionData $adata -Token t -BodyOnly -StatusHtml (New-GIConnectionChipHtml -State NotTested)
+        $h | Should -Match '<h2>App Volumes <span class="conn">'
+    }
+    It 'points the test button at the image endpoint when given an image id, and escapes it' {
+        (New-GITestConnectionCard -Section Pools -ImageId 'w11-gi-01') | Should -Match 'data-test-section="Pools" data-test-url="/api/images/w11-gi-01/settings/Pools/test"'
+        (New-GITestConnectionCard -Section vCenter) | Should -Not -Match 'data-test-url'
+        (Get-Content (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1') -Raw) | Should -Match "getAttribute\('data-test-url'\)"
+    }
+}
+
+Describe 'Confirm dialog script (gap 11)' {
+    BeforeAll { $script:ui = Get-Content (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1') -Raw }
+    It 'asks in a dialog when a confirm checkbox changes, ticks the hidden box and submits' {
+        $ui | Should -Match "input\[data-confirm-dialog\]"
+        $ui | Should -Match "e\.preventDefault\(\);var bd=d\.getElementById\(c\.getAttribute\('data-confirm-dialog'\)\)"
+        $ui | Should -Match "cf\.checked=true"
+        $ui | Should -Match "f\.requestSubmit"
+        $ui | Should -Match "\.confirmbox'\)\.forEach\(function\(x\)\{x\.hidden=true\}"
+    }
+    It 'has no external script and no hex colour' {
+        $ui | Should -Not -Match '<script[^>]+src='
+        (($ui -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n") | Should -Not -Match '#[0-9a-fA-F]{6}\b'
     }
 }

@@ -3,7 +3,6 @@
 $script:GIRequestActions = @('All', 'FromStage', 'Stage', 'PostCheck', 'Rollback')
 $script:GIRunnableStages = @('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate')
 $script:GIRunnerTaskName = 'VDI-GI-Runner'
-$script:GIPipelineTaskName = 'VDI-GI-Pipeline'
 
 #----- Lock -----
 
@@ -110,6 +109,74 @@ function Exit-GIPipelineLock {
     }
 }
 
+#----- Stopping a run -----
+
+function Get-GIStopFlagPath { param([hashtable] $Config, [string] $RunId) Join-Path $Config.Paths.State "$RunId.stop" }
+
+function Assert-GIRunNotStopped {
+    <# Called from the long waits. Throws when an admin asked this run to stop, so the stage fails cleanly. #>
+    param([hashtable] $Config, $Run)
+    if (-not $Config -or -not $Run) { return }
+    $flag = Get-GIStopFlagPath -Config $Config -RunId ([string]$Run.runId)
+    if (Test-Path -LiteralPath $flag) {
+        $by = try { (Get-Content -LiteralPath $flag -Raw -ErrorAction Stop).Trim() } catch { 'an admin' }
+        throw "Run stopped by $by."
+    }
+}
+
+function Stop-GIRun {
+    <#
+    .SYNOPSIS
+      Admin stop for a Running run. Asks the runner to stop (flag file the waits check), ends the runner
+      process if it is still there after a short grace period (or is hung), then marks the run Failed and
+      frees the lock. With no live runner (crashed, killed, host rebooted) it just marks the run Failed.
+      A stopped run can be retried from the failed step. Returns @{ Stopped; RunnerKilled; Detail }.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $RunId,
+        [Parameter(Mandatory)] [string] $By,
+        [int] $GraceSeconds = 15
+    )
+    $run = Get-GIRun -Config $Config -RunId $RunId
+    if ($run.status -ne 'Running') { throw "Run $RunId is $($run.status), not running." }
+    if (-not $PSCmdlet.ShouldProcess($RunId, 'Stop run')) { return }
+
+    $flag = Get-GIStopFlagPath -Config $Config -RunId $RunId
+    $killed = $false
+    $lock = Get-GIPipelineLock -Config $Config
+    $mine = $lock -and ([string]$lock.runId -eq $RunId -or -not $lock.runId)
+    if ($mine -and -not $lock.stale -and ([string]$lock.host) -eq [Environment]::MachineName -and [int]$lock.pid -gt 0) {
+        Set-Content -LiteralPath $flag -Value $By -Encoding UTF8
+        $deadline = (Get-Date).AddSeconds($GraceSeconds)
+        while ((Test-GIProcessAlive -ProcessId ([int]$lock.pid)) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (Test-GIProcessAlive -ProcessId ([int]$lock.pid)) {
+            # Hung (for example inside a REST call): end it, and the child processes it started
+            try { Stop-Process -Id ([int]$lock.pid) -Force -ErrorAction Stop; $killed = $true } catch { Write-Warning "Could not end runner pid $($lock.pid): $($_.Exception.Message)" }
+        }
+    }
+
+    # The runner may have marked the run Failed itself on the way out; only mark it if it is still Running
+    $run = Get-GIRun -Config $Config -RunId $RunId
+    if ($run.status -eq 'Running') {
+        $stage = [string]$run.currentStage
+        $msg = "Stopped by $By."
+        if ($stage -and $run.stages.$stage -and $run.stages.$stage.status -eq 'Running') {
+            Set-GIStage -Config $Config -Run $run -Stage $stage -Status Failed -Message $msg
+        } else {
+            $run.status = 'Failed'; $run.error = $msg
+        }
+        $run.progress = ''
+        Save-GIRun -Config $Config -Run $run
+        Write-GILog -Config $Config -RunId $RunId -Message "Run stopped by $By$(if ($killed) { ' (runner process ended)' })." -Level Warn
+    }
+    if ($mine) { Remove-Item -LiteralPath (Get-GILockPath $Config) -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue
+    Write-GIAudit -Config $Config -User $By -Action 'run.stop' -Target $RunId -Detail @{ runnerKilled = $killed; stage = [string]$run.currentStage }
+    return @{ Stopped = $true; RunnerKilled = $killed; Detail = "Run $RunId stopped." }
+}
+
 #----- Run requests -----
 
 function Get-GIRequestPath { param([hashtable] $Config) Join-Path $Config.Paths.State 'run-request.json' }
@@ -142,7 +209,15 @@ function Assert-GIRunRequest {
         if ($script:GIRunnableStages -notcontains $stage) { throw "Stage '$stage' can't be started from a request." }
         $runId = [string](& $get 'runId')
         if ($runId -notmatch '^\d{8}-\d{6}$') { throw "Invalid run id '$runId'." }
-        if (-not (Test-Path -LiteralPath (Join-Path $Config.Paths.State "$runId.json"))) { throw "Run $runId not found." }
+        $runPath = Join-Path $Config.Paths.State "$runId.json"
+        if (-not (Test-Path -LiteralPath $runPath)) { throw "Run $runId not found." }
+        $step = [string](& $get 'step')
+        if ($step) {
+            if ($stage -ne 'Maintain') { throw "A step can only be given for the Maintain stage." }
+            if ($step -notmatch '^[A-Za-z]+(:[A-Za-z]+)?$') { throw "Invalid step '$step'." }
+            $known = @(Get-GIStepList -Run (Get-GIRun -Config $Config -RunId $runId) | ForEach-Object { [string]$_.id })
+            if ($known -cnotcontains $step) { throw "Run $runId has no Maintain step '$step'." }
+        }
     }
     if ($action -eq 'Rollback') {
         $pool = [string](& $get 'pool')
@@ -158,6 +233,7 @@ function New-GIRunRequest {
         [Parameter(Mandatory)] [hashtable] $Config,
         [Parameter(Mandatory)] [ValidateSet('All', 'FromStage', 'Stage', 'PostCheck', 'Rollback')] [string] $Action,
         [string] $Stage,
+        [string] $Step,
         [string] $RunId,
         [string] $Pool,
         [string] $SnapshotName,
@@ -167,6 +243,7 @@ function New-GIRunRequest {
     $req = [ordered]@{
         id = [guid]::NewGuid().ToString(); action = $Action
         stage = if ($Stage) { $Stage } else { $null }
+        step = if ($Step) { $Step } else { $null }
         runId = if ($RunId) { $RunId } else { $null }
         pool = if ($Pool) { $Pool } else { $null }
         snapshotName = if ($SnapshotName) { $SnapshotName.Trim() } else { $null }
@@ -226,30 +303,213 @@ function Start-GIRunnerTask {
     }
 }
 
+function Start-GIRunnerProcess {
+    <#
+    .SYNOPSIS
+      Local (-LocalAdmin) runs: starts Invoke-GIPipeline.ps1 -FromRequest as a separate pwsh process
+      under the current user instead of the VDI-GI-Runner scheduled task. Output goes to
+      <Paths.Logs>/runner-<timestamp>.log. Returns @{ Pid; Log; Error } (Error set when it died right away).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath)
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-GIPipeline.ps1'
+    $pwsh = (Get-Process -Id $PID).Path
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-GIProcessArgument $script), '-FromRequest')
+    if ($ConfigPath) { $argList += @('-ConfigPath', (ConvertTo-GIProcessArgument $ConfigPath)) }
+    $logDir = [string]$Config.Paths.Logs
+    if (-not (Test-Path -LiteralPath $logDir)) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+    $log = Join-Path $logDir ("runner-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    if (-not $PSCmdlet.ShouldProcess($script, 'Start pipeline runner process')) { return }
+    $sp = @{ FilePath = $pwsh; ArgumentList = $argList; PassThru = $true; RedirectStandardOutput = $log; RedirectStandardError = "$log.err" }
+    if ($IsWindows) { $sp.WindowStyle = 'Hidden' }
+    $proc = Start-Process @sp
+    $result = @{ Pid = $proc.Id; Log = $log; Error = $null }
+    # Exit 0 or 3 (pipeline busy / nothing to do) right away is normal; anything else is a startup failure
+    if ($proc.WaitForExit(3000) -and $proc.ExitCode -notin 0, 3) {
+        $err = ''
+        foreach ($f in "$log.err", $log) {
+            if (Test-Path -LiteralPath $f) { $err = ((Get-Content -LiteralPath $f -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim(); if ($err) { break } }
+        }
+        $result.Error = if ($err) { $err } else { "exit code $($proc.ExitCode)" }
+    }
+    return $result
+}
+
+function Start-GIQueuedRun {
+    <#
+    .SYNOPSIS
+      Starts whatever picks up the queued request: a local process with -LocalAdmin, otherwise the
+      VDI-GI-Runner scheduled task. Returns the notice code for /run: started, queued, norunner or runfailed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ConfigPath, [switch] $Local)
+    if ($Local) {
+        try {
+            $r = Start-GIRunnerProcess -Config $Config -ConfigPath $ConfigPath
+            if ($r.Error) { Write-Warning "Runner process stopped right away: $($r.Error) (log: $($r.Log).err)"; return 'runfailed' }
+            return 'started'
+        } catch {
+            Write-Warning "Could not start the runner process: $($_.Exception.Message)"
+            return 'runfailed'
+        }
+    }
+    try { Start-GIRunnerTask; return 'queued' } catch { return 'norunner' }
+}
+
 function Set-GIPipelineScheduleTask {
     <#
     .SYNOPSIS
-      Points the weekly VDI-GI-Pipeline task at Promotion.PipelineSchedule (Day, Time). Returns @{ ok; detail }.
+      Points one image's weekly task (VDI-GI-Pipeline-<id>) at its Promotion.PipelineSchedule (Day, Time).
+      -Config is the image's own config (Get-GIImageConfig), or the root config together with -ImageId.
+      Returns @{ ok; code; detail }, code being updated, missing (that image has no task yet), failed or notwindows.
+      It never creates a task: that needs the account's password (Register-GIPipelineTasks.ps1 or the Setup page).
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)] [hashtable] $Config)
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ImageId)
+    if (-not $ImageId -and $Config.ContainsKey('ImageId')) { $ImageId = [string]$Config.ImageId }
+    if ($ImageId -and -not $Config.ContainsKey('ImageId')) { $Config = Get-GIImageConfig -Config $Config -ImageId $ImageId }
+    $name = Get-GIPipelineTaskName -ImageId $ImageId
     $day  = Get-GIConfigValue $Config 'Promotion.PipelineSchedule.Day' 'Tuesday'
     $time = Get-GIConfigValue $Config 'Promotion.PipelineSchedule.Time' '20:00'
-    if (-not $IsWindows) { return @{ ok = $false; detail = 'Scheduled tasks are only available on Windows; settings saved, task not changed.' } }
+    if (-not (Test-GIIsWindows)) { return @{ ok = $false; code = 'notwindows'; detail = 'Scheduled tasks are only available on Windows; settings saved, task not changed.' } }
     try {
-        $task = Get-ScheduledTask -TaskName $script:GIPipelineTaskName -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $task) {
+            return @{ ok = $false; code = 'missing'; detail = "Settings saved, but there is no scheduled task '$name' yet. Run Register-GIPipelineTasks.ps1 as administrator (or the Tasks step on the Setup page) to create it." }
+        }
         $at = [datetime]::ParseExact($time, 'HH:mm', [cultureinfo]::InvariantCulture)
         $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $day -At $at
         if ($PSCmdlet.ShouldProcess($task.TaskName, "Set weekly trigger $day $time")) {
             Set-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Trigger $trigger -ErrorAction Stop | Out-Null
         }
-        return @{ ok = $true; detail = "Weekly run now $day at $time." }
+        return @{ ok = $true; code = 'updated'; detail = "Weekly run of '$name' is now $day at $time." }
     } catch {
-        return @{ ok = $false; detail = "Settings saved, but the scheduled task wasn't updated: $($_.Exception.Message)" }
+        return @{ ok = $false; code = 'failed'; detail = "Settings saved, but the scheduled task wasn't updated: $($_.Exception.Message)" }
     }
 }
 
+function Update-GIImageScheduleTask {
+    <#
+    .SYNOPSIS
+      After an image's settings were saved: when its schedule (Day or Time) changed, moves its weekly task and writes
+      schedule.task to the audit log. Returns the Set-GIPipelineScheduleTask result, or $null when the schedule did not change.
+      -Runner (tests) replaces Set-GIPipelineScheduleTask; it gets the root config and the image id.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $ImageId,
+        [string[]] $Changed = @(),
+        [string] $User = 'unknown',
+        [string] $Role = 'Admin',
+        [scriptblock] $Runner
+    )
+    if (-not (@($Changed) | Where-Object { $_ -in 'PipelineSchedule.Day', 'PipelineSchedule.Time' })) { return $null }
+    $res = if ($Runner) { & $Runner $Config $ImageId } else { Set-GIPipelineScheduleTask -Config $Config -ImageId $ImageId }
+    Write-GIAudit -Config $Config -User $User -Role $Role -Action 'schedule.task' -Target (Get-GIPipelineTaskName -ImageId $ImageId) -Image $ImageId `
+        -Detail @{ image = $ImageId; code = [string]$res.code; message = [string]$res.detail } -Result $(if ($res.ok) { 'OK' } else { 'Failed' })
+    return $res
+}
+
 #----- Connection tests -----
+
+function Test-GITcpPort {
+    <#
+    .SYNOPSIS
+      True when a TCP connection to Server:Port opens within TimeoutMs. Never throws.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)] [string] $Server, [int] $Port = 443, [int] $TimeoutMs = 5000)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($Server, $Port)
+        return ($task.Wait($TimeoutMs) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Connect-GITestVIServer {
+    <#
+    .SYNOPSIS
+      Connect-VIServer for connection tests: fails fast when vCenter isn't reachable on 443 and caps
+      PowerCLI's web operation timeout. The cap leaves room for an MFA push (Duo times out at about
+      60 seconds); a denied or unanswered push comes back as a login error, not a hang.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $server = [string]$Config.vCenter.Server
+    if (-not $server) { throw 'vCenter.Server is empty.' }
+    $cred = Get-GISecretCredential -Name $Config.vCenter.CredentialSecret
+    if (-not (Test-GITcpPort -Server $server -Port 443 -TimeoutMs 5000)) {
+        throw "Can't reach $server on port 443 within 5 seconds (DNS, firewall or proxy)."
+    }
+    try { Set-PowerCLIConfiguration -Scope Session -WebOperationTimeoutSeconds 90 -Confirm:$false -ErrorAction Stop | Out-Null }
+    catch { Write-Verbose "Could not set the PowerCLI web operation timeout: $($_.Exception.Message)" }
+    try {
+        Connect-VIServer -Server $server -Credential $cred -ErrorAction Stop
+    } catch {
+        $m = $_.Exception.Message
+        if ($m -match '(?i)incorrect user name or password|cannot complete login|authentication|denied|timed? ?out|timeout') {
+            throw "vCenter login for $($cred.UserName) failed: $m If this account is behind Duo or another MFA push, the push was denied or not answered in time. Approve it and test again; for scheduled runs, exempt the service account from MFA."
+        }
+        throw
+    }
+}
+
+function Invoke-GIConnectionTest {
+    <#
+    .SYNOPSIS
+      Runs Test-GIConnection in a separate PowerShell process with a hard time limit, so a hung
+      Connect-VIServer, a locked SecretStore prompt or a slow PowerCLI load can't block the web
+      server. Returns @{ ok; detail; seconds }. Never throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [string] $ConfigPath,
+        [Parameter(Mandatory)] [ValidateSet('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Pools', 'Email')] [string] $System,
+        [int] $TimeoutSeconds = 120,
+        [hashtable] $Overrides = @{},  # unsaved form values merged over the config for this test only
+        [string] $ImageId = ''         # test the flat config of this golden image (Guest VM and Pools tests)
+    )
+    $manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'VDI-GIPipeline.psd1'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $job = $null
+    try {
+        $job = Start-Job -ArgumentList $manifest, $ConfigPath, $System, $Overrides, $ImageId -ScriptBlock {
+            param($m, $cp, $sys, $ov, $img)
+            $ProgressPreference = 'SilentlyContinue'
+            Import-Module $m -Force -ErrorAction Stop
+            $a = @{}
+            if ($cp) { $a.Path = $cp }
+            $cfg = Get-GIConfig @a
+            if ($img) { $cfg = Get-GIImageConfig -Config $cfg -ImageId $img }
+            if ($ov -and $ov.Count) { $cfg = Merge-GIHashtable -Base $cfg -Overlay $ov }
+            $r = Test-GIConnection -Config $cfg -System $sys
+            [pscustomobject]@{ ok = [bool]$r.ok; detail = [string]$r.detail }
+        }
+        $done = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        if (-not $done) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            return @{ ok = $false; seconds = [int]$sw.Elapsed.TotalSeconds
+                detail = "No answer after $TimeoutSeconds seconds; the test was stopped. Likely causes: an MFA (Duo) push that wasn't approved, the server is slow or unreachable, the SecretStore vault is locked and waiting for a password (Unlock-SecretStore / Set-SecretStoreConfiguration -Authentication None for the service account), or PowerCLI is waiting on a certificate or CEIP prompt (run the PowerCLI setup step)." }
+        }
+        $out = @(Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErr)
+        $res = $out | Where-Object { $null -ne $_.PSObject.Properties['ok'] } | Select-Object -Last 1
+        if (-not $res) {
+            $msg = if ($jobErr) { [string]$jobErr[0] } elseif ($job.ChildJobs[0].JobStateInfo.Reason) { $job.ChildJobs[0].JobStateInfo.Reason.Message } else { 'The test process ended without a result.' }
+            return @{ ok = $false; detail = $msg; seconds = [int]$sw.Elapsed.TotalSeconds }
+        }
+        return @{ ok = [bool]$res.ok; detail = [string]$res.detail; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } catch {
+        return @{ ok = $false; detail = "Could not start the test: $($_.Exception.Message)"; seconds = [int]$sw.Elapsed.TotalSeconds }
+    } finally {
+        if ($job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+}
 
 function Test-GIConnection {
     <#
@@ -265,7 +525,7 @@ function Test-GIConnection {
     try {
         switch ($System) {
             'vCenter' {
-                $vc = Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop
+                $vc = Connect-GITestVIServer -Config $Config
                 $vcConnected = $true
                 return @{ ok = $true; detail = "Connected to $($vc.Name) (version $($vc.Version)) as $($vc.User)." }
             }
@@ -275,12 +535,28 @@ function Test-GIConnection {
                 return @{ ok = $true; detail = "Logged in to $($Config.Horizon.Server); $n desktop pool(s) visible." }
             }
             'AppVolumes' {
-                Connect-GIAppVol -Config $Config
-                $online = @(Get-GIAppVolCollection (Invoke-GIAppVolApi -Path (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)))
-                return @{ ok = $true; detail = "Logged in to $($Config.AppVolumes.Server); $($online.Count) online entities." }
+                $trail = [System.Collections.Generic.List[string]]::new()
+                $hints = [System.Collections.Generic.List[string]]::new()
+                try {
+                    Connect-GIAppVol -Config $Config
+                    $trail.AddRange([string[]]$script:GIAppVol.Trail)
+                    if ($script:GIAppVol.SessionPath -ne (Get-GIAppVolEndpoint -Config $Config -Name Session)) {
+                        $hints.Add("Login worked at $($script:GIAppVol.SessionPath); set Session endpoint to that.")
+                    }
+                    $on = Get-GIAppVolOnlineEntities -Config $Config
+                    $trail.AddRange([string[]]$on.Trail)
+                    if ($on.Path -ne (Get-GIAppVolEndpoint -Config $Config -Name OnlineEntities)) {
+                        $hints.Add("Online entities worked at $($on.Path); set Online entities endpoint to that.")
+                    }
+                } catch {
+                    if ($_.Exception.Data.Contains('Trail')) { $trail.AddRange([string[]]$_.Exception.Data['Trail']) } else { $trail.Add($_.Exception.Message) }
+                    return @{ ok = $false; detail = (@("App Volumes test failed on $($Config.AppVolumes.Server).") + $trail) -join "`n" }
+                }
+                $head = "Logged in to $($Config.AppVolumes.Server); $($on.Entities.Count) online entities."
+                return @{ ok = $true; detail = (@($head) + $hints + $trail) -join "`n" }
             }
             'GoldenImage' {
-                Connect-VIServer -Server $Config.vCenter.Server -Credential (Get-GISecretCredential -Name $Config.vCenter.CredentialSecret) -ErrorAction Stop | Out-Null
+                Connect-GITestVIServer -Config $Config | Out-Null
                 $vcConnected = $true
                 $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
                 $snaps = @(Get-Snapshot -VM $vm -ErrorAction SilentlyContinue).Count

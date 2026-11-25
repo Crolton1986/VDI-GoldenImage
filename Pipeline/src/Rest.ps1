@@ -5,6 +5,7 @@
 
 $script:GIHorizon = $null
 $script:GIAppVol  = $null
+$script:GIPoolApiVersion = $null
 
 function Invoke-GIRestWithRetry {
     [CmdletBinding()]
@@ -13,6 +14,8 @@ function Invoke-GIRestWithRetry {
         [int] $MaxAttempts = 3,
         [int] $DelaySeconds = 5
     )
+    # A hung Horizon/App Volumes call must not freeze the runner forever (no TimeoutSec means no limit)
+    if (-not $Request.ContainsKey('TimeoutSec')) { $Request.TimeoutSec = 120 }
     for ($attempt = 1; ; $attempt++) {
         try {
             return Invoke-RestMethod @Request -ErrorAction Stop
@@ -53,6 +56,7 @@ function Connect-GIHorizon {
         AccessToken  = $tok.access_token
         RefreshToken = $tok.refresh_token
         SkipCert     = [bool]$hz['SkipCertificateCheck']
+        PoolApiVersion = [string]$hz['PoolApiVersion']
     }
 }
 
@@ -133,7 +137,12 @@ function Invoke-GIHorizonApi {
     for ($page = 1; ; $page++) {
         $q = @{}; if ($Query) { $q += $Query }
         $q.page = $page; $q.size = $PageSize
-        $batch = @(& $send $q)
+        # A JSON array can arrive as one array object instead of separate items; unroll it so callers
+        # filtering by name get single pools, not a whole page (which made .id an array).
+        $batch = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in @(& $send $q)) {
+            if ($item -is [System.Array]) { foreach ($x in $item) { $batch.Add($x) } } else { $batch.Add($item) }
+        }
         foreach ($item in $batch) { $results.Add($item) }
         if ($batch.Count -lt $PageSize) { break }
     }
@@ -146,19 +155,46 @@ function ConvertTo-GIHorizonFilter {
     return (@{ type = 'Equals'; name = $Name; value = $Value } | ConvertTo-Json -Compress)
 }
 
+function Get-GIHorizonPools {
+    <#
+    .SYNOPSIS
+      Lists desktop pools including provisioning_settings and provisioning_status_data.
+      The v1 list returns only a thin object without those blocks (no current image, no pending push),
+      so every image check silently read $null. They exist from inventory/v6 on. Tries v8 down to v6
+      (or Horizon.PoolApiVersion first) and remembers the first version this server accepts.
+    #>
+    [CmdletBinding()]
+    param()
+    $versions = [System.Collections.Generic.List[string]]::new()
+    $hzPin = Get-GIWatcherProp $script:GIHorizon 'PoolApiVersion'
+    foreach ($v in @($hzPin, $script:GIPoolApiVersion, 'v8', 'v7', 'v6')) {
+        if ($v -and -not $versions.Contains([string]$v)) { $versions.Add([string]$v) }
+    }
+    $last = $null
+    foreach ($v in $versions) {
+        try {
+            $pools = @(Invoke-GIHorizonApi -Path "/inventory/$v/desktop-pools" -All)
+            $script:GIPoolApiVersion = $v
+            return $pools
+        } catch {
+            $last = $_
+            $code = if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) { [int]$_.Exception.Response.StatusCode }
+            if ($code -notin 400, 404, 405) { throw }   # version not offered by this Connection Server: try the next
+        }
+    }
+    throw "No Horizon desktop-pool endpoint with provisioning data (inventory/v6-v8) is available: $($last.Exception.Message)"
+}
+
 function Get-GIHorizonPool {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Name)
-    $pool = Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All |
-        Where-Object { $_.name -eq $Name -or $_.display_name -eq $Name } | Select-Object -First 1
+    $pool = @(Get-GIHorizonPools) | ForEach-Object { $_ } |
+        Where-Object { (Get-GIWatcherProp $_ 'name') -eq $Name -or (Get-GIWatcherProp $_ 'display_name') -eq $Name } | Select-Object -First 1
     if (-not $pool) { throw "Horizon desktop pool '$Name' not found." }
+    if (-not $pool.PSObject.Properties['id'] -or $pool.id -is [System.Array] -or [string]::IsNullOrWhiteSpace([string]$pool.id)) {
+        throw "Horizon returned desktop pool '$Name' without a single id; check the Horizon version and the account's inventory rights."
+    }
     return $pool
-}
-
-function Get-GIHorizonPools {
-    [CmdletBinding()]
-    param()
-    return Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All
 }
 
 function Get-GIHorizonPoolMachines {
@@ -226,13 +262,15 @@ function Get-GIPoolImageInfo {
     <#
     .SYNOPSIS
       Normalizes the parts of a desktop pool object the pipeline cares about.
-      Field names follow inventory/v1; missing fields come back as $null.
+      Field names follow inventory/v6+ (v8 is what Get-GIHorizonPools asks for); missing fields come back as $null.
+      HasProvisioningData is $false for a pool object that lacks provisioning_settings (e.g. from inventory/v1).
     #>
     param([Parameter(Mandatory)] $Pool)
     $ps  = if ($Pool.PSObject.Properties['provisioning_settings']) { $Pool.provisioning_settings }
     $psd = if ($Pool.PSObject.Properties['provisioning_status_data']) { $Pool.provisioning_status_data }
     $get = { param($o, $n) if ($o -and $o.PSObject.Properties[$n]) { $o.$n } }
     [pscustomobject]@{
+        HasProvisioningData = [bool]($ps -and $psd)
         PoolId              = $Pool.id
         Name                = $Pool.name
         ParentVmId          = & $get $ps 'parent_vm_id'
@@ -243,6 +281,7 @@ function Get-GIPoolImageInfo {
         Operation           = & $get $psd 'instant_clone_operation'
         CurrentImageState   = & $get $psd 'instant_clone_current_image_state'
         PendingImageProgress = & $get $psd 'instant_clone_pending_image_progress'
+        PendingImageError   = & $get $psd 'instant_clone_pending_image_error'
     }
 }
 
@@ -278,16 +317,69 @@ function Stop-GIHorizonPushImage {
 
 #----- App Volumes Manager -----
 
+# Known paths per endpoint. The first entry is the default; the others are tried once on a 404,
+# because App Volumes releases moved these between /cv_api and /app_volumes.
+$script:GIAppVolKnownPaths = @{
+    Session        = @('/cv_api/sessions', '/app_volumes/sessions')
+    OnlineEntities = @('/cv_api/online_entities', '/app_volumes/online_entities')
+    Attachments    = @('/app_volumes/app_attachments')
+}
+
 function Get-GIAppVolEndpoint {
     param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] [string] $Name)
-    $defaults = @{
-        Session        = '/app_volumes/sessions'
-        OnlineEntities = '/app_volumes/online_entities'
-        Attachments    = '/app_volumes/app_attachments'
-    }
     $ep = $Config.AppVolumes['Endpoints']
     if ($ep -and $ep[$Name]) { return $ep[$Name] }
-    return $defaults[$Name]
+    return $script:GIAppVolKnownPaths[$Name][0]
+}
+
+function Get-GIAppVolEndpointCandidates {
+    # The configured path first, then the other known paths for that endpoint.
+    param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] [string] $Name)
+    $first = Get-GIAppVolEndpoint -Config $Config -Name $Name
+    return @(@($first) + @($script:GIAppVolKnownPaths[$Name] | Where-Object { $_ -ne $first }))
+}
+
+function Get-GIHttpStatus {
+    # Status code and reason from a web exception, or $null when there was no response.
+    param($Exception)
+    if ($Exception -and $Exception.PSObject.Properties['Response'] -and $Exception.Response) {
+        $r = $Exception.Response
+        $reason = if ($r.PSObject.Properties['ReasonPhrase']) { $r.ReasonPhrase } elseif ($r.PSObject.Properties['StatusDescription']) { $r.StatusDescription }
+        return [pscustomobject]@{ Code = [int]$r.StatusCode; Reason = [string]$reason }
+    }
+    return $null
+}
+
+function Invoke-GIAppVolProbe {
+    <#
+    .SYNOPSIS
+      Sends one request per candidate path until one does not 404. Returns
+      @{ Response; Path; Trail } and throws with the full trail when every path fails.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $BaseUri,
+        [Parameter(Mandatory)] [string[]] $Paths,
+        [Parameter(Mandatory)] [hashtable] $Request,
+        [Parameter(Mandatory)] [string] $Label
+    )
+    $trail = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $Paths) {
+        $req = $Request.Clone(); $req.Uri = "$BaseUri$path"
+        $line = "$Label $($Request.Method.ToString().ToUpperInvariant()) $($req.Uri)"
+        try {
+            $resp = Invoke-GIRestWithRetry -Request $req
+            $trail.Add("$line -> OK")
+            return @{ Response = $resp; Path = $path; Trail = $trail.ToArray() }
+        } catch {
+            $st = Get-GIHttpStatus $_.Exception
+            if ($st) { $trail.Add("$line -> $($st.Code) $($st.Reason)".TrimEnd()) } else { $trail.Add("$line -> $($_.Exception.Message)") }
+            # Only a 404 means "wrong path for this release"; anything else (401, TLS, DNS) is final.
+            if (-not $st -or $st.Code -ne 404) { break }
+        }
+    }
+    $err = [System.Exception]::new("$Label failed:`n" + ($trail -join "`n"))
+    $err.Data['Trail'] = $trail.ToArray()
+    throw $err
 }
 
 function Connect-GIAppVol {
@@ -298,13 +390,27 @@ function Connect-GIAppVol {
     $base = "https://$($av['Server'])"
     $sess = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     $req = @{
-        Uri = $base + (Get-GIAppVolEndpoint -Config $Config -Name Session); Method = 'Post'
-        ContentType = 'application/json'; WebSession = $sess
+        Method = 'Post'; ContentType = 'application/json'; WebSession = $sess
         Body = (@{ username = $cred.UserName; password = $cred.GetNetworkCredential().Password } | ConvertTo-Json)
     }
     if ($av['SkipCertificateCheck']) { $req.SkipCertificateCheck = $true }
-    Invoke-GIRestWithRetry -Request $req | Out-Null
-    $script:GIAppVol = @{ BaseUri = $base; Session = $sess; SkipCert = [bool]$av['SkipCertificateCheck'] }
+    $r = Invoke-GIAppVolProbe -BaseUri $base -Paths (Get-GIAppVolEndpointCandidates -Config $Config -Name Session) -Request $req -Label 'App Volumes login'
+    $script:GIAppVol = @{ BaseUri = $base; Session = $sess; SkipCert = [bool]$av['SkipCertificateCheck']; SessionPath = $r.Path; Trail = $r.Trail }
+}
+
+function Get-GIAppVolOnlineEntities {
+    <#
+    .SYNOPSIS
+      GETs the online entities list, falling back to the other known path on a 404.
+      Returns @{ Entities; Path; Trail }.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    if (-not $script:GIAppVol) { throw "Not connected to App Volumes Manager. Call Connect-GIAppVol first." }
+    $req = @{ Method = 'Get'; WebSession = $script:GIAppVol.Session }
+    if ($script:GIAppVol.SkipCert) { $req.SkipCertificateCheck = $true }
+    $r = Invoke-GIAppVolProbe -BaseUri $script:GIAppVol.BaseUri -Paths (Get-GIAppVolEndpointCandidates -Config $Config -Name OnlineEntities) -Request $req -Label 'App Volumes online entities'
+    return @{ Entities = @(Get-GIAppVolCollection $r.Response); Path = $r.Path; Trail = $r.Trail }
 }
 
 function Invoke-GIAppVolApi {
@@ -315,10 +421,17 @@ function Invoke-GIAppVolApi {
         [object] $Body
     )
     if (-not $script:GIAppVol) { throw "Not connected to App Volumes Manager. Call Connect-GIAppVol first." }
-    $req = @{ Uri = "$($script:GIAppVol.BaseUri)$Path"; Method = $Method; WebSession = $script:GIAppVol.Session }
+    $uri = "$($script:GIAppVol.BaseUri)$Path"
+    $req = @{ Uri = $uri; Method = $Method; WebSession = $script:GIAppVol.Session }
     if ($null -ne $Body) { $req.Body = ($Body | ConvertTo-Json -Depth 10); $req.ContentType = 'application/json' }
     if ($script:GIAppVol.SkipCert) { $req.SkipCertificateCheck = $true }
-    return Invoke-GIRestWithRetry -Request $req
+    try {
+        return Invoke-GIRestWithRetry -Request $req
+    } catch {
+        $st = Get-GIHttpStatus $_.Exception
+        $what = if ($st) { "$($st.Code) $($st.Reason)".TrimEnd() } else { $_.Exception.Message }
+        throw "App Volumes $($Method.ToUpperInvariant()) $uri returned $what"
+    }
 }
 
 function Get-GIAppVolCollection {
