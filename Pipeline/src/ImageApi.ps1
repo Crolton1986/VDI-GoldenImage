@@ -18,6 +18,7 @@ function Get-GIApiRouteTable {
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs$';                                 R = 'Admin';    H = 'Start-GIApiRun' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)$';                   R = 'Viewer';   H = 'Get-GIApiRun' }
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)/retry$';             R = 'Admin';    H = 'Invoke-GIApiRetry' }
+        @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)/stop$';              R = 'Admin';    H = 'Invoke-GIApiStopRun' }
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)/approve$';           R = 'Approver'; H = 'Invoke-GIApiApprove' }
         @{ M = 'POST';   P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)/reject$';            R = 'Approver'; H = 'Invoke-GIApiReject' }
         @{ M = 'GET';    P = '^/images/(?<id>[^/]+)/runs/(?<run>[^/]+)/steps/(?<step>[^/]+)/log$'; R = 'Viewer'; H = 'Get-GIApiStepLog' }
@@ -564,6 +565,19 @@ function Invoke-GIApiRetry {
     try { $r = New-GIRunRequest @p } catch { return (New-GIApiError 409 $_.Exception.Message) }
     Write-GIApiAudit -Req $Req -Action 'run.retry' -Target $runId -Detail @{ image = $img.Id; stage = $stage; step = $step } -ImageConfig $img.Config
     @{ Code = 202; Body = [ordered]@{ requestId = $r.id; stage = $stage } }
+}
+
+function Invoke-GIApiStopRun {
+    param($Req)
+    $img = Resolve-GIApiImage $Req; if ($img.Error) { return $img.Error }
+    $runId = [string]$Req.Args['run']
+    if (-not (Test-GIRunId $runId) -or -not (Test-Path -LiteralPath (Get-GIRunPath $img.Config $runId))) { return (New-GIApiError 404 'Run not found') }
+    $run = Get-GIRun -Config $img.Config -RunId $runId
+    if ($run.status -ne 'Running') { return (New-GIApiError 409 "Run $runId is $($run.status), not running.") }
+    try { $r = Stop-GIRun -Config $img.Config -RunId $runId -By $Req.User }
+    catch { return (New-GIApiError 409 $_.Exception.Message) }
+    Write-GIApiAudit -Req $Req -Action 'run.stop.request' -Target $runId -Detail @{ image = $img.Id; runnerKilled = [bool]$r.RunnerKilled } -ImageConfig $img.Config
+    @{ Code = 200; Body = [ordered]@{ stopped = $true; runnerKilled = [bool]$r.RunnerKilled } }
 }
 
 function Invoke-GIApiApprove {

@@ -14,6 +14,8 @@ function Invoke-GIRestWithRetry {
         [int] $MaxAttempts = 3,
         [int] $DelaySeconds = 5
     )
+    # A hung Horizon/App Volumes call must not freeze the runner forever (no TimeoutSec means no limit)
+    if (-not $Request.ContainsKey('TimeoutSec')) { $Request.TimeoutSec = 120 }
     for ($attempt = 1; ; $attempt++) {
         try {
             return Invoke-RestMethod @Request -ErrorAction Stop

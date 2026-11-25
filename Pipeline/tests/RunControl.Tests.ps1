@@ -598,3 +598,52 @@ Describe 'Update-GIImageScheduleTask' {
         (Get-GIAuditCategory 'schedule.task') | Should -Be 'settings'
     }
 }
+
+Describe 'Stop-GIRun' {
+    BeforeEach {
+        $script:st = Join-Path ([IO.Path]::GetTempPath()) ("gi-stop-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $script:st | Out-Null
+        $script:cfg = @{ Paths = @{ State = $script:st; Logs = $script:st; Reports = $script:st; Audit = $script:st } }
+    }
+    AfterEach { Remove-Item -LiteralPath $script:st -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'marks a run with no live runner Failed and frees the lock' {
+        InModuleScope VDI-GIPipeline -Parameters @{ c = $script:cfg } {
+            param($c)
+            $run = New-GIRun -Config $c
+            Set-GIStage -Config $c -Run $run -Stage Preflight -Status Succeeded -Message 'ok'
+            Set-GIStage -Config $c -Run $run -Stage Maintain -Status Running -Message ''
+            # lock owned by a process id that does not exist
+            @{ pid = 99999999; host = [Environment]::MachineName; runId = $run.runId; stage = 'All'; startedAt = (Get-Date).ToString('o'); requestedBy = 'x' } |
+                ConvertTo-Json | Set-Content -LiteralPath (Get-GILockPath $c)
+            Mock Write-GIAudit {}
+            Mock Write-GILog {}
+            $r = Stop-GIRun -Config $c -RunId $run.runId -By 'tester' -GraceSeconds 1
+            $r.Stopped | Should -BeTrue
+            $after = Get-GIRun -Config $c -RunId $run.runId
+            $after.status | Should -Be 'Failed'
+            $after.stages.Maintain.status | Should -Be 'Failed'
+            $after.error | Should -Match 'Stopped by tester'
+            Test-Path (Get-GILockPath $c) | Should -BeFalse
+        }
+    }
+
+    It 'refuses a run that is not running' {
+        InModuleScope VDI-GIPipeline -Parameters @{ c = $script:cfg } {
+            param($c)
+            $run = New-GIRun -Config $c
+            $run.status = 'Failed'; Save-GIRun -Config $c -Run $run
+            { Stop-GIRun -Config $c -RunId $run.runId -By 'tester' } | Should -Throw '*not running*'
+        }
+    }
+
+    It 'makes the waits throw once the stop flag exists' {
+        InModuleScope VDI-GIPipeline -Parameters @{ c = $script:cfg } {
+            param($c)
+            $run = New-GIRun -Config $c
+            { Assert-GIRunNotStopped -Config $c -Run $run } | Should -Not -Throw
+            Set-Content -LiteralPath (Get-GIStopFlagPath -Config $c -RunId $run.runId) -Value 'tester'
+            { Assert-GIRunNotStopped -Config $c -Run $run } | Should -Throw '*stopped by tester*'
+        }
+    }
+}

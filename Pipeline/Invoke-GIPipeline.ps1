@@ -151,6 +151,7 @@ try {
         if ($run.status -in 'Scheduled', 'Completed', 'RolledBack') { throw "Run $($run.runId) is $($run.status); start a new run instead." }
         $run.goldenVm = $config.GoldenImage.VmName
         Update-GIPipelineLock -Config $config -RunId $run.runId
+        Remove-Item -LiteralPath (Get-GIStopFlagPath -Config $config -RunId $run.runId) -Force -ErrorAction SilentlyContinue
         Write-GILog -Config $config -RunId $run.runId -Message "Pipeline $lockStage started by $requestedBy (stages: $($stages -join ', '))"
         Connect-GIServices -Config $config -SkipAppVolumes:($stages -notcontains 'Validate')
 

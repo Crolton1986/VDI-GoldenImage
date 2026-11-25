@@ -109,6 +109,74 @@ function Exit-GIPipelineLock {
     }
 }
 
+#----- Stopping a run -----
+
+function Get-GIStopFlagPath { param([hashtable] $Config, [string] $RunId) Join-Path $Config.Paths.State "$RunId.stop" }
+
+function Assert-GIRunNotStopped {
+    <# Called from the long waits. Throws when an admin asked this run to stop, so the stage fails cleanly. #>
+    param([hashtable] $Config, $Run)
+    if (-not $Config -or -not $Run) { return }
+    $flag = Get-GIStopFlagPath -Config $Config -RunId ([string]$Run.runId)
+    if (Test-Path -LiteralPath $flag) {
+        $by = try { (Get-Content -LiteralPath $flag -Raw -ErrorAction Stop).Trim() } catch { 'an admin' }
+        throw "Run stopped by $by."
+    }
+}
+
+function Stop-GIRun {
+    <#
+    .SYNOPSIS
+      Admin stop for a Running run. Asks the runner to stop (flag file the waits check), ends the runner
+      process if it is still there after a short grace period (or is hung), then marks the run Failed and
+      frees the lock. With no live runner (crashed, killed, host rebooted) it just marks the run Failed.
+      A stopped run can be retried from the failed step. Returns @{ Stopped; RunnerKilled; Detail }.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $RunId,
+        [Parameter(Mandatory)] [string] $By,
+        [int] $GraceSeconds = 15
+    )
+    $run = Get-GIRun -Config $Config -RunId $RunId
+    if ($run.status -ne 'Running') { throw "Run $RunId is $($run.status), not running." }
+    if (-not $PSCmdlet.ShouldProcess($RunId, 'Stop run')) { return }
+
+    $flag = Get-GIStopFlagPath -Config $Config -RunId $RunId
+    $killed = $false
+    $lock = Get-GIPipelineLock -Config $Config
+    $mine = $lock -and ([string]$lock.runId -eq $RunId -or -not $lock.runId)
+    if ($mine -and -not $lock.stale -and ([string]$lock.host) -eq [Environment]::MachineName -and [int]$lock.pid -gt 0) {
+        Set-Content -LiteralPath $flag -Value $By -Encoding UTF8
+        $deadline = (Get-Date).AddSeconds($GraceSeconds)
+        while ((Test-GIProcessAlive -ProcessId ([int]$lock.pid)) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (Test-GIProcessAlive -ProcessId ([int]$lock.pid)) {
+            # Hung (for example inside a REST call): end it, and the child processes it started
+            try { Stop-Process -Id ([int]$lock.pid) -Force -ErrorAction Stop; $killed = $true } catch { Write-Warning "Could not end runner pid $($lock.pid): $($_.Exception.Message)" }
+        }
+    }
+
+    # The runner may have marked the run Failed itself on the way out; only mark it if it is still Running
+    $run = Get-GIRun -Config $Config -RunId $RunId
+    if ($run.status -eq 'Running') {
+        $stage = [string]$run.currentStage
+        $msg = "Stopped by $By."
+        if ($stage -and $run.stages.$stage -and $run.stages.$stage.status -eq 'Running') {
+            Set-GIStage -Config $Config -Run $run -Stage $stage -Status Failed -Message $msg
+        } else {
+            $run.status = 'Failed'; $run.error = $msg
+        }
+        $run.progress = ''
+        Save-GIRun -Config $Config -Run $run
+        Write-GILog -Config $Config -RunId $RunId -Message "Run stopped by $By$(if ($killed) { ' (runner process ended)' })." -Level Warn
+    }
+    if ($mine) { Remove-Item -LiteralPath (Get-GILockPath $Config) -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue
+    Write-GIAudit -Config $Config -User $By -Action 'run.stop' -Target $RunId -Detail @{ runnerKilled = $killed; stage = [string]$run.currentStage }
+    return @{ Stopped = $true; RunnerKilled = $killed; Detail = "Run $RunId stopped." }
+}
+
 #----- Run requests -----
 
 function Get-GIRequestPath { param([hashtable] $Config) Join-Path $Config.Paths.State 'run-request.json' }

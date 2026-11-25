@@ -33,6 +33,7 @@ function Invoke-GIStage {
         [Parameter(Mandatory)] [string] $Stage,
         [Parameter(Mandatory)] [scriptblock] $Action
     )
+    Assert-GIRunNotStopped -Config $Config -Run $Run
     $Run.status = 'Running'
     $Run.error = $null
     Set-GIStage -Config $Config -Run $Run -Stage $Stage -Status Running -Message ''
@@ -620,6 +621,7 @@ function Wait-GIPoolPush {
     )
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ($true) {
+        Assert-GIRunNotStopped -Config $Config -Run $Run
         $info = Get-GIPoolImageInfo -Pool (Get-GIHorizonPool -Name $PoolName)
         # Without these blocks every field reads $null and the loop could only end at the timeout
         if (-not $info.HasProvisioningData) { throw "Horizon returned no provisioning_settings/provisioning_status_data for pool '$PoolName'; cannot track the push." }
@@ -668,6 +670,7 @@ function Wait-GIPoolMachinesSettled {
     )
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ($true) {
+        Assert-GIRunNotStopped -Config $Config -Run $Run
         $machines = @(Get-GIHorizonPoolMachines -PoolId $PoolId)
         $busy = @($machines | Where-Object { $script:GITransientMachineStates -contains $_.state })
         if ($machines.Count -gt 0 -and $busy.Count -eq 0) { return $machines }

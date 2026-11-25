@@ -112,7 +112,7 @@ function New-GIRunProgressHtml {
     $stale = ''
     if ($Run.status -eq 'Running') {
         $u = ConvertTo-GIDateTime $Run.updatedAt
-        if ($u -and ((Get-Date) - $u).TotalMinutes -ge $script:GIStaleRunMinutes) { $stale = "<p class=""muted"" role=""status"">No update from the runner for $($script:GIStaleRunMinutes) minutes. Check the VDI-GI-Runner task on the server.</p>" }
+        if ($u -and ((Get-Date) - $u).TotalMinutes -ge $script:GIStaleRunMinutes) { $stale = "<p class=""muted"" role=""status"">No update from the runner for $($script:GIStaleRunMinutes) minutes. Check the VDI-GI-Runner task on the server, or use Stop run.</p>" }
     }
     "<section class=""card"" data-region=""progress""><ol class=""stages"" aria-label=""Stages"">$(@($items) -join '')</ol><div class=""nowline"">$now$stale</div></section>"
 }
@@ -250,6 +250,12 @@ function New-GIRunPage {
     $active = ((Get-GIRunPhase $run) -eq 'active')
     $crumb = "<nav aria-label=""Breadcrumb"" class=""crumbs""><a href=""/"">Golden images</a> / <a href=""/images/$id"">$(ConvertTo-GIHtml $Summary.name)</a> / <a href=""/images/$id/runs"">Runs</a> / <span aria-current=""page"">Run $rid</span></nav>"
     $btns = "$(New-GIButton -Label 'Report' -Small -Href "/reports/$rid")<a class=""btn small"" id=""dl-logs"" href=""/api/images/$id/runs/$rid/logs.zip"" title=""Includes logs from inside the guest VM."" data-preparing>Download all logs</a>$(New-GIButton -Label 'JSON' -Small -Href "/api/images/$id/runs/$rid")"
+    $stopBtn = ''; $stopDlg = ''
+    if ($Ctx.IsAdmin -and $run.status -eq 'Running') {
+        $stopBtn = New-GIButton -Label 'Stop run' -Small -Variant dangerline -OpensDialog 'dlg-stop'
+        $stopDlg = New-GIModal -Id 'dlg-stop' -Title 'Stop this run?' -BodyHtml '<p>The runner is asked to stop and is ended if it does not. The run is marked failed at the current step. Nothing already done in vCenter or Horizon is undone, and you can retry from the failed step afterwards.</p>' -ConfirmLabel 'Stop run' -ConfirmVariant danger -Api "POST /api/images/$id/runs/$rid/stop"
+    }
+    $btns = "$stopBtn$btns"
     $title = "<div class=""pagehead""><h1>Run $rid <span class=""chipslot"" aria-live=""polite"" data-region=""chip"">$(New-GIChip -Text $spec.Text -Variant $spec.Variant)</span></h1><div class=""headbtns"">$btns</div></div>"
     $elapsedEnd = if ($active) { $null } else { $run.updatedAt }
     $snapName = Get-GIValue (Get-GIValue $run 'snapshot' $null) 'name'
@@ -259,7 +265,7 @@ function New-GIRunPage {
     $summaryHtml = "<section class=""card""><dl class=""summary""><div><dt>Guest VM</dt><dd>$(ConvertTo-GIHtml $Summary.vm)<span data-live=""power""></span></dd></div><div><dt>Started</dt><dd>$(Format-GIDate $run.createdAt)</dd></div><div><dt>Elapsed</dt><dd aria-hidden=""true""$startAttr><span data-elapsed>$(ConvertTo-GITimeSpanText $run.createdAt $elapsedEnd)</span>$paused</dd></div><div><dt>Snapshot</dt><dd>$snap</dd></div></dl></section>"
     $progress = New-GIRunProgressHtml -Run $run -Steps $steps
     # Failed alert
-    $alert = ''; $dialogs = ''
+    $alert = ''; $dialogs = $stopDlg
     if ($run.status -eq 'Failed') {
         $f = $steps | Where-Object { $_.status -eq 'Failed' } | Select-Object -First 1
         $label = if ($f) { $f.label } else { [string]$run.currentStage }
