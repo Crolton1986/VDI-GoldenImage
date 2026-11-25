@@ -93,6 +93,8 @@ $viewsPath = $ctx.ViewsPath
 $settingsViewsPath = $ctx.SettingsViewsPath
 $setupViewsPath = $ctx.SetupViewsPath
 $navContextPath = Join-Path $webRoot 'NavContext.ps1'
+$authSetupPath = Join-Path $webRoot 'AuthSetup.ps1'
+. $authSetupPath   # Add-GIDashboardAuth, called inside Start-PodeServer
 $componentsPath = Join-Path $webRoot 'Components.ps1'
 $extraViewPaths = @('ImageViews.ps1', 'ImageScripts.ps1', 'RunViews.ps1', 'AdminViews.ps1', 'Routes.ps1') | ForEach-Object { Join-Path $webRoot $_ }
 
@@ -148,8 +150,7 @@ Start-PodeServer -Quiet -Threads 4 {
     if (-not $ctx.NoAuth) {
         $groups = @($ctx.ViewerShort, $ctx.ApproverShort, $ctx.AdminShort) | Where-Object { $_ } | Select-Object -Unique
         if (-not $groups) { throw 'Dashboard.ViewerGroup / ApproverGroup / AdminGroup must be set when authentication is on.' }
-        New-PodeAuthScheme -Basic -Realm 'VDI Golden Image Pipeline' |
-            Add-PodeAuthWindowsAd -Name 'AD' -Groups $groups -Sessionless
+        $null = Add-GIDashboardAuth -Context $ctx -Groups $groups -Realm 'VDI Golden Image Pipeline'
         $auth = @{ Authentication = 'AD' }
     }
 
