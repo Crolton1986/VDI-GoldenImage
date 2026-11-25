@@ -603,7 +603,7 @@ Describe 'Stop-GIRun' {
     BeforeEach {
         $script:st = Join-Path ([IO.Path]::GetTempPath()) ("gi-stop-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $script:st | Out-Null
-        $script:cfg = @{ Paths = @{ State = $script:st; Logs = $script:st; Reports = $script:st; Audit = $script:st } }
+        $script:cfg = @{ GoldenImage = @{ VmName = 'vm' }; Paths = @{ State = $script:st; Logs = $script:st; Reports = $script:st; Audit = $script:st } }
     }
     AfterEach { Remove-Item -LiteralPath $script:st -Recurse -Force -ErrorAction SilentlyContinue }
 
