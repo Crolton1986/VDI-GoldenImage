@@ -263,3 +263,38 @@ Describe 'Packages field' {
         $h | Should -Match 'Installer on host'
     }
 }
+
+Describe 'Maintain resume actions' {
+    BeforeAll {
+        function script:New-FailedRun($steps, $stage = 'Maintain') {
+            [pscustomobject]@{ runId = '20261125-010101'; status = 'Failed'; currentStage = $stage
+                stages = [pscustomobject]@{ Maintain = [pscustomobject]@{ status = 'Failed'; steps = $steps } } }
+        }
+        $script:steps = @(
+            [pscustomobject]@{ id = 'SafetySnapshot'; label = 'Safety snapshot'; status = 'Succeeded' }
+            [pscustomobject]@{ id = 'CopyInstallers'; label = 'Copy installers'; status = 'Skipped' }
+            [pscustomobject]@{ id = 'WindowsUpdate'; label = 'Windows Update'; status = 'Succeeded' }
+            [pscustomobject]@{ id = 'Pkg:Horizon'; label = 'Install Horizon Agent'; status = 'Failed' }
+            [pscustomobject]@{ id = 'Finalize'; label = 'Finalize'; status = 'Pending' }
+        )
+    }
+    It 'offers resume at the failed step, restart, and a step picker without skipped steps' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk'
+        $h | Should -Match 'Resume Maintain at Install Horizon Agent'
+        $h | Should -Match 'name="step" value="SafetySnapshot"[^>]*>Restart Maintain from the beginning'
+        $h | Should -Match '<option value="Pkg:Horizon" selected>Install Horizon Agent</option>'
+        $h | Should -Not -Match 'value="CopyInstallers"'
+        $h | Should -Match 'name="stage" value="Maintain"'
+        ([regex]::Matches($h, 'name="action" value="FromStage"')).Count | Should -Be 2
+        ([regex]::Matches($h, 'name="token" value="tk"')).Count | Should -Be 2
+    }
+    It 'falls back to the plain retry buttons for runs without steps' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun @()) -Token 'tk'
+        $h | Should -Match 'Retry from Maintain'
+        $h | Should -Not -Match 'Resume Maintain'
+    }
+    It 'disables everything while busy' {
+        $h = New-GIRunActionsHtml -Run (New-FailedRun $steps) -Token 'tk' -Busy $true
+        ([regex]::Matches($h, '\sdisabled[\s>]')).Count | Should -BeGreaterThan 2
+    }
+}

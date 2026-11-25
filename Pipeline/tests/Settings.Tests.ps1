@@ -170,7 +170,7 @@ Describe 'Test-GISettingsSection' {
         $e.ContainsKey('Endpoints.OnlineEntities') | Should -BeFalse
     }
     It 'whitelists guest actions' {
-        $v = @{ InstallerSourceDir = ''; Actions = @('VmTools', 'Bogus') }
+        $v = @{ InstallerSourceDir = ''; Actions = @('VmTools', 'Bogus'); ActionTimeoutMin = 60 }
         (Test-GISettingsSection -Section Packages -Values $v).Actions | Should -BeLike '*Bogus*'
         $v.Actions = @('VmTools', 'OneDrive', 'GoogleDrive', 'HorizonRec')
         (Test-GISettingsSection -Section Packages -Values $v).Count | Should -Be 0
@@ -364,7 +364,7 @@ Describe 'Packages section' {
     It 'owns Actions and InstallerSourceDir; Golden image no longer lists them' {
         $s = Get-GISettingsSchema
         $s.Packages.ConfigPath | Should -Be 'GoldenImage'
-        @($s.Packages.Fields.Key) | Should -Be @('InstallerSourceDir', 'Actions')
+        @($s.Packages.Fields.Key) | Should -Be @('InstallerSourceDir', 'Actions', 'ActionTimeoutMin')
         @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'Actions'
         @($s.GoldenImage.Fields.Key) | Should -Not -Contain 'InstallerSourceDir'
     }
@@ -379,11 +379,14 @@ Describe 'Packages section' {
     }
     It 'saves to GoldenImage.Actions and GoldenImage.InstallerSourceDir' {
         $p = New-SettingsConfig
-        $null = Save-GISettingsSection -Config (Get-GIConfig -Path $p) -Section Packages -Values @{ Actions = @('VmTools', 'Horizon'); InstallerSourceDir = 'D:\Inst' }
+        $null = Save-GISettingsSection -Config (Get-GIConfig -Path $p) -Section Packages -Values @{ Actions = @('VmTools', 'Horizon'); InstallerSourceDir = 'D:\Inst'; ActionTimeoutMin = 60 }
         $c = Get-GIConfig -Path $p
         $c.GoldenImage.Actions | Should -Be @('VmTools', 'Horizon')
         $c.GoldenImage.InstallerSourceDir | Should -Be 'D:\Inst'
         $c.GoldenImage.VmName | Should -Be 'W11-GI-01'
+    }
+    It 'requires a package timeout between 5 and 600 minutes' {
+        (Test-GISettingsSection -Section Packages -Values @{ Actions = @(); InstallerSourceDir = ''; ActionTimeoutMin = 2 }).ActionTimeoutMin | Should -BeLike 'Must be between 5 and 600*'
     }
     It 'returns installer status with the section values' {
         $d = (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section Packages)

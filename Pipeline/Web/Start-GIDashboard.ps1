@@ -384,7 +384,10 @@ Start-PodeServer -Quiet -Threads 4 {
         $cfg = Get-GIDashboardConfig $c
         $action = [string]$WebEvent.Data['action']
         $p = @{ Config = $cfg; RequestedBy = $user; Action = $action }
-        if ($action -in 'FromStage', 'Stage') { $p.Stage = [string]$WebEvent.Data['stage']; $p.RunId = [string]$WebEvent.Data['runId'] }
+        if ($action -in 'FromStage', 'Stage') {
+            $p.Stage = [string]$WebEvent.Data['stage']; $p.RunId = [string]$WebEvent.Data['runId']
+            if ([string]$WebEvent.Data['step']) { $p.Step = [string]$WebEvent.Data['step'] }
+        }
         try {
             New-GIRunRequest @p | Out-Null
         } catch {

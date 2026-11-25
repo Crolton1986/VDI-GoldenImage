@@ -67,7 +67,7 @@ Preflight -> Maintain -> Snapshot -> TestPush -> Validate -> Approval -> Promote
 ```
 
 1. Preflight checks that the golden VM is powered off, that every ticked package has an installer on the host (when an installer folder is set) and that no pool has a push pending, then takes a safety snapshot named `pre-maint-<RunId>`.
-2. Maintain powers the VM on and runs Windows Update passes and `VDI-GoldenImage.ps1 -Unattended` actions inside the guest through VMware Tools, then runs the finalize action and waits for power off.
+2. Maintain powers the VM on and runs Windows Update passes and `VDI-GoldenImage.ps1 -Unattended` actions inside the guest through VMware Tools, then runs the finalize action and waits for power off. It's split into sub-steps (safety snapshot, power on, copy script, copy installers, enable updates, Windows Update, one step per package, reboot, read versions, finalize, power off), and the run page shows each one's status, start time, duration and latest message. Each package install has a timeout (Settings → Packages, `GoldenImage.ActionTimeoutMin`, default 60 minutes). When it runs out, the installer processes in the guest are stopped and the step fails, so a stuck installer can't block the run.
 3. Snapshot creates `GI-<RunId>` with a manifest of the installed agent versions, then applies the retention policy.
 4. TestPush pushes the snapshot to the test pool.
 5. Validate checks Horizon (machine state), the guest (required services on a sample of machines) and App Volumes (test packages attached).
@@ -197,11 +197,16 @@ Run from the Pipeline folder on the management server.
 # Continue an existing run from a stage, through Validate
 .\Invoke-GIPipeline.ps1 -FromStage TestPush -RunId 20261124-213005
 
+# Resume Maintain at a sub-step (SafetySnapshot restarts it), then continue through Validate
+.\Invoke-GIPipeline.ps1 -FromStage Maintain -FromStep Pkg:Horizon -RunId 20261124-213005
+
 # Run the request queued by the dashboard (what the VDI-GI-Runner task does)
 .\Invoke-GIPipeline.ps1 -FromRequest
 ```
 
-`-FromStage` accepts Preflight, Maintain, Snapshot, TestPush or Validate. It runs that stage and every stage after it up to Validate, and it needs `-RunId`. Every invocation except `-Stage Status` takes the pipeline lock (`state/pipeline.lock`), so scheduled, command-line and dashboard runs never overlap.
+`-FromStage` accepts Preflight, Maintain, Snapshot, TestPush or Validate. It runs that stage and every stage after it up to Validate, and it needs `-RunId`.
+
+Retrying Maintain after it failed or was interrupted resumes at the first unfinished sub-step. The safety snapshot, enabling updates, Windows Update and packages that already succeeded are skipped. Power on, the file copies and everything from the reboot onward always run again. `-FromStep <id>` (with `-FromStage Maintain` or `-Stage Maintain`) picks the step to resume from instead, and `-FromStep SafetySnapshot` restarts Maintain completely. If the golden VM was reverted to a snapshot since the earlier attempt started (the pipeline checks vCenter's events for a revert task), the earlier work is gone, so Maintain restarts from the beginning no matter what you asked for. When it can't read the events, it restarts as well, to be safe. After a revert to the run's own `pre-maint-<RunId>` snapshot, that snapshot is reused; after a revert to any other snapshot, a new `pre-maint-<RunId>-<time>` is taken. Every invocation except `-Stage Status` takes the pipeline lock (`state/pipeline.lock`), so scheduled, command-line and dashboard runs never overlap.
 
 Approval:
 
@@ -287,7 +292,7 @@ Dashboard errors and every request (including timeouts) are logged to `logs/dash
 `/run` (admin only) starts work without a shell on the server:
 
 * Go starts a full run, the same as `-Stage All`.
-* Retry from the failed stage continues an existing run from the stage that failed, through Validate.
+* Retry from the failed stage continues an existing run from the stage that failed, through Validate. When Maintain failed, the run page offers Resume Maintain at the failed step, Restart Maintain from the beginning, and a picker to resume from any step.
 * Single stage re-runs one of Preflight, Maintain, Snapshot, TestPush or Validate on an existing run.
 * PostCheck now runs the production check straight away.
 * Roll back a pool pushes the last-known-good snapshot, or one you name, to a pool. You have to type the pool name to confirm. Force logoff ends user sessions on the pool's machines.

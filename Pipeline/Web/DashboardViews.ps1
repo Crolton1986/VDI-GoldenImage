@@ -177,6 +177,7 @@ a{color:var(--link)}
 .icon{font-weight:700;margin-right:4px}
 .icon.st-ok{color:#1e8a44}.icon.st-bad{color:#c0392b}.icon.st-running{color:#1b6fd1}.icon.st-pending,.icon.st-skip{color:#9aa5b1}
 tr.cat td{background:#eef2f6;font-weight:600}
+tr.substeps>td{padding-top:0;border-bottom:1px solid var(--line)}table.steps th,table.steps td{padding:3px 6px;font-size:13px;border-bottom:1px dashed var(--line)}table.steps tr:last-child td{border-bottom:0}
 .err{border-left:5px solid #c0392b;background:#fdf0ee;padding:8px 12px;white-space:pre-wrap}
 .muted{color:var(--mut)}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px}
@@ -421,6 +422,23 @@ function New-GIRunListPage {
     New-GIPage -Title 'Golden image runs' -BodyHtml $body -RefreshSeconds $RefreshSeconds
 }
 
+function Get-GIStepTableHtml {
+    <# Nested table of Maintain sub-steps (run.stages.Maintain.steps); '' when there are none. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param($Steps)
+    $list = @(@($Steps) | Where-Object { $null -ne $_ })
+    if (-not $list.Count) { return '' }
+    $rows = foreach ($st in $list) {
+        $s = [string](Get-GIValue $st 'status' 'Pending')
+        $started = Get-GIValue $st 'startedAt' $null
+        $ended = Get-GIValue $st 'endedAt' $null
+        $dur = if ($started) { ConvertTo-GIHtml (Format-GIDuration $started $ended) } else { '' }
+        "<tr><td>$(Get-GIStatusIcon $s)$(ConvertTo-GIHtml (Get-GIValue $st 'label' (Get-GIValue $st 'id')))</td><td>$(Get-GIStatusBadge $s)</td><td>$(Format-GIDate $started)</td><td>$dur</td><td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
+    }
+    "<table class=""steps""><thead><tr><th>Step</th><th>Status</th><th>Started</th><th>Duration</th><th>Message</th></tr></thead><tbody>$(@($rows) -join '')</tbody></table>"
+}
+
 function New-GIRunDetailPage {
     [CmdletBinding()]
     [OutputType([string])]
@@ -463,6 +481,8 @@ function New-GIRunDetailPage {
         $body += "<td>$(Format-GIDate $started)</td><td>$(Format-GIDate $ended)</td>"
         $body += "<td>$(ConvertTo-GIHtml (Format-GIDuration $started $ended))</td>"
         $body += "<td>$(ConvertTo-GIHtml (Get-GIValue $st 'message'))</td></tr>"
+        $stepHtml = Get-GIStepTableHtml (Get-GIValue $st 'steps' @())
+        if ($stepHtml) { $body += "<tr class=""substeps""><td></td><td colspan=""5"">$stepHtml</td></tr>" }
     }
     $body += '</tbody></table></section>'
 

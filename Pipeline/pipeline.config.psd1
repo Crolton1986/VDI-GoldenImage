@@ -25,6 +25,7 @@
     WindowsUpdate     = @{ Enabled = $true; MaxPasses = 5 }
     FinalizeAction    = 'Finalize'
     PowerOffTimeoutMin = 90
+    ActionTimeoutMin  = 60    # minutes per package install before it's stopped and the step fails
   }
 
   # Test pool receives every new snapshot; production pools only after approval

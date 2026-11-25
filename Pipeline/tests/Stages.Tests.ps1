@@ -496,4 +496,166 @@ Describe 'Sync-GIGuestInstallers' {
         { Sync-GIGuestInstallers -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -SourceDir (Join-Path $TestDrive 'nope') -GuestDir 'C:\x' } | Should -Throw '*not found*'
     }
 }
+
+Describe 'Invoke-GIStageMaintain' {
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Get-Snapshot { param($VM, $Name, $ErrorAction) }
+            function script:New-Snapshot { param($VM, $Name, $Description, [switch] $Memory, [switch] $Confirm, $ErrorAction) }
+            function script:Start-VM { param($VM, [switch] $Confirm, $ErrorAction) }
+            function script:Stop-VMGuest { param($VM, [switch] $Confirm, $ErrorAction) }
+            function script:Get-VIEvent { param($Entity, $Start, $MaxSamples, $ErrorAction) }
+        }
+        $cfg.GoldenImage = @{ VmName = 'GI-VM'; GuestCredentialSecret = 'GI-GuestAdmin'; ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1'
+            CopyScript = $false; Actions = @('VmTools', 'Horizon'); FinalizeAction = 'Finalize'; WindowsUpdate = @{ Enabled = $true } }
+        Set-ModVar Calls ([System.Collections.Generic.List[string]]::new())
+        Set-ModVar FailAction $null
+        Set-ModVar Events @()
+        Set-ModVar Snap $null
+        $cred = [pscredential]::new('admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+        Set-ModVar Cred $cred
+        Mock -ModuleName VDI-GIPipeline Get-GISecretCredential { $global:GITestCtx.Cred }
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; PowerState = 'PoweredOff' } }
+        Mock -ModuleName VDI-GIPipeline Start-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm-1'; PowerState = 'PoweredOn' } }
+        Mock -ModuleName VDI-GIPipeline Get-Snapshot { $global:GITestCtx.Snap }
+        Mock -ModuleName VDI-GIPipeline New-Snapshot { [pscustomobject]@{ Id = 'snap-safe'; Name = $Name } }
+        Mock -ModuleName VDI-GIPipeline Wait-GIGuestReady { }
+        Mock -ModuleName VDI-GIPipeline Restart-GIGuest { $global:GITestCtx.Calls.Add('Reboot') }
+        Mock -ModuleName VDI-GIPipeline Stop-VMGuest { }
+        Mock -ModuleName VDI-GIPipeline Get-VIEvent { $global:GITestCtx.Events }
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestWindowsUpdate { $global:GITestCtx.Calls.Add('WU'); @{ Passes = @([pscustomobject]@{ pass = 1; installed = 3 }); Warning = '' } }
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestAction {
+            $global:GITestCtx.Calls.Add($Action)
+            if ($Action -eq $global:GITestCtx.FailAction) { throw "In-guest action '$Action' exited 1: installer exited with code 1603" }
+            if ($Action -eq 'Exit') { return [pscustomobject]@{ versions = [pscustomobject]@{ VmTools = '12.5.0'; Horizon = '2512.0.0' } } }
+            [pscustomobject]@{ versions = [pscustomobject]@{ $Action = '1.0' } }
+        }
+        function script:Steps { @(Get-GIStepList -Run $run) }
+        function script:StepStatus($Id) { (Steps | Where-Object id -eq $Id).status }
+    }
+
+    It 'runs every step in order on a fresh run and records them' {
+        $r = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Calls) | Should -Be @('Update', 'WU', 'VmTools', 'Horizon', 'Reboot', 'Exit', 'Finalize')
+        (Steps).id | Should -Be @('SafetySnapshot', 'PowerOn', 'CopyScript', 'CopyInstallers', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Manifest', 'Finalize', 'PowerOff')
+        @(Steps | Where-Object { $_.status -notin 'Succeeded', 'Skipped' }) | Should -BeNullOrEmpty
+        StepStatus 'CopyScript' | Should -Be 'Skipped'
+        (Steps | Where-Object id -eq 'Pkg:Horizon').message | Should -Be 'Installed version 1.0'
+        (Steps | Where-Object id -eq 'WindowsUpdate').message | Should -BeLike '1 pass(es), 3 update(s) installed*'
+        $r.Data.actions | Should -Be @('VmTools', 'Horizon')
+        $r.Data.manifest.Horizon | Should -Be '2512.0.0'
+        $run.safetySnapshot.name | Should -Be "pre-maint-$($run.runId)"
+    }
+
+    It 'marks only the failing package step Failed and stops there' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw '*1603*'
+        StepStatus 'Pkg:VmTools' | Should -Be 'Succeeded'
+        StepStatus 'Pkg:Horizon' | Should -Be 'Failed'
+        (Steps | Where-Object id -eq 'Pkg:Horizon').message | Should -BeLike '*1603*'
+        StepStatus 'Reboot' | Should -Be 'Pending'
+        $global:GITestCtx.Calls | Should -Not -Contain 'Finalize'
+    }
+
+    It 'resumes at the failed package, skipping finished updates and packages' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        $global:GITestCtx.Calls.Clear()
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Calls) | Should -Be @('Horizon', 'Reboot', 'Exit', 'Finalize')
+        Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 1 -Exactly
+        Should -Invoke -ModuleName VDI-GIPipeline Start-VM -Times 2 -Exactly
+        (Steps | Where-Object id -eq 'WindowsUpdate').message | Should -BeLike '*(earlier attempt)'
+    }
+
+    It 'resumes from a chosen step' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        $global:GITestCtx.Calls.Clear()
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run -FromStep 'Pkg:VmTools'
+        @($global:GITestCtx.Calls) | Should -Be @('VmTools', 'Horizon', 'Reboot', 'Exit', 'Finalize')
+    }
+
+    It 'restarts from the beginning after a snapshot revert and reuses the reverted-to safety snapshot' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $true })
+        Set-ModVar Events @([pscustomobject]@{ CreatedTime = (Get-Date); UserName = 'DOM\admin'; Info = [pscustomobject]@{ DescriptionId = 'VirtualMachine.revertToSnapshot' } })
+        $global:GITestCtx.Calls.Clear()
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        @($global:GITestCtx.Calls) | Should -Be @('Update', 'WU', 'VmTools', 'Horizon', 'Reboot', 'Exit', 'Finalize')
+        Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 1 -Exactly
+        Should -Invoke -ModuleName VDI-GIPipeline Write-GILog -ParameterFilter { $Message -like '*reverted*restarting Maintain*' }
+    }
+
+    It 'takes a new safety snapshot when the VM was reverted to a different snapshot' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        Set-ModVar Snap ([pscustomobject]@{ Name = "pre-maint-$($run.runId)"; IsCurrent = $false })
+        Set-ModVar Events @([pscustomobject]@{ CreatedTime = (Get-Date); UserName = 'DOM\admin'; Info = [pscustomobject]@{ DescriptionId = 'VirtualMachine.revertToSnapshot' } })
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 2 -Exactly
+        Should -Invoke -ModuleName VDI-GIPipeline New-Snapshot -Times 1 -Exactly -ParameterFilter { $Name -match "^pre-maint-$($run.runId)-\d{6}$" }
+    }
+
+    It 'restarts from the beginning when vCenter events cannot be read' {
+        Set-ModVar FailAction 'Horizon'
+        { Invoke-GIStageMaintain -Config $cfg -Run $run } | Should -Throw
+        Set-ModVar FailAction $null
+        Mock -ModuleName VDI-GIPipeline Get-VIEvent { throw 'no permission' }
+        $global:GITestCtx.Calls.Clear()
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        $global:GITestCtx.Calls | Should -Contain 'WU'
+        $global:GITestCtx.Calls | Should -Contain 'VmTools'
+    }
+
+    It 'passes the package timeout to the guest action' {
+        $cfg.GoldenImage.ActionTimeoutMin = 45
+        $null = Invoke-GIStageMaintain -Config $cfg -Run $run
+        Should -Invoke -ModuleName VDI-GIPipeline Invoke-GIGuestAction -ParameterFilter { $Action -eq 'Horizon' -and $TimeoutMin -eq 45 -and $OnWait }
+        Should -Invoke -ModuleName VDI-GIPipeline Invoke-GIGuestAction -ParameterFilter { $Action -eq 'Finalize' -and -not $TimeoutMin }
+    }
+}
+
+Describe 'Wait-GIGuestScriptAsync' {
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Invoke-VMScript { param($VM, $GuestCredential, $ScriptType, $ScriptText, [switch] $RunAsync, $ErrorAction) }
+            function script:Get-Task { param($Id, $ErrorAction) }
+            function script:Wait-Task { param($Task, $ErrorAction) }
+        }
+        $cfg.GoldenImage = @{ ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1' }
+        $script:cred = [pscredential]::new('admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+        Set-ModVar TaskState 'Running'
+        Set-ModVar Clock 0
+        Set-ModVar Base (Get-Date '2026-11-25 10:00')
+        Set-ModVar Kill $null
+        Mock -ModuleName VDI-GIPipeline Invoke-VMScript { [pscustomobject]@{ Id = 'task-1' } }
+        Mock -ModuleName VDI-GIPipeline Get-Task { [pscustomobject]@{ Id = 'task-1'; State = $global:GITestCtx.TaskState } }
+        Mock -ModuleName VDI-GIPipeline Wait-Task { [pscustomobject]@{ ExitCode = 0; ScriptOutput = 'ok' } }
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestScript { $global:GITestCtx.Kill = $ScriptText; [pscustomobject]@{ ExitCode = 0; ScriptOutput = '' } }
+        # Each Get-Date call moves the clock 90 minutes forward
+        Mock -ModuleName VDI-GIPipeline Get-Date { $global:GITestCtx.Clock++; $global:GITestCtx.Base.AddMinutes(90 * ($global:GITestCtx.Clock - 1)) }
+    }
+
+    It 'returns the script result when the task succeeds' {
+        Set-ModVar TaskState 'Success'
+        $r = Wait-GIGuestScriptAsync -Config $cfg -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -ScriptText 'x' -Action 'Horizon' -TimeoutMin 60
+        $r.ScriptOutput | Should -Be 'ok'
+        $global:GITestCtx.Kill | Should -BeNullOrEmpty
+    }
+
+    It 'stops installers and throws after the timeout' {
+        { Wait-GIGuestScriptAsync -Config $cfg -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -ScriptText 'x' -Action 'Horizon' -TimeoutMin 60 } |
+            Should -Throw "*'Horizon' did not finish within 60 minutes*"
+        $global:GITestCtx.Kill | Should -Match 'msiexec'
+        $global:GITestCtx.Kill | Should -Match ([regex]::Escape('C:\ProgramData\VDI\Install\*'))
+    }
+}
 }

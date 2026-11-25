@@ -86,3 +86,32 @@ Describe 'Test-GIRunId' {
     }
     It 'rejects null' { Test-GIRunId $null | Should -BeFalse }
 }
+
+Describe 'Run detail Maintain steps' {
+    BeforeAll {
+        $dir = Join-Path $TestDrive 'steps-state'
+        $null = New-Item -ItemType Directory -Path $dir
+        $script:scfg = @{ Paths = @{ State = $dir }; GoldenImage = @{ VmName = 'W11-GI-01' } }
+    }
+    It 'renders a nested step table under Maintain with status, duration and encoded messages' {
+        $r = New-GIRun -Config $scfg -RunId '20261125-020202'
+        $plan = @(
+            [pscustomobject]@{ Id = 'SafetySnapshot'; Label = 'Safety snapshot'; Resumable = $true; Applies = $true; SkipReason = '' }
+            [pscustomobject]@{ Id = 'CopyInstallers'; Label = 'Copy installers'; Resumable = $false; Applies = $false; SkipReason = 'No installer folder set' }
+            [pscustomobject]@{ Id = 'Pkg:Horizon'; Label = 'Install Horizon Agent'; Resumable = $true; Applies = $true; SkipReason = '' }
+        )
+        $null = Initialize-GIMaintainSteps -Config $scfg -Run $r -Plan $plan
+        Set-GIStep -Config $scfg -Run $r -Id 'SafetySnapshot' -Status Succeeded -Message 'Created pre-maint-x'
+        Set-GIStep -Config $scfg -Run $r -Id 'Pkg:Horizon' -Status Running -Message 'Running 3 min <b>'
+        $h = New-GIRunDetailPage -Run $r
+        $h | Should -Match '<tr class="substeps"><td></td><td colspan="5"><table class="steps">'
+        $h | Should -Match 'Install Horizon Agent</td><td><span class="badge st-running">Running'
+        $h | Should -Match 'No installer folder set'
+        $h | Should -Match 'Running 3 min &lt;b&gt;'
+        ([regex]::Matches($h, 'class="substeps"')).Count | Should -Be 1
+    }
+    It 'renders no step table for runs without steps' {
+        $r = New-GIRun -Config $scfg -RunId '20261125-030303'
+        New-GIRunDetailPage -Run $r | Should -Not -Match 'class="substeps"'
+    }
+}

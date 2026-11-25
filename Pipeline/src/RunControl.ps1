@@ -142,7 +142,15 @@ function Assert-GIRunRequest {
         if ($script:GIRunnableStages -notcontains $stage) { throw "Stage '$stage' can't be started from a request." }
         $runId = [string](& $get 'runId')
         if ($runId -notmatch '^\d{8}-\d{6}$') { throw "Invalid run id '$runId'." }
-        if (-not (Test-Path -LiteralPath (Join-Path $Config.Paths.State "$runId.json"))) { throw "Run $runId not found." }
+        $runPath = Join-Path $Config.Paths.State "$runId.json"
+        if (-not (Test-Path -LiteralPath $runPath)) { throw "Run $runId not found." }
+        $step = [string](& $get 'step')
+        if ($step) {
+            if ($stage -ne 'Maintain') { throw "A step can only be given for the Maintain stage." }
+            if ($step -notmatch '^[A-Za-z]+(:[A-Za-z]+)?$') { throw "Invalid step '$step'." }
+            $known = @(Get-GIStepList -Run (Get-GIRun -Config $Config -RunId $runId) | ForEach-Object { [string]$_.id })
+            if ($known -cnotcontains $step) { throw "Run $runId has no Maintain step '$step'." }
+        }
     }
     if ($action -eq 'Rollback') {
         $pool = [string](& $get 'pool')
@@ -158,6 +166,7 @@ function New-GIRunRequest {
         [Parameter(Mandatory)] [hashtable] $Config,
         [Parameter(Mandatory)] [ValidateSet('All', 'FromStage', 'Stage', 'PostCheck', 'Rollback')] [string] $Action,
         [string] $Stage,
+        [string] $Step,
         [string] $RunId,
         [string] $Pool,
         [string] $SnapshotName,
@@ -167,6 +176,7 @@ function New-GIRunRequest {
     $req = [ordered]@{
         id = [guid]::NewGuid().ToString(); action = $Action
         stage = if ($Stage) { $Stage } else { $null }
+        step = if ($Step) { $Step } else { $null }
         runId = if ($RunId) { $RunId } else { $null }
         pool = if ($Pool) { $Pool } else { $null }
         snapshotName = if ($SnapshotName) { $SnapshotName.Trim() } else { $null }

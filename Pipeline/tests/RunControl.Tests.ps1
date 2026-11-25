@@ -489,3 +489,41 @@ Describe 'Start-GIQueuedRun' {
         Should -Invoke -ModuleName VDI-GIPipeline Start-GIRunnerProcess -Times 0 -Exactly
     }
 }
+
+Describe 'Run requests with a Maintain step' {
+    BeforeEach {
+        $cfg = New-TestConfig
+        $reqPath = Join-Path $cfg.Paths.State 'run-request.json'
+        $runId = New-TestRun -Config $cfg
+        $run = Get-GIRun -Config $cfg -RunId $runId
+        $plan = @(
+            [pscustomobject]@{ Id = 'SafetySnapshot'; Label = 'Safety snapshot'; Resumable = $true; Applies = $true; SkipReason = '' }
+            [pscustomobject]@{ Id = 'Pkg:Horizon'; Label = 'Install Horizon Agent'; Resumable = $true; Applies = $true; SkipReason = '' }
+        )
+        $null = Initialize-GIMaintainSteps -Config $cfg -Run $run -Plan $plan
+        Mock -ModuleName VDI-GIPipeline Write-GIAudit {}
+    }
+
+    It 'queues a step that exists in the run' {
+        $r = New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:Horizon' -RunId $runId -RequestedBy 'a'
+        $r.step | Should -Be 'Pkg:Horizon'
+        (Get-Content $reqPath -Raw | ConvertFrom-Json).step | Should -Be 'Pkg:Horizon'
+    }
+
+    It 'rejects a step the run does not have' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:DEM' -RunId $runId -RequestedBy 'a' } | Should -Throw "*no Maintain step 'Pkg:DEM'*"
+        Test-Path $reqPath | Should -BeFalse
+    }
+
+    It 'rejects a malformed step' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -Step 'Pkg:Horizon;rm' -RunId $runId -RequestedBy 'a' } | Should -Throw "Invalid step*"
+    }
+
+    It 'rejects a step for any stage but Maintain' {
+        { New-GIRunRequest -Config $cfg -Action FromStage -Stage TestPush -Step 'Pkg:Horizon' -RunId $runId -RequestedBy 'a' } | Should -Throw '*only be given for the Maintain stage*'
+    }
+
+    It 'stores step as null when none is given' {
+        (New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -RunId $runId -RequestedBy 'a').step | Should -BeNullOrEmpty
+    }
+}

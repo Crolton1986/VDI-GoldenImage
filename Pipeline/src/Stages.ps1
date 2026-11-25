@@ -194,13 +194,18 @@ function Invoke-GIGuestAction {
     <#
     .SYNOPSIS
       Runs VDI-GoldenImage.ps1 -Action <Action> -Unattended in the guest and returns its parsed result file.
+    .DESCRIPTION
+      With -TimeoutMin the guest command runs async and is polled every 30 s; -OnWait gets the elapsed minutes.
+      When the time runs out, installer processes in the guest are stopped and the action fails.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Config,
         [Parameter(Mandatory)] $VM,
         [Parameter(Mandatory)] [pscredential] $Credential,
-        [Parameter(Mandatory)] [string] $Action
+        [Parameter(Mandatory)] [string] $Action,
+        [int] $TimeoutMin = 0,
+        [scriptblock] $OnWait
     )
     $script = $Config.GoldenImage.ScriptPathInGuest
     $work   = Get-GIConfigValue $Config 'GoldenImage.GuestWorkDir' 'C:\ProgramData\VDI\Pipeline'
@@ -211,7 +216,11 @@ Remove-Item '$res' -ErrorAction SilentlyContinue
 & '$script' -Action $Action -Unattended -ResultFile '$res'
 exit `$LASTEXITCODE
 "@
-    $r = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $text
+    if ($TimeoutMin -gt 0) {
+        $r = Wait-GIGuestScriptAsync -Config $Config -VM $VM -Credential $Credential -ScriptText $text -Action $Action -TimeoutMin $TimeoutMin -OnWait $OnWait
+    } else {
+        $r = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $text
+    }
     $json = (Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText "if(Test-Path '$res'){ Get-Content '$res' -Raw }").ScriptOutput
     $parsed = if ($json -and $json.Trim()) { $json | ConvertFrom-Json } else { $null }
     if ($r.ExitCode -ne 0) {
@@ -219,6 +228,50 @@ exit `$LASTEXITCODE
         throw "In-guest action '$Action' exited $($r.ExitCode): $errs"
     }
     return $parsed
+}
+
+function Wait-GIGuestScriptAsync {
+    # Invoke-VMScript -RunAsync with a deadline. On timeout, stops installers started from the guest Install
+    # folder (and msiexec) so the guest script returns, then throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] $VM,
+        [Parameter(Mandatory)] [pscredential] $Credential,
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [string] $Action,
+        [Parameter(Mandatory)] [int] $TimeoutMin,
+        [scriptblock] $OnWait
+    )
+    $task = Invoke-VMScript -VM $VM -GuestCredential $Credential -ScriptType Powershell -ScriptText $ScriptText -RunAsync -ErrorAction Stop
+    $start = Get-Date
+    $deadline = $start.AddMinutes($TimeoutMin)
+    $timedOut = $false
+    while ($true) {
+        $state = [string](Get-Task -Id $task.Id -ErrorAction Stop).State
+        if ($state -in 'Success', 'Error') { break }
+        if (-not $timedOut -and (Get-Date) -gt $deadline) {
+            $timedOut = $true
+            $install = Join-Path (Split-Path $Config.GoldenImage.ScriptPathInGuest -Parent) 'Install'
+            $kill = "Get-Process | Where-Object { `$_.Path -like '$install\*' } | Stop-Process -Force -ErrorAction SilentlyContinue; " +
+                    "Get-Process msiexec -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
+            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $kill | Out-Null } catch { Write-Verbose "Stopping installers: $($_.Exception.Message)" }
+            # Give the guest script a couple of minutes to notice and return
+            $deadline = (Get-Date).AddMinutes(2)
+            continue
+        }
+        if ($timedOut -and (Get-Date) -gt $deadline) { break }
+        if ($OnWait -and -not $timedOut) { & $OnWait ([int][math]::Floor(((Get-Date) - $start).TotalMinutes)) }
+        Start-Sleep -Seconds 30
+    }
+    $logs = Join-Path (Split-Path $Config.GoldenImage.ScriptPathInGuest -Parent) 'Logs'
+    if ($timedOut) { throw "In-guest action '$Action' did not finish within $TimeoutMin minutes; installer processes were stopped. See the install logs in $logs." }
+    if ($state -eq 'Error') {
+        $t = Get-Task -Id $task.Id
+        $why = try { [string]$t.ExtensionData.Info.Error.LocalizedMessage } catch { '' }
+        throw "In-guest action '$Action' failed to run: $why"
+    }
+    return Wait-Task -Task $task -ErrorAction Stop
 }
 
 function Invoke-GIGuestWindowsUpdate {
@@ -315,96 +368,225 @@ function Invoke-GIStagePreflight {
     @{ Message = "vCenter, Horizon and pools OK ($($poolNames.Count) pools)"; Data = @{ poolIds = $pools; baseVmId = $img.BaseVm.id } }
 }
 
+#----- Maintain sub-steps -----
+
+function Get-GIMaintainStepPlan {
+    # Ordered Maintain steps for this config. Resumable steps are skipped on resume when they already succeeded;
+    # the others run on every attempt (power on, copy files) or depend on everything before them (reboot onward).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [hashtable] $Config)
+    $gi = $Config.GoldenImage
+    $actions = @(@(Get-GIConfigValue $Config 'GoldenImage.Actions' @()) | Where-Object { $_ })
+    $wuOn = [bool](Get-GIConfigValue $Config 'GoldenImage.WindowsUpdate.Enabled' $true)
+    $hasInstallers = [bool](Resolve-GIInstallerSourceDir -Config $Config)
+    $plan = [System.Collections.Generic.List[object]]::new()
+    $add = { param($Id, $Label, $Resumable, $Applies = $true, $SkipReason = '') $plan.Add([pscustomobject]@{ Id = $Id; Label = $Label; Resumable = $Resumable; Applies = $Applies; SkipReason = $SkipReason }) }
+    & $add 'SafetySnapshot' 'Safety snapshot' $true
+    & $add 'PowerOn' 'Power on, wait for guest' $false
+    & $add 'CopyScript' 'Copy guest script' $false ([bool](Get-GIConfigValue $Config 'GoldenImage.CopyScript' $true)) 'CopyScript is off'
+    & $add 'CopyInstallers' 'Copy installers' $false $hasInstallers 'No installer folder set'
+    & $add 'EnableUpdates' 'Enable updates (-Action Update)' $true
+    & $add 'WindowsUpdate' 'Windows Update' $true $wuOn 'Windows Update is turned off'
+    foreach ($a in $actions) {
+        $name = if ($script:GIGuestPackages.Contains([string]$a)) { $script:GIGuestPackages[[string]$a].Name } else { [string]$a }
+        & $add "Pkg:$a" "Install $name" $true
+    }
+    & $add 'Reboot' 'Reboot after installs' $false ($actions.Count -gt 0) 'No packages selected'
+    & $add 'Manifest' 'Read installed versions' $false
+    & $add 'Finalize' "Finalize (-Action $($gi.FinalizeAction))" $false
+    & $add 'PowerOff' 'Wait for power off' $false
+    return $plan.ToArray()
+}
+
+function Get-GIVmRevertEvent {
+    # Newest snapshot revert of the VM since $Since, or $null. Throws when vCenter events can't be read.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $VM, [Parameter(Mandatory)] [datetime] $Since)
+    $ids = @('VirtualMachine.revertToSnapshot', 'VirtualMachine.revertToCurrentSnapshot')
+    Get-VIEvent -Entity $VM -Start $Since -MaxSamples 2000 -ErrorAction Stop |
+        Where-Object { $_.PSObject.Properties['Info'] -and $_.Info -and $ids -contains [string]$_.Info.DescriptionId } |
+        Sort-Object CreatedTime | Select-Object -Last 1
+}
+
+function Invoke-GIMaintainStep {
+    # Runs one Maintain step: Running -> Succeeded (message = last string the action returns) or Failed (rethrows).
+    # Skipped steps and resumable steps that already succeeded are left alone.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] $Run,
+        [Parameter(Mandatory)] [string] $Id,
+        [Parameter(Mandatory)] [scriptblock] $Action
+    )
+    $step = Get-GIStep -Run $Run -Id $Id
+    if (-not $step) { throw "Unknown Maintain step '$Id'." }
+    if ($step.status -eq 'Skipped') { return }
+    if ($step.status -eq 'Succeeded' -and $step.resumable) {
+        Write-GILog -Config $Config -RunId $Run.runId -Message "Maintain step '$($step.label)' already done in an earlier attempt; skipping"
+        return
+    }
+    Set-GIStep -Config $Config -Run $Run -Id $Id -Status Running -Message ''
+    Write-GILog -Config $Config -RunId $Run.runId -Message "Maintain step '$($step.label)' started"
+    try {
+        $out = @(& $Action)
+        $msg = [string](@($out | Where-Object { $_ -is [string] }) | Select-Object -Last 1)
+        Set-GIStep -Config $Config -Run $Run -Id $Id -Status Succeeded -Message $msg
+    } catch {
+        Set-GIStep -Config $Config -Run $Run -Id $Id -Status Failed -Message $_.Exception.Message
+        throw
+    }
+}
+
 #----- Stage: Maintain -----
 
 function Invoke-GIStageMaintain {
+    <#
+    .SYNOPSIS
+      Safety snapshot, Windows Update, package installs and finalize, as tracked sub-steps (run.stages.Maintain.steps).
+    .DESCRIPTION
+      A retry after a failed or interrupted attempt resumes at the first unfinished step; -FromStep picks the
+      step to resume from ('SafetySnapshot' restarts everything). If the VM was reverted to a snapshot since the
+      last attempt started, the earlier work is gone, so Maintain restarts from the beginning.
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] $Run)
+    param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] $Run, [string] $FromStep = '')
 
     $gi   = $Config.GoldenImage
     $cred = Get-GISecretCredential -Name $gi.GuestCredentialSecret
-    $vm   = Get-VM -Name $gi.VmName -ErrorAction Stop
+    # Scriptblocks below run in a child scope, so shared state lives in this table
+    $ctx  = @{ vm = (Get-VM -Name $gi.VmName -ErrorAction Stop); data = @{}; reverted = $false }
 
-    # Safety snapshot before touching anything
-    Set-GIProgress -Config $Config -Run $Run -Message 'Creating safety snapshot'
-    $safety = New-Snapshot -VM $vm -Name "pre-maint-$($Run.runId)" -Description "Before VDI pipeline run $($Run.runId)" -Memory:$false -Confirm:$false -ErrorAction Stop
-    $Run.safetySnapshot = [pscustomobject]@{ id = [string]$safety.Id; name = $safety.Name }
-    Save-GIRun -Config $Config -Run $Run
-
-    Set-GIProgress -Config $Config -Run $Run -Message 'Powering on golden VM'
-    if ($vm.PowerState -ne 'PoweredOn') { $vm = Start-VM -VM $vm -Confirm:$false -ErrorAction Stop }
-    Wait-GIGuestReady -VM $vm -Credential $cred
-
-    if (Get-GIConfigValue $Config 'GoldenImage.CopyScript' $true) {
-        $local = Join-Path (Split-Path $Config.Root -Parent) 'VDI-GoldenImage.ps1'
-        if (Test-Path $local) {
-            $dir = Split-Path $gi.ScriptPathInGuest -Parent
-            Invoke-GIGuestScript -VM $vm -Credential $cred -ScriptText "New-Item -ItemType Directory -Path '$dir' -Force | Out-Null" | Out-Null
-            Copy-VMGuestFile -Source $local -Destination "$dir\" -VM $vm -LocalToGuest -GuestCredential $cred -Force -ErrorAction Stop
+    # A revert since the earlier attempt started throws away its work: resume isn't safe
+    $prev = @(Get-GIStepList -Run $Run)
+    $resumeFrom = $FromStep
+    $earliest = @($prev | Where-Object { $_.startedAt } | ForEach-Object { [datetime]$_.startedAt } | Sort-Object) | Select-Object -First 1
+    if ($earliest -and @($prev | Where-Object { $_.status -eq 'Succeeded' -and $_.resumable -and $_.id -ne 'SafetySnapshot' }).Count) {
+        try {
+            $rev = Get-GIVmRevertEvent -VM $ctx.vm -Since $earliest
+            if ($rev) {
+                Write-GILog -Config $Config -RunId $Run.runId -Level Warn -Message "Golden VM was reverted to a snapshot at $($rev.CreatedTime) by $($rev.UserName); restarting Maintain from the beginning."
+                $resumeFrom = 'SafetySnapshot'
+                $ctx.reverted = $true
+            }
+        } catch {
+            Write-GILog -Config $Config -RunId $Run.runId -Level Warn -Message "Couldn't read vCenter events to check for a snapshot revert ($($_.Exception.Message)); restarting Maintain from the beginning to be safe."
+            # Not a confirmed revert: the existing safety snapshot still predates this run's Maintain, so keep it
+            $resumeFrom = 'SafetySnapshot'
         }
     }
+    $plan = Get-GIMaintainStepPlan -Config $Config
+    $startAt = Initialize-GIMaintainSteps -Config $Config -Run $Run -Plan $plan -ResumeFrom $resumeFrom
+    if ($startAt) { Write-GILog -Config $Config -RunId $Run.runId -Message "Maintain resuming at step '$((Get-GIStep -Run $Run -Id $startAt).label)'" }
+    $step = { param($Id, $Body) Invoke-GIMaintainStep -Config $Config -Run $Run -Id $Id -Action $Body }
 
-    $data = @{ actions = @() }
-    $installerSrc = Resolve-GIInstallerSourceDir -Config $Config
-    if ($installerSrc) {
+    & $step 'SafetySnapshot' {
+        $existing = $Run.safetySnapshot
+        $snap = if ($existing) { Get-Snapshot -VM $ctx.vm -Name $existing.name -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        # After a revert, the old safety snapshot is only still "before Maintain" if it's the one the VM went back to
+        if ($snap -and (-not $ctx.reverted -or $snap.IsCurrent)) { return "Reusing $($existing.name)" }
+        $name = if ($snap) { "pre-maint-$($Run.runId)-$((Get-Date).ToString('HHmmss'))" } else { "pre-maint-$($Run.runId)" }
+        $safety = New-Snapshot -VM $ctx.vm -Name $name -Description "Before VDI pipeline run $($Run.runId)" -Memory:$false -Confirm:$false -ErrorAction Stop
+        $Run.safetySnapshot = [pscustomobject]@{ id = [string]$safety.Id; name = $safety.Name }
+        Save-GIRun -Config $Config -Run $Run
+        "Created $($safety.Name)"
+    }
+
+    & $step 'PowerOn' {
+        $ctx.vm = Get-VM -Id $ctx.vm.Id
+        if ($ctx.vm.PowerState -ne 'PoweredOn') { $ctx.vm = Start-VM -VM $ctx.vm -Confirm:$false -ErrorAction Stop }
+        Wait-GIGuestReady -VM $ctx.vm -Credential $cred
+        'Guest ready'
+    }
+
+    & $step 'CopyScript' {
+        $local = Join-Path (Split-Path $Config.Root -Parent) 'VDI-GoldenImage.ps1'
+        if (-not (Test-Path $local)) { return "Not found on host: $local (using the copy already in the guest)" }
+        $dir = Split-Path $gi.ScriptPathInGuest -Parent
+        Invoke-GIGuestScript -VM $ctx.vm -Credential $cred -ScriptText "New-Item -ItemType Directory -Path '$dir' -Force | Out-Null" | Out-Null
+        Copy-VMGuestFile -Source $local -Destination "$dir\" -VM $ctx.vm -LocalToGuest -GuestCredential $cred -Force -ErrorAction Stop
+        "Copied to $dir"
+    }
+
+    & $step 'CopyInstallers' {
+        $installerSrc = Resolve-GIInstallerSourceDir -Config $Config
         $guestInstall = Join-Path (Split-Path $gi.ScriptPathInGuest -Parent) 'Install'
-        Set-GIProgress -Config $Config -Run $Run -Message "Copying installers to $guestInstall"
-        $sync = Sync-GIGuestInstallers -VM $vm -Credential $cred -SourceDir $installerSrc -GuestDir $guestInstall
-        $data.installers = [pscustomobject]@{ copied = @($sync.Copied); skipped = @($sync.Skipped) }
+        $sync = Sync-GIGuestInstallers -VM $ctx.vm -Credential $cred -SourceDir $installerSrc -GuestDir $guestInstall
+        $ctx.data.installers = [pscustomobject]@{ copied = @($sync.Copied); skipped = @($sync.Skipped) }
         Write-GILog -Config $Config -RunId $Run.runId -Message "Installers: copied=$(@($sync.Copied).Count) unchanged=$(@($sync.Skipped).Count) -> $guestInstall" -Level Info
-    }
-    Set-GIProgress -Config $Config -Run $Run -Message 'Enabling updates (-Action Update)'
-    Invoke-GIGuestAction -Config $Config -VM $vm -Credential $cred -Action 'Update' | Out-Null
-
-    if (Get-GIConfigValue $Config 'GoldenImage.WindowsUpdate.Enabled' $true) {
-        $wu = Invoke-GIGuestWindowsUpdate -Config $Config -Run $Run -VM $vm -Credential $cred
-        $data.windowsUpdate = $wu.Passes
-        if ($wu.Warning) { $data.warnings = @($wu.Warning); Write-GILog -Config $Config -RunId $Run.runId -Message $wu.Warning -Level Warn }
+        "$(@($sync.Copied).Count) copied, $(@($sync.Skipped).Count) unchanged"
     }
 
-    foreach ($a in @($gi.Actions)) {
-        Set-GIProgress -Config $Config -Run $Run -Message "Running in-guest action $a"
-        Invoke-GIGuestAction -Config $Config -VM $vm -Credential $cred -Action $a | Out-Null
-        $data.actions += $a
-    }
-    if (@($gi.Actions).Count) {
-        Set-GIProgress -Config $Config -Run $Run -Message 'Rebooting after agent installs'
-        Restart-GIGuest -VM $vm -Credential $cred
+    & $step 'EnableUpdates' {
+        Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action 'Update' | Out-Null
+        'Done'
     }
 
-    # 'Exit' action does nothing but still writes the result file with installed versions
-    $manifestResult = Invoke-GIGuestAction -Config $Config -VM $vm -Credential $cred -Action 'Exit'
-    $manifest = @{}
-    if ($manifestResult -and $manifestResult.versions) {
-        foreach ($p in $manifestResult.versions.PSObject.Properties) { if ($p.Value) { $manifest[$p.Name] = [string]$p.Value } }
-    }
-    $data.manifest = $manifest
-
-    Set-GIProgress -Config $Config -Run $Run -Message "Finalizing (-Action $($gi.FinalizeAction))"
-    try {
-        Invoke-GIGuestAction -Config $Config -VM $vm -Credential $cred -Action $gi.FinalizeAction | Out-Null
-    } catch {
-        # OSOT -shutdown can power the guest off before the guest operation returns.
-        # That's success; any other failure (VM still running after 5 minutes) is real.
-        $finalizeError = $_
-        $wait = (Get-Date).AddMinutes(5)
-        while ((Get-VM -Id $vm.Id).PowerState -ne 'PoweredOff' -and (Get-Date) -lt $wait) { Start-Sleep -Seconds 20 }
-        if ((Get-VM -Id $vm.Id).PowerState -ne 'PoweredOff') { throw $finalizeError }
+    & $step 'WindowsUpdate' {
+        $wu = Invoke-GIGuestWindowsUpdate -Config $Config -Run $Run -VM $ctx.vm -Credential $cred
+        $ctx.data.windowsUpdate = $wu.Passes
+        if ($wu.Warning) { $ctx.data.warnings = @($wu.Warning); Write-GILog -Config $Config -RunId $Run.runId -Message $wu.Warning -Level Warn }
+        $installed = (@($wu.Passes) | Measure-Object -Property installed -Sum).Sum
+        "$(@($wu.Passes).Count) pass(es), $([int]$installed) update(s) installed$(if ($wu.Warning) { "; $($wu.Warning)" })"
     }
 
-    $vm = Get-VM -Id $vm.Id
-    if ($vm.PowerState -eq 'PoweredOn') {
-        Set-GIProgress -Config $Config -Run $Run -Message 'Shutting down guest'
-        Stop-VMGuest -VM $vm -Confirm:$false -ErrorAction Stop | Out-Null
+    $timeout = [int](Get-GIConfigValue $Config 'GoldenImage.ActionTimeoutMin' 60)
+    foreach ($a in @($gi.Actions | Where-Object { $_ })) {
+        $id = "Pkg:$a"
+        & $step $id {
+            $onWait = { param($min) Set-GIStep -Config $Config -Run $Run -Id $id -Message "Running $min min (timeout $timeout min)" }.GetNewClosure()
+            $r = Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action $a -TimeoutMin $timeout -OnWait $onWait
+            $ver = if ($r -and $r.PSObject.Properties['versions'] -and $r.versions -and $r.versions.PSObject.Properties[[string]$a]) { [string]$r.versions.$a } else { '' }
+            if ($ver) { "Installed version $ver" } else { 'Done' }
+        }
     }
-    $timeout = [int](Get-GIConfigValue $Config 'GoldenImage.PowerOffTimeoutMin' 90)
-    $deadline = (Get-Date).AddMinutes($timeout)
-    while ((Get-VM -Id $vm.Id).PowerState -ne 'PoweredOff') {
-        if ((Get-Date) -gt $deadline) { throw "Golden VM did not power off within $timeout minutes after finalize." }
-        Set-GIProgress -Config $Config -Run $Run -Message 'Waiting for golden VM to power off'
-        Start-Sleep -Seconds 30
+    $ctx.data.actions = @(@(Get-GIStepList -Run $Run) | Where-Object { $_.id -like 'Pkg:*' -and $_.status -eq 'Succeeded' } | ForEach-Object { $_.id.Substring(4) })
+
+    & $step 'Reboot' {
+        Restart-GIGuest -VM $ctx.vm -Credential $cred
+        'Guest back up'
     }
-    @{ Message = "Updated and finalized ($(@($gi.Actions).Count) agent actions)"; Data = $data }
+
+    & $step 'Manifest' {
+        # 'Exit' action does nothing but still writes the result file with installed versions
+        $manifestResult = Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action 'Exit'
+        $manifest = @{}
+        if ($manifestResult -and $manifestResult.versions) {
+            foreach ($p in $manifestResult.versions.PSObject.Properties) { if ($p.Value) { $manifest[$p.Name] = [string]$p.Value } }
+        }
+        $ctx.data.manifest = $manifest
+        ($manifest.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name) $($_.Value)" }) -join ', '
+    }
+
+    & $step 'Finalize' {
+        try {
+            Invoke-GIGuestAction -Config $Config -VM $ctx.vm -Credential $cred -Action $gi.FinalizeAction | Out-Null
+        } catch {
+            # OSOT -shutdown can power the guest off before the guest operation returns.
+            # That's success; any other failure (VM still running after 5 minutes) is real.
+            $finalizeError = $_
+            $wait = (Get-Date).AddMinutes(5)
+            while ((Get-VM -Id $ctx.vm.Id).PowerState -ne 'PoweredOff' -and (Get-Date) -lt $wait) { Start-Sleep -Seconds 20 }
+            if ((Get-VM -Id $ctx.vm.Id).PowerState -ne 'PoweredOff') { throw $finalizeError }
+        }
+        'Done'
+    }
+
+    & $step 'PowerOff' {
+        $ctx.vm = Get-VM -Id $ctx.vm.Id
+        if ($ctx.vm.PowerState -eq 'PoweredOn') {
+            Set-GIStep -Config $Config -Run $Run -Id 'PowerOff' -Message 'Shutting down guest'
+            Stop-VMGuest -VM $ctx.vm -Confirm:$false -ErrorAction Stop | Out-Null
+        }
+        $offTimeout = [int](Get-GIConfigValue $Config 'GoldenImage.PowerOffTimeoutMin' 90)
+        $deadline = (Get-Date).AddMinutes($offTimeout)
+        while ((Get-VM -Id $ctx.vm.Id).PowerState -ne 'PoweredOff') {
+            if ((Get-Date) -gt $deadline) { throw "Golden VM did not power off within $offTimeout minutes after finalize." }
+            Set-GIStep -Config $Config -Run $Run -Id 'PowerOff' -Message 'Waiting for golden VM to power off'
+            Start-Sleep -Seconds 30
+        }
+        'Powered off'
+    }
+    @{ Message = "Updated and finalized ($(@($ctx.data.actions).Count) agent actions)"; Data = $ctx.data }
 }
 
 #----- Stage: Snapshot -----

@@ -48,7 +48,9 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
   "progress": "Windows Update pass 2: 3 updates pending, rebooting",
   "stages": {
     "Preflight": { "status": "Succeeded", "startedAt": "...", "endedAt": "...", "message": "", "data": {} },
-    "Maintain":  { "status": "Running",   "startedAt": "...", "endedAt": null,  "message": "", "data": {} },
+    "Maintain":  { "status": "Running",   "startedAt": "...", "endedAt": null,  "message": "", "data": {},
+                   "steps": [ { "id": "Pkg:Horizon", "label": "Install Horizon Agent", "resumable": true,
+                                "status": "Running", "startedAt": "...", "endedAt": null, "message": "Running 12 min (timeout 60 min)" } ] },
     "Snapshot":  { "status": "Pending",   "startedAt": null,  "endedAt": null,  "message": "", "data": {} },
     "TestPush":  { "status": "Pending", ... },
     "Validate":  { "status": "Pending", ... },
@@ -131,6 +133,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     WindowsUpdate     = @{ Enabled = $true; MaxPasses = 5 }
     FinalizeAction    = 'Finalize'
     PowerOffTimeoutMin = 90
+    ActionTimeoutMin  = 60    # minutes per package install before it's stopped and the step fails
   }
   Pools = @{
     Test       = @{ Name = 'TST-W11'; LogoffPolicy = 'FORCE_LOGOFF' }
@@ -251,18 +254,20 @@ Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `r
 ## Run request: `state/run-request.json`
 
 ```json
-{ "id": "<guid>", "action": "All|FromStage|Stage|PostCheck|Rollback", "stage": "Validate",
+{ "id": "<guid>", "action": "All|FromStage|Stage|PostCheck|Rollback", "stage": "Validate", "step": null,
   "runId": "20261124-213005", "pool": "PRD-W11", "snapshotName": null, "forceLogoff": false,
   "requestedBy": "DOMAIN\\x", "requestedAt": "<o>" }
 ```
 
-- `New-GIRunRequest -Config -Action [-Stage] [-RunId] [-Pool] [-SnapshotName] [-ForceLogoff] -RequestedBy`
+- `New-GIRunRequest -Config -Action [-Stage] [-Step] [-RunId] [-Pool] [-SnapshotName] [-ForceLogoff] -RequestedBy`
+  (`step` only with stage Maintain; must match `^[A-Za-z]+(:[A-Za-z]+)?$` and be one of the run's Maintain step ids)
   validates (stage in stage list minus Approval/Promote; runId pattern + file exists for FromStage/Stage;
   pool must be the test pool or a production pool from config for Rollback) and refuses if a request is
   already pending or the lock is held. Writes atomically, audits `run.request`/`rollback.request`.
 - `Read-GIRunRequest -Config`: reads, deletes, re-validates, returns the request or `$null`.
 - The dashboard then calls `Start-GIRunnerTask` (wraps `Start-ScheduledTask -TaskName VDI-GI-Runner`).
-- `Invoke-GIPipeline.ps1 -FromRequest` executes it. `-FromStage <name> -RunId` runs that stage through Validate.
+- `Invoke-GIPipeline.ps1 -FromRequest` executes it. `-FromStage <name> -RunId` runs that stage through Validate;
+  a request `step` becomes `-FromStep`.
 
 ## Dashboard roles
 
@@ -332,3 +337,20 @@ Background steps run as `pwsh -NoProfile -File Pipeline/Invoke-GISetupStep.ps1 -
 (a separate process, so installing modules doesn't collide with modules loaded inside Pode), started by
 `Start-GISetupStep -Config -Step`, which refuses if another step is running or the step isn't the next one
 (a failed step can be retried).
+
+## Maintain sub-steps
+
+`run.stages.Maintain.steps` is rebuilt at the start of every Maintain attempt from the config:
+`SafetySnapshot, PowerOn, CopyScript, CopyInstallers, EnableUpdates, WindowsUpdate, Pkg:<Action>..., Reboot, Manifest, Finalize, PowerOff`.
+Steps that don't apply are `Skipped` with the reason as message. `resumable` steps (SafetySnapshot, EnableUpdates,
+WindowsUpdate, Pkg:*) that succeeded before the resume point keep their result on a retry and aren't run again;
+all other steps run on every attempt. Resume happens when the previous attempt left a step Failed or Running, or
+when `-FromStep` is given. A snapshot revert task on the VM (vCenter event `VirtualMachine.revertToSnapshot` or
+`revertToCurrentSnapshot`) since the earliest recorded step start forces a full restart.
+
+- `Initialize-GIMaintainSteps -Config -Run -Plan [-ResumeFrom]` returns the step work resumes at ('' when fresh).
+- `Set-GIStep -Config -Run -Id [-Status] [-Message]` updates one step and mirrors it into `run.progress`.
+- `Get-GIStepList -Run`, `Get-GIStep -Run -Id` read them; `Set-GIProgress` also writes its message to the running step.
+- Package steps call `Invoke-GIGuestAction -TimeoutMin <GoldenImage.ActionTimeoutMin>`, which runs the guest command
+  with `Invoke-VMScript -RunAsync` and polls it; on timeout it stops processes started from the guest `Install` folder
+  and `msiexec`, then fails the step.

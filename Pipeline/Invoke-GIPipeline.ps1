@@ -8,10 +8,14 @@
   -Stage Rollback   push the last-known-good snapshot (or -SnapshotName) to -PoolName
   -Stage Status     print the newest runs
   -FromStage <name> continue an existing run (-RunId) from that stage through Validate
+  -FromStep <id>    with -FromStage Maintain or -Stage Maintain: resume Maintain at that sub-step (e.g. Pkg:Horizon;
+                    SafetySnapshot restarts it). Without it, a failed Maintain resumes at its first unfinished step.
   -FromRequest      run the request queued by the dashboard (state/run-request.json); used by the VDI-GI-Runner task
   Every invocation except Status holds state/pipeline.lock, so scheduled, CLI and dashboard runs never overlap.
 .EXAMPLE
   PS> .\Invoke-GIPipeline.ps1 -FromStage TestPush -RunId 20261124-213005
+.EXAMPLE
+  PS> .\Invoke-GIPipeline.ps1 -FromStage Maintain -FromStep Pkg:Horizon -RunId 20261124-213005
 .EXAMPLE
   PS> .\Invoke-GIPipeline.ps1 -Stage All
 .EXAMPLE
@@ -31,6 +35,7 @@ param(
     [string] $SnapshotName,
     [switch] $ForceLogoff,
     [ValidateSet('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate')] [string] $FromStage,
+    [ValidatePattern('^[A-Za-z]+(:[A-Za-z]+)?$')] [string] $FromStep,
     [switch] $FromRequest
 )
 $ErrorActionPreference = 'Stop'
@@ -68,8 +73,8 @@ if ($FromRequest) {
     $requestedBy = [string]$req.requestedBy
     switch ($req.action) {
         'All'       { $Stage = 'All' }
-        'FromStage' { $FromStage = $req.stage; $RunId = $req.runId }
-        'Stage'     { $Stage = $req.stage; $RunId = $req.runId }
+        'FromStage' { $FromStage = $req.stage; $RunId = $req.runId; if ($req.PSObject.Properties['step'] -and $req.step) { $FromStep = [string]$req.step } }
+        'Stage'     { $Stage = $req.stage; $RunId = $req.runId; if ($req.PSObject.Properties['step'] -and $req.step) { $FromStep = [string]$req.step } }
         'PostCheck' { $Stage = 'PostCheck' }
         'Rollback'  { $Stage = 'Rollback'; $PoolName = $req.pool; $SnapshotName = $req.snapshotName; $ForceLogoff = [bool]$req.forceLogoff }
     }
@@ -78,6 +83,9 @@ if ($FromRequest) {
     Write-Host "Running queued request $($req.id): $($req.action) from $requestedBy"
 }
 if ($FromStage -and -not $RunId) { Exit-GIPipelineLock -Config $config; throw '-FromStage needs -RunId.' }
+if ($FromStep -and -not ($FromStage -eq 'Maintain' -or (-not $FromStage -and $Stage -eq 'Maintain'))) {
+    Exit-GIPipelineLock -Config $config; throw '-FromStep only works with -FromStage Maintain or -Stage Maintain.'
+}
 
 function Resolve-Run {
     if ($RunId) { return Get-GIRun -Config $config -RunId $RunId }
@@ -122,7 +130,9 @@ try {
 
         foreach ($s in $stages) {
             # Literal scriptblock stays bound to this script's scope ($config/$run); closure captures $s
-            $action = { & "Invoke-GIStage$s" -Config $config -Run $run }.GetNewClosure()
+            $stageArgs = @{ Config = $config; Run = $run }
+            if ($s -eq 'Maintain' -and $FromStep) { $stageArgs.FromStep = $FromStep }
+            $action = { & "Invoke-GIStage$s" @stageArgs }.GetNewClosure()
             Invoke-GIStage -Config $config -Run $run -Stage $s -Action $action
         }
         if ($stages -contains 'Validate') { $run = Enter-GIApprovalGate -Config $config -Run $run }

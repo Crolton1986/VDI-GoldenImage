@@ -479,6 +479,27 @@ function New-GIRunActionsHtml {
     $note = ''
     if ($Busy) { $dis = ' disabled'; $note = '<p class="muted">Disabled while the pipeline is busy.</p>' }
     $tok = Get-GITokenInput $Token
+    $steps = @(@(Get-GIValue (Get-GIValue (Get-GIValue $Run 'stages' $null) 'Maintain' $null) 'steps' @()) | Where-Object { $null -ne $_ })
+    if ($status -eq 'Failed' -and [string](Get-GIValue $Run 'currentStage') -eq 'Maintain' -and $steps.Count) {
+        # Resume picks the first unfinished step; SafetySnapshot restarts Maintain (a snapshot revert also forces that)
+        $at = @($steps | Where-Object { [string](Get-GIValue $_ 'status') -in 'Failed', 'Running' }) | Select-Object -First 1
+        if (-not $at) { $at = @($steps | Where-Object { [string](Get-GIValue $_ 'status') -eq 'Pending' }) | Select-Object -First 1 }
+        $atLabel = if ($at) { ConvertTo-GIHtml (Get-GIValue $at 'label') } else { 'the first unfinished step' }
+        $opts = foreach ($s in $steps) {
+            if ([string](Get-GIValue $s 'status') -eq 'Skipped') { continue }
+            $sid = ConvertTo-GIHtml (Get-GIValue $s 'id')
+            $sel = ''
+            if ($at -and [string](Get-GIValue $s 'id') -eq [string](Get-GIValue $at 'id')) { $sel = ' selected' }
+            "<option value=""$sid""$sel>$(ConvertTo-GIHtml (Get-GIValue $s 'label'))</option>"
+        }
+        $hidden = "$tok<input type=""hidden"" name=""runId"" value=""$rid""><input type=""hidden"" name=""stage"" value=""Maintain"">"
+        $h = "<section class=""card""><h3>Actions</h3>$note"
+        $h += "<form method=""post"" action=""/run/start"">$hidden<input type=""hidden"" name=""action"" value=""FromStage""><button type=""submit""$dis>Resume Maintain at $atLabel</button> "
+        $h += "<button type=""submit"" name=""step"" value=""SafetySnapshot"" class=""sec""$dis>Restart Maintain from the beginning</button></form>"
+        $h += "<form method=""post"" action=""/run/start"" class=""formbox"">$hidden<input type=""hidden"" name=""action"" value=""FromStage""><label>Resume from step <select name=""step""$dis>$(@($opts) -join '')</select></label> <button type=""submit"" class=""sec""$dis>Resume from this step</button></form>"
+        $h += '<p class="muted">Steps that already succeeded are skipped. If the golden VM was reverted to a snapshot since this run started, Maintain restarts from the beginning instead.</p></section>'
+        return $h
+    }
     if ($status -eq 'Failed' -and $stage) {
         return "<section class=""card""><h3>Actions</h3>$note<form method=""post"" action=""/run/start"">$tok<input type=""hidden"" name=""runId"" value=""$rid""><input type=""hidden"" name=""stage"" value=""$stage""><button type=""submit"" name=""action"" value=""FromStage""$dis>Retry from $stage</button> <button type=""submit"" name=""action"" value=""Stage"" class=""sec""$dis>Re-run $stage only</button></form></section>"
     }

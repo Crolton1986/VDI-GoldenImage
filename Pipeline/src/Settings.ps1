@@ -70,6 +70,8 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'InstallerSourceDir'; Label = 'Installer folder on pipeline host'; Type = 'string'
                Help = 'Optional. Files here are copied into the Install folder next to the guest script before the packages run; unchanged files are skipped. Relative paths resolve from the Pipeline folder. Leave empty if you stage installers in the guest yourself.' }
             @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = $script:GIGuestActions }
+            @{ Key = 'ActionTimeoutMin'; Label = 'Package timeout (min)'; Type = 'int'; Min = 5; Max = 600; Default = 60; Required = $true
+               Help = 'A package install still running after this long is stopped and its Maintain step fails, instead of blocking the run.' }
         )
     }
     WindowsUpdate = @{
