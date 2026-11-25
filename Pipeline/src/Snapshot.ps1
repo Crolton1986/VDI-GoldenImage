@@ -131,6 +131,54 @@ function New-GIGoldenSnapshot {
     }
 }
 
+function Remove-GISafetySnapshot {
+    <#
+    .SYNOPSIS
+      Removes the run's pre-maint-<RunId> snapshot once the GI-<RunId> snapshot exists, so it is gone
+      before Horizon first sees the image. Horizon identifies a base snapshot by its path
+      (/pre-maint-X/GI-X); removing the parent after a push would change that path under the pool.
+      The safety snapshot has done its job at this point: the GI snapshot is the known-good state.
+      Only the safety snapshot is touched, never children. Skipped (with a reason) unless the VM is
+      powered off, the GI snapshot is confirmed as a descendant of the safety snapshot, and nothing
+      else is already waiting on disk consolidation.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)] [hashtable] $Config, [Parameter(Mandatory)] $Run)
+
+    $result = [pscustomobject]@{ Removed = $false; Name = $null; Reason = ''; ConsolidationNeeded = $false }
+    if (-not $Run.safetySnapshot -or -not $Run.safetySnapshot.id) { $result.Reason = 'Run has no safety snapshot.'; return $result }
+    if (-not $Run.snapshot -or -not $Run.snapshot.id) { $result.Reason = 'GI snapshot not created yet.'; return $result }
+    $result.Name = [string]$Run.safetySnapshot.name
+
+    $vm = Get-VM -Name $Config.GoldenImage.VmName -ErrorAction Stop
+    if ($vm.PowerState -ne 'PoweredOff') { $result.Reason = "VM is $($vm.PowerState); not removing snapshots."; return $result }
+    if ($vm.ExtensionData -and $vm.ExtensionData.Runtime -and $vm.ExtensionData.Runtime.ConsolidationNeeded) {
+        $result.ConsolidationNeeded = $true
+        $result.Reason = 'VM already needs disk consolidation; fix that first (vSphere: Snapshots > Consolidate).'
+        return $result
+    }
+
+    $snaps = @(Get-Snapshot -VM $vm -ErrorAction Stop | ConvertTo-GISnapshotInfo)
+    $byId = @{}; foreach ($x in $snaps) { $byId[[string]$x.Id] = $x }
+    $safety = $byId[[string]$Run.safetySnapshot.id]
+    $gi     = $byId[[string]$Run.snapshot.id]
+    if (-not $safety) { $result.Reason = 'Safety snapshot is already gone.'; return $result }
+    if (-not $gi)     { $result.Reason = 'GI snapshot not found on the VM; keeping the safety snapshot.'; return $result }
+    $isChild = $false; $cur = $gi; $hops = 0
+    while ($cur -and $cur.ParentId -and $hops++ -lt 200) {
+        if ([string]$cur.ParentId -eq [string]$safety.Id) { $isChild = $true; break }
+        $cur = $byId[[string]$cur.ParentId]
+    }
+    if (-not $isChild) { $result.Reason = 'GI snapshot is not a descendant of the safety snapshot; keeping it.'; return $result }
+
+    if (-not $PSCmdlet.ShouldProcess("$($vm.Name)/$($safety.Name)", 'Remove safety snapshot')) { return $result }
+    Remove-Snapshot -Snapshot $safety.Raw -Confirm:$false -ErrorAction Stop   # no -RemoveChildren
+    $result.Removed = $true
+    $vm = Get-VM -Id $vm.Id
+    if ($vm.ExtensionData -and $vm.ExtensionData.Runtime -and $vm.ExtensionData.Runtime.ConsolidationNeeded) { $result.ConsolidationNeeded = $true }
+    return $result
+}
+
 function Get-GIProtectedSnapshotNames {
     <#
     .SYNOPSIS

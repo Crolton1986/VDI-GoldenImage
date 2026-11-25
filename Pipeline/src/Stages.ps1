@@ -324,12 +324,30 @@ function Invoke-GIStageSnapshot {
     $Run.snapshot = $snap
     Save-GIRun -Config $Config -Run $Run
 
+    # Drop pre-maint-<RunId> now, before TestPush shows Horizon the snapshot path. A failure only warns:
+    # a leftover safety snapshot is harmless, a half-finished consolidation is not worth failing the run for.
+    $safetyWarnings = [System.Collections.Generic.List[string]]::new()
+    $safetyNote = ''
+    if (Get-GIConfigValue $Config 'Snapshots.RemoveSafetyAfterSnapshot' $true) {
+        try {
+            $rs = Remove-GISafetySnapshot -Config $Config -Run $Run
+            if ($rs.Removed) {
+                $safetyNote = " Removed $($rs.Name)."
+                $Run.safetySnapshot = [pscustomobject]@{ id = $null; name = $rs.Name; removedAt = (Get-Date).ToString('o') }
+                Save-GIRun -Config $Config -Run $Run
+            } elseif ($rs.Reason) { $safetyWarnings.Add("Kept $($rs.Name): $($rs.Reason)") }
+            if ($rs.ConsolidationNeeded) { $safetyWarnings.Add("vCenter reports '$($Config.GoldenImage.VmName)' needs disk consolidation. Run Consolidate in vSphere before the next pipeline run.") }
+        } catch {
+            $safetyWarnings.Add("Could not remove $($Run.safetySnapshot.name): $($_.Exception.Message)")
+        }
+    }
+
     $life = Invoke-GISnapshotLifecycle -Config $Config -Run $Run
-    foreach ($w in $life.Warnings) { Write-GILog -Config $Config -RunId $Run.runId -Message $w -Level Warn }
+    foreach ($w in @($safetyWarnings) + @($life.Warnings)) { Write-GILog -Config $Config -RunId $Run.runId -Message $w -Level Warn }
     $removeList = @($life.Plan | Where-Object Action -eq 'Remove' | ForEach-Object Name)
     @{
-        Message = "Created $($snap.name). Retention $($life.Mode): $($removeList.Count) candidate(s), $(@($life.Removed).Count) removed, chain depth $($life.ChainDepth)"
-        Data    = @{ retentionMode = $life.Mode; candidates = $removeList; removed = @($life.Removed); chainDepth = $life.ChainDepth; warnings = @($life.Warnings) }
+        Message = "Created $($snap.name).$safetyNote Retention $($life.Mode): $($removeList.Count) candidate(s), $(@($life.Removed).Count) removed, chain depth $($life.ChainDepth)"
+        Data    = @{ retentionMode = $life.Mode; candidates = $removeList; removed = @($life.Removed); chainDepth = $life.ChainDepth; warnings = @($safetyWarnings) + @($life.Warnings) }
     }
 }
 
@@ -352,8 +370,10 @@ function Wait-GIPoolPush {
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ($true) {
         $info = Get-GIPoolImageInfo -Pool (Get-GIHorizonPool -Name $PoolName)
+        # Without these blocks every field reads $null and the loop could only end at the timeout
+        if (-not $info.HasProvisioningData) { throw "Horizon returned no provisioning_settings/provisioning_status_data for pool '$PoolName'; cannot track the push." }
         $state = [string]$info.PendingImageState
-        if ($state -match 'FAIL|ERROR') { throw "Push image on '$PoolName' failed (pending image state '$state')." }
+        if ($state -match 'FAIL|ERROR') { throw "Push image on '$PoolName' failed (pending image state '$state'): $($info.PendingImageError)" }
         if (-not $info.PendingSnapshotId -and [string]$info.SnapshotId -eq $ExpectedSnapshotId) { return $info }
         if ((Get-Date) -gt $deadline) { throw "Push image on '$PoolName' not finished after $TimeoutMinutes minutes (state '$state')." }
         $pct = if ($info.PendingImageProgress) { " $($info.PendingImageProgress)%" } else { '' }

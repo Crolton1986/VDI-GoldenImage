@@ -5,6 +5,7 @@
 
 $script:GIHorizon = $null
 $script:GIAppVol  = $null
+$script:GIPoolApiVersion = $null
 
 function Invoke-GIRestWithRetry {
     [CmdletBinding()]
@@ -53,6 +54,7 @@ function Connect-GIHorizon {
         AccessToken  = $tok.access_token
         RefreshToken = $tok.refresh_token
         SkipCert     = [bool]$hz['SkipCertificateCheck']
+        PoolApiVersion = [string]$hz['PoolApiVersion']
     }
 }
 
@@ -146,19 +148,42 @@ function ConvertTo-GIHorizonFilter {
     return (@{ type = 'Equals'; name = $Name; value = $Value } | ConvertTo-Json -Compress)
 }
 
+function Get-GIHorizonPools {
+    <#
+    .SYNOPSIS
+      Lists desktop pools including provisioning_settings and provisioning_status_data.
+      The v1 list returns only a thin object without those blocks (no current image, no pending push),
+      so every image check silently read $null. They exist from inventory/v6 on. Tries v8 down to v6
+      (or Horizon.PoolApiVersion first) and remembers the first version this server accepts.
+    #>
+    [CmdletBinding()]
+    param()
+    $versions = [System.Collections.Generic.List[string]]::new()
+    foreach ($v in @($script:GIHorizon.PoolApiVersion, $script:GIPoolApiVersion, 'v8', 'v7', 'v6')) {
+        if ($v -and -not $versions.Contains([string]$v)) { $versions.Add([string]$v) }
+    }
+    $last = $null
+    foreach ($v in $versions) {
+        try {
+            $pools = @(Invoke-GIHorizonApi -Path "/inventory/$v/desktop-pools" -All)
+            $script:GIPoolApiVersion = $v
+            return $pools
+        } catch {
+            $last = $_
+            $code = if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) { [int]$_.Exception.Response.StatusCode }
+            if ($code -notin 400, 404, 405) { throw }   # version not offered by this Connection Server: try the next
+        }
+    }
+    throw "No Horizon desktop-pool endpoint with provisioning data (inventory/v6-v8) is available: $($last.Exception.Message)"
+}
+
 function Get-GIHorizonPool {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Name)
-    $pool = Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All |
+    $pool = Get-GIHorizonPools |
         Where-Object { $_.name -eq $Name -or $_.display_name -eq $Name } | Select-Object -First 1
     if (-not $pool) { throw "Horizon desktop pool '$Name' not found." }
     return $pool
-}
-
-function Get-GIHorizonPools {
-    [CmdletBinding()]
-    param()
-    return Invoke-GIHorizonApi -Path '/inventory/v1/desktop-pools' -All
 }
 
 function Get-GIHorizonPoolMachines {
@@ -208,13 +233,15 @@ function Get-GIPoolImageInfo {
     <#
     .SYNOPSIS
       Normalizes the parts of a desktop pool object the pipeline cares about.
-      Field names follow inventory/v1; missing fields come back as $null.
+      Field names follow inventory/v6+ (v8 is what Get-GIHorizonPools asks for); missing fields come back as $null.
+      HasProvisioningData is $false for a pool object that lacks provisioning_settings (e.g. from inventory/v1).
     #>
     param([Parameter(Mandatory)] $Pool)
     $ps  = if ($Pool.PSObject.Properties['provisioning_settings']) { $Pool.provisioning_settings }
     $psd = if ($Pool.PSObject.Properties['provisioning_status_data']) { $Pool.provisioning_status_data }
     $get = { param($o, $n) if ($o -and $o.PSObject.Properties[$n]) { $o.$n } }
     [pscustomobject]@{
+        HasProvisioningData = [bool]($ps -and $psd)
         PoolId              = $Pool.id
         Name                = $Pool.name
         ParentVmId          = & $get $ps 'parent_vm_id'
@@ -225,6 +252,7 @@ function Get-GIPoolImageInfo {
         Operation           = & $get $psd 'instant_clone_operation'
         CurrentImageState   = & $get $psd 'instant_clone_current_image_state'
         PendingImageProgress = & $get $psd 'instant_clone_pending_image_progress'
+        PendingImageError   = & $get $psd 'instant_clone_pending_image_error'
     }
 }
 

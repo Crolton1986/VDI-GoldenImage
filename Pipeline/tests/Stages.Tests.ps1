@@ -150,6 +150,11 @@ Describe 'Wait-GIPoolPush' {
         { Wait-GIPoolPush -Config $cfg -Run $run -PoolName 'TST-W11' -ExpectedSnapshotId 'new' } | Should -Throw '*failed*FAILED*'
     }
 
+    It 'fails fast when Horizon returns a pool without provisioning data (inventory/v1 shape)' {
+        Mock -ModuleName VDI-GIPipeline Get-GIHorizonPool { [pscustomobject]@{ id = 'p'; name = 'TST-W11'; display_name = 'TST-W11'; enabled = $true } }
+        { Wait-GIPoolPush -Config $cfg -Run $run -PoolName 'TST-W11' -ExpectedSnapshotId 'new' } | Should -Throw '*no provisioning*'
+    }
+
     It 'throws on timeout' {
         Set-ModVar Pools @(New-TestPool -Name 'TST-W11' -Snap 'old' -PendingSnap 'new' -PendingState 'IN_PROGRESS')
         Mock -ModuleName VDI-GIPipeline Get-GIHorizonPool { $global:GITestCtx.Pools | Select-Object -First 1 }

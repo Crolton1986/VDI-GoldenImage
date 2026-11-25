@@ -57,6 +57,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     "PostCheck": { "status": "Pending", ... }
   },
   "safetySnapshot": { "id": "VirtualMachineSnapshot-snapshot-123", "name": "pre-maint-20261124-213005" },
+  // after the Snapshot stage removes it: { "id": null, "name": "pre-maint-...", "removedAt": "..." }
   "snapshot": {
     "id": "VirtualMachineSnapshot-snapshot-124",
     "name": "GI-20261124-213005",
@@ -141,7 +142,7 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
     RequiredServices = @('wsnm','svservice','frxsvc')
     MachineReadyTimeoutMin = 60
   }
-  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }   # Prune=$false => report only
+  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true; RemoveSafetyAfterSnapshot = $true }   # Prune=$false => report only
   Promotion = @{
     AutoPromote = $false
     MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }   # next window used when no -StartTime given

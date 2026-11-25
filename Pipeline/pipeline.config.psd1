@@ -42,7 +42,7 @@
 
   # Snapshot retention (Prune = $false => report only)
   # ProtectAncestors: never delete a parent of an in-use snapshot (Horizon tracks snapshots by path)
-  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true }
+  Snapshots = @{ Keep = 3; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true; RemoveSafetyAfterSnapshot = $true }
 
   # Production promotion behaviour
   Promotion = @{

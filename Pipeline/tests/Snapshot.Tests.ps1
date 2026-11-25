@@ -148,3 +148,57 @@ Describe 'Invoke-GISnapshotLifecycle' {
         (Invoke-GISnapshotLifecycle -Config $cfg).Warnings -join ' ' | Should -Match 'chain depth 4 exceeds 3'
     }
 }
+
+Describe 'Remove-GISafetySnapshot' {
+    BeforeAll {
+        $script:cfg = @{ GoldenImage = @{ VmName = 'GI-VM' } }
+        $script:run = [pscustomobject]@{
+            safetySnapshot = [pscustomobject]@{ id = 'pm'; name = 'pre-maint-1' }
+            snapshot       = [pscustomobject]@{ id = 'gi'; name = 'GI-1' }
+        }
+    }
+    BeforeEach {
+        InModuleScope VDI-GIPipeline {
+            function script:Get-VM { param($Name, $Id) }
+            function script:Get-Snapshot { param($VM) }
+            function script:Remove-Snapshot { param($Snapshot, [switch]$Confirm) }
+        }
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm1'; PowerState = 'PoweredOff'; ExtensionData = [pscustomobject]@{ Runtime = [pscustomobject]@{ ConsolidationNeeded = $false } } } }
+        Mock -ModuleName VDI-GIPipeline Get-Snapshot {
+            @(
+                [pscustomobject]@{ Id = 'old'; Name = 'GI-0';        Created = (Get-Date).AddDays(-7); ParentSnapshotId = $null }
+                [pscustomobject]@{ Id = 'pm';  Name = 'pre-maint-1'; Created = (Get-Date).AddDays(-1); ParentSnapshotId = 'old' }
+                [pscustomobject]@{ Id = 'gi';  Name = 'GI-1';        Created = (Get-Date);             ParentSnapshotId = 'pm' }
+            )
+        }
+        Mock -ModuleName VDI-GIPipeline Remove-Snapshot { }
+    }
+
+    It 'removes only the safety snapshot when the GI snapshot is its descendant' {
+        $r = Remove-GISafetySnapshot -Config $cfg -Run $run
+        $r.Removed | Should -BeTrue
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 1 -ParameterFilter { $Snapshot.Id -eq 'pm' }
+    }
+
+    It 'keeps it when the VM is powered on' {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm1'; PowerState = 'PoweredOn' } }
+        (Remove-GISafetySnapshot -Config $cfg -Run $run).Removed | Should -BeFalse
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0
+    }
+
+    It 'keeps it when the VM already needs consolidation' {
+        Mock -ModuleName VDI-GIPipeline Get-VM { [pscustomobject]@{ Name = 'GI-VM'; Id = 'vm1'; PowerState = 'PoweredOff'; ExtensionData = [pscustomobject]@{ Runtime = [pscustomobject]@{ ConsolidationNeeded = $true } } } }
+        $r = Remove-GISafetySnapshot -Config $cfg -Run $run
+        $r.Removed | Should -BeFalse
+        $r.ConsolidationNeeded | Should -BeTrue
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0
+    }
+
+    It 'keeps it when the GI snapshot is missing or not a descendant' {
+        $other = [pscustomobject]@{ safetySnapshot = $run.safetySnapshot; snapshot = [pscustomobject]@{ id = 'old'; name = 'GI-0' } }
+        (Remove-GISafetySnapshot -Config $cfg -Run $other).Removed | Should -BeFalse
+        $gone = [pscustomobject]@{ safetySnapshot = $run.safetySnapshot; snapshot = [pscustomobject]@{ id = 'nope'; name = 'GI-x' } }
+        (Remove-GISafetySnapshot -Config $cfg -Run $gone).Removed | Should -BeFalse
+        Should -Invoke -ModuleName VDI-GIPipeline Remove-Snapshot -Times 0
+    }
+}

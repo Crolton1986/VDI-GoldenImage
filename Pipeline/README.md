@@ -164,7 +164,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update. WindowsUpdate has Enabled and MaxPasses. |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
-| Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors | Retention. See Safety behavior. |
+| Snapshots | Keep, MaxChainDepth, Prune, ProtectAncestors, RemoveSafetyAfterSnapshot | Retention. See Safety behavior. |
 | Promotion | AutoPromote, MaintenanceWindow | MaintenanceWindow has Days and StartTime. The next matching window is used when you don't pass `-StartTime`. |
 | Email | Enabled, SmtpServer, Port, From, To, UseSsl | Run report by mail. |
 | Dashboard | Port, CertificateThumbprint, ViewerGroup, ApproverGroup, AdminGroup, RefreshSeconds | Web dashboard. Shown read-only in the dashboard. Edit the psd1 and restart it. |
@@ -319,6 +319,8 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 ## Safety behavior
 
 * Preflight stops the run if the golden VM is powered on or if any configured pool already has a push pending. It then takes the `pre-maint-<RunId>` safety snapshot, so a bad update pass can be reverted.
+* The Snapshot stage deletes `pre-maint-<RunId>` right after `GI-<RunId>` is created (`Snapshots.RemoveSafetyAfterSnapshot`, default on), before TestPush, so Horizon only ever sees the path `/GI-<RunId>`. It only does so with the VM powered off, the GI snapshot confirmed as its child, and no consolidation already pending. If Maintain or Snapshot fails, the safety snapshot stays for a manual revert. A failed removal is a warning, not a failed run; if vCenter then shows "disk consolidation needed", run Consolidate before the next run. Consolidation needs free datastore space (Broadcom KB 398339 gives 1.5x the snapshot files).
+* Pool image checks use Horizon `inventory/v8` (falling back to v7, v6); the v1 pool object has no image fields. Set `Horizon.PoolApiVersion` to pin one.
 * Retention is report-only until you set `Snapshots.Prune = $true`. When it prunes, it keeps the newest `Snapshots.Keep` snapshots of each kind (`GI-*` and `pre-maint-*`), never touches snapshots it did not create, and never deletes a snapshot that is in use by any pool (current or pending), the last-known-good, the current run's snapshots, or an ancestor of any of those (`ProtectAncestors`). Horizon tracks the base image by snapshot path, so removing a parent can break provisioning for pools on its children. Test in the lab before turning `ProtectAncestors` off. If Horizon can't be read, retention deletes nothing.
 * When the snapshot chain gets deeper than `Snapshots.MaxChainDepth`, the report warns you. Pruning can't flatten the chain. Plan a new golden image generation (a full clone of the VM) instead.
 * Promotion schedules the pools one after another. If one fails, the pools already scheduled in that promotion are cancelled.
