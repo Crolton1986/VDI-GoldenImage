@@ -692,37 +692,82 @@ Describe 'Invoke-GIStageMaintain' {
 
 Describe 'Wait-GIGuestScriptAsync' {
     BeforeEach {
-        InModuleScope VDI-GIPipeline {
-            function script:Invoke-VMScript { param($VM, $GuestCredential, $ScriptType, $ScriptText, [switch] $RunAsync, $ErrorAction) }
-            function script:Get-Task { param($Id, $ErrorAction) }
-            function script:Wait-Task { param($Task, $ErrorAction) }
-        }
         $cfg.GoldenImage = @{ ScriptPathInGuest = 'C:\ProgramData\VDI\VDI-GoldenImage.ps1' }
         $script:cred = [pscredential]::new('admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
-        Set-ModVar TaskState 'Running'
+        $script:vm = [pscustomobject]@{ Name = 'GI' }
+        Set-ModVar Scripts ([System.Collections.Generic.List[string]]::new())
+        Set-ModVar Queue ([System.Collections.Generic.List[string]]::new())
+        Set-ModVar Default '{"alive":true,"done":false,"exit":""}'
         Set-ModVar Clock 0
+        Set-ModVar StepMin 0
         Set-ModVar Base (Get-Date '2026-11-25 10:00')
-        Set-ModVar Kill $null
-        Mock -ModuleName VDI-GIPipeline Invoke-VMScript { [pscustomobject]@{ Id = 'task-1' } }
-        Mock -ModuleName VDI-GIPipeline Get-Task { [pscustomobject]@{ Id = 'task-1'; State = $global:GITestCtx.TaskState } }
-        Mock -ModuleName VDI-GIPipeline Wait-Task { [pscustomobject]@{ ExitCode = 0; ScriptOutput = 'ok' } }
-        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestScript { $global:GITestCtx.Kill = $ScriptText; [pscustomobject]@{ ExitCode = 0; ScriptOutput = '' } }
-        # Each Get-Date call moves the clock 90 minutes forward
-        Mock -ModuleName VDI-GIPipeline Get-Date { $global:GITestCtx.Clock++; $global:GITestCtx.Base.AddMinutes(90 * ($global:GITestCtx.Clock - 1)) }
+        # Guest calls answer from a queue: the start call first, then one entry per poll; 'THROW' fails that call
+        Mock -ModuleName VDI-GIPipeline Invoke-GIGuestScript {
+            $global:GITestCtx.Scripts.Add($ScriptText)
+            $q = $global:GITestCtx.Queue
+            $r = if ($q.Count) { $x = $q[0]; $q.RemoveAt(0); $x } else { $global:GITestCtx.Default }
+            if ($r -eq 'THROW') { throw 'guest operations unavailable' }
+            [pscustomobject]@{ ExitCode = 0; ScriptOutput = $r }
+        }
+        # Each Get-Date call moves the clock StepMin minutes forward
+        Mock -ModuleName VDI-GIPipeline Get-Date { $global:GITestCtx.Clock++; $global:GITestCtx.Base.AddMinutes($global:GITestCtx.StepMin * ($global:GITestCtx.Clock - 1)) }
+        function script:Queue([string[]] $Items) { foreach ($i in $Items) { $global:GITestCtx.Queue.Add($i) } }
+        function script:Wait { Wait-GIGuestScriptAsync -Config $cfg -VM $vm -Credential $cred -Action 'Horizon' -ResultFile 'C:\ProgramData\VDI\Pipeline\result-Horizon.json' -TimeoutMin 60 }
     }
 
-    It 'returns the script result when the task succeeds' {
-        Set-ModVar TaskState 'Success'
-        $r = Wait-GIGuestScriptAsync -Config $cfg -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -ScriptText 'x' -Action 'Horizon' -TimeoutMin 60
-        $r.ScriptOutput | Should -Be 'ok'
-        $global:GITestCtx.Kill | Should -BeNullOrEmpty
+    It 'starts a detached wrapper and returns its exit code once the exit file appears' {
+        Queue '4242', '{"alive":true,"done":false,"exit":""}', '{"alive":false,"done":true,"exit":"0"}'
+        $r = Wait
+        $r.ExitCode | Should -Be 0
+        $start = $global:GITestCtx.Scripts[0]
+        $start | Should -Match ([regex]::Escape("& 'C:\ProgramData\VDI\VDI-GoldenImage.ps1' -Action Horizon -Unattended -ResultFile 'C:\ProgramData\VDI\Pipeline\result-Horizon.json'"))
+        $start | Should -Match 'Start-Process -FilePath powershell.exe'
+        $start | Should -Match ([regex]::Escape('run-Horizon.ps1'))
+        $start | Should -Match ([regex]::Escape('$code = if ($null -eq $LASTEXITCODE)'))
+        $global:GITestCtx.Scripts[1] | Should -Match 'Get-Process -Id 4242'
+        $global:GITestCtx.Scripts[1] | Should -Match ([regex]::Escape('exit-Horizon.txt'))
     }
 
-    It 'stops installers and throws after the timeout' {
-        { Wait-GIGuestScriptAsync -Config $cfg -VM ([pscustomobject]@{ Name = 'GI' }) -Credential $cred -ScriptText 'x' -Action 'Horizon' -TimeoutMin 60 } |
-            Should -Throw "*'Horizon' did not finish within 60 minutes*"
-        $global:GITestCtx.Kill | Should -Match 'msiexec'
-        $global:GITestCtx.Kill | Should -Match ([regex]::Escape('C:\ProgramData\VDI\Install\*'))
+    It 'returns a failing exit code for Invoke-GIGuestAction to report' {
+        Queue '4242', '{"alive":false,"done":true,"exit":"1603"}'
+        (Wait).ExitCode | Should -Be 1603
+    }
+
+    It 'fails when the wrapper dies without writing an exit code' {
+        Queue '4242', '{"alive":false,"done":false,"exit":""}'
+        { Wait } | Should -Throw "*'Horizon' ended without writing an exit code*"
+    }
+
+    It 'fails when the wrapper could not be started' {
+        Queue 'Access is denied'
+        { Wait } | Should -Throw "*'Horizon' could not be started: Access is denied*"
+    }
+
+    It 'rides out a few failed checks' {
+        Queue '4242', 'THROW', 'THROW', '{"alive":false,"done":true,"exit":"0"}'
+        (Wait).ExitCode | Should -Be 0
+    }
+
+    It 'gives up after five failed checks in a row' {
+        Queue '4242', 'THROW', 'THROW', 'THROW', 'THROW', 'THROW'
+        { Wait } | Should -Throw "*Lost contact with in-guest action 'Horizon'*"
+    }
+
+    It 'stops installers, then the wrapper tree, and throws after the timeout' {
+        Set-ModVar StepMin 90
+        Queue '4242'
+        { Wait } | Should -Throw "*'Horizon' did not finish within 60 minutes*"
+        $all = $global:GITestCtx.Scripts -join "`n"
+        $all | Should -Match 'msiexec'
+        $all | Should -Match ([regex]::Escape('C:\ProgramData\VDI\Install\*'))
+        $all | Should -Match 'Stop-Tree 4242'
+    }
+
+    It 'reports progress through OnWait while waiting' {
+        Set-ModVar Waited ([System.Collections.Generic.List[int]]::new())
+        Queue '4242', '{"alive":true,"done":false,"exit":""}', '{"alive":false,"done":true,"exit":"0"}'
+        $null = Wait-GIGuestScriptAsync -Config $cfg -VM $vm -Credential $cred -Action 'Horizon' -ResultFile 'x' -TimeoutMin 60 -OnWait { param($m) $global:GITestCtx.Waited.Add($m) }
+        $global:GITestCtx.Waited.Count | Should -Be 1
     }
 }
 }

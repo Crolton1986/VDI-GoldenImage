@@ -195,7 +195,8 @@ function Invoke-GIGuestAction {
     .SYNOPSIS
       Runs VDI-GoldenImage.ps1 -Action <Action> -Unattended in the guest and returns its parsed result file.
     .DESCRIPTION
-      With -TimeoutMin the guest command runs async and is polled every 30 s; -OnWait gets the elapsed minutes.
+      With -TimeoutMin the action runs detached in the guest and is polled every 30 s (Wait-GIGuestScriptAsync);
+      -OnWait gets the elapsed minutes.
       When the time runs out, installer processes in the guest are stopped and the action fails.
     #>
     [CmdletBinding()]
@@ -217,7 +218,7 @@ Remove-Item '$res' -ErrorAction SilentlyContinue
 exit `$LASTEXITCODE
 "@
     if ($TimeoutMin -gt 0) {
-        $r = Wait-GIGuestScriptAsync -Config $Config -VM $VM -Credential $Credential -ScriptText $text -Action $Action -TimeoutMin $TimeoutMin -OnWait $OnWait
+        $r = Wait-GIGuestScriptAsync -Config $Config -VM $VM -Credential $Credential -Action $Action -ResultFile $res -TimeoutMin $TimeoutMin -OnWait $OnWait
     } else {
         $r = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $text
     }
@@ -231,47 +232,102 @@ exit `$LASTEXITCODE
 }
 
 function Wait-GIGuestScriptAsync {
-    # Invoke-VMScript -RunAsync with a deadline. On timeout, stops installers started from the guest Install
-    # folder (and msiexec) so the guest script returns, then throws.
+    <#
+    .SYNOPSIS
+      Runs VDI-GoldenImage.ps1 -Action <Action> detached in the guest and polls for its exit code, with a deadline.
+    .DESCRIPTION
+      A wrapper script in the guest work folder runs the action and writes its exit code to exit-<Action>.txt.
+      It's started with Start-Process, so the guest operation returns at once; every 30 s a short guest call
+      checks whether the wrapper is still alive and whether the exit file exists. No PowerCLI task objects are
+      involved (Invoke-VMScript -RunAsync returns client-side tasks that Get-Task can't look up).
+      On timeout, installers started from the guest Install folder and msiexec are stopped; if the wrapper hasn't
+      finished two minutes later, its process tree is stopped too. Returns @{ ExitCode; ScriptOutput }.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Config,
         [Parameter(Mandatory)] $VM,
         [Parameter(Mandatory)] [pscredential] $Credential,
-        [Parameter(Mandatory)] [string] $ScriptText,
         [Parameter(Mandatory)] [string] $Action,
+        [Parameter(Mandatory)] [string] $ResultFile,
         [Parameter(Mandatory)] [int] $TimeoutMin,
         [scriptblock] $OnWait
     )
-    $task = Invoke-VMScript -VM $VM -GuestCredential $Credential -ScriptType Powershell -ScriptText $ScriptText -RunAsync -ErrorAction Stop
+    $script   = $Config.GoldenImage.ScriptPathInGuest
+    $work     = Get-GIConfigValue $Config 'GoldenImage.GuestWorkDir' 'C:\ProgramData\VDI\Pipeline'
+    $wrapper  = "$work\run-$Action.ps1"
+    $exitFile = "$work\exit-$Action.txt"
+    $guestDir = Split-Path $script -Parent
+    $install  = "$guestDir\Install"
+    $logs     = "$guestDir\Logs"
+
+    $startText = @"
+New-Item -ItemType Directory -Path '$work' -Force | Out-Null
+Remove-Item -LiteralPath '$ResultFile', '$exitFile' -ErrorAction SilentlyContinue
+Set-Content -LiteralPath '$wrapper' -Encoding UTF8 -Value @'
+& '$script' -Action $Action -Unattended -ResultFile '$ResultFile'
+`$code = if (`$null -eq `$LASTEXITCODE) { 0 } else { `$LASTEXITCODE }
+Set-Content -LiteralPath '$exitFile' -Value `$code
+'@
+`$p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "$wrapper"' -WindowStyle Hidden -PassThru
+`$p.Id
+"@
+    $started = Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $startText
+    $procId = 0
+    if (-not [int]::TryParse(([string]$started.ScriptOutput).Trim(), [ref]$procId) -or $procId -le 0) {
+        throw "In-guest action '$Action' could not be started: $(([string]$started.ScriptOutput).Trim())"
+    }
+
+    # Alive is checked before the exit file: the wrapper writes the file and then exits, so "not alive and no
+    # file" can only mean it died without finishing
+    $pollText = "`$a = [bool](Get-Process -Id $procId -ErrorAction SilentlyContinue); `$d = Test-Path -LiteralPath '$exitFile'; " +
+                "`$c = if (`$d) { ([string](Get-Content -LiteralPath '$exitFile' -Raw)).Trim() } else { '' }; " +
+                "@{ alive = `$a; done = `$d; exit = `$c } | ConvertTo-Json -Compress"
+    $stopInstallers = "Get-Process | Where-Object { `$_.Path -like '$install\*' } | Stop-Process -Force -ErrorAction SilentlyContinue; " +
+                      "Get-Process msiexec -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
+    $stopTree = "function Stop-Tree([int]`$id) { Get-CimInstance Win32_Process -Filter `"ParentProcessId=`$id`" | ForEach-Object { Stop-Tree `$_.ProcessId }; " +
+                "Stop-Process -Id `$id -Force -ErrorAction SilentlyContinue }; Stop-Tree $procId"
+
     $start = Get-Date
     $deadline = $start.AddMinutes($TimeoutMin)
     $timedOut = $false
+    $failures = 0
     while ($true) {
-        $state = [string](Get-Task -Id $task.Id -ErrorAction Stop).State
-        if ($state -in 'Success', 'Error') { break }
+        $state = $null
+        try {
+            $state = ([string](Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $pollText).ScriptOutput).Trim() | ConvertFrom-Json
+            $failures = 0
+        } catch {
+            # Guest operations can fail briefly (Tools restarting during an agent install)
+            $failures++
+            Write-Verbose "Polling in-guest action '$Action' failed ($failures): $($_.Exception.Message)"
+            if ($failures -ge 5) { throw "Lost contact with in-guest action '$Action' (5 failed checks in a row): $($_.Exception.Message)" }
+        }
+        if ($state -and $state.done) {
+            if ($timedOut) { break }
+            $code = 0
+            if (-not [int]::TryParse([string]$state.exit, [ref]$code)) { $code = 1 }
+            return [pscustomobject]@{ ExitCode = $code; ScriptOutput = '' }
+        }
+        if ($state -and -not $state.alive) {
+            if ($timedOut) { break }
+            throw "In-guest action '$Action' ended without writing an exit code (the guest script crashed or the guest rebooted). See the logs in $logs."
+        }
         if (-not $timedOut -and (Get-Date) -gt $deadline) {
             $timedOut = $true
-            $install = Join-Path (Split-Path $Config.GoldenImage.ScriptPathInGuest -Parent) 'Install'
-            $kill = "Get-Process | Where-Object { `$_.Path -like '$install\*' } | Stop-Process -Force -ErrorAction SilentlyContinue; " +
-                    "Get-Process msiexec -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
-            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $kill | Out-Null } catch { Write-Verbose "Stopping installers: $($_.Exception.Message)" }
-            # Give the guest script a couple of minutes to notice and return
+            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $stopInstallers | Out-Null } catch { Write-Verbose "Stopping installers: $($_.Exception.Message)" }
+            # Give the guest script a couple of minutes to notice and write its result
             $deadline = (Get-Date).AddMinutes(2)
             continue
         }
-        if ($timedOut -and (Get-Date) -gt $deadline) { break }
+        if ($timedOut -and (Get-Date) -gt $deadline) {
+            try { Invoke-GIGuestScript -VM $VM -Credential $Credential -ScriptText $stopTree | Out-Null } catch { Write-Verbose "Stopping guest script: $($_.Exception.Message)" }
+            break
+        }
         if ($OnWait -and -not $timedOut) { & $OnWait ([int][math]::Floor(((Get-Date) - $start).TotalMinutes)) }
         Start-Sleep -Seconds 30
     }
-    $logs = Join-Path (Split-Path $Config.GoldenImage.ScriptPathInGuest -Parent) 'Logs'
-    if ($timedOut) { throw "In-guest action '$Action' did not finish within $TimeoutMin minutes; installer processes were stopped. See the install logs in $logs." }
-    if ($state -eq 'Error') {
-        $t = Get-Task -Id $task.Id
-        $why = try { [string]$t.ExtensionData.Info.Error.LocalizedMessage } catch { '' }
-        throw "In-guest action '$Action' failed to run: $why"
-    }
-    return Wait-Task -Task $task -ErrorAction Stop
+    throw "In-guest action '$Action' did not finish within $TimeoutMin minutes; installer processes were stopped. See the install logs in $logs."
 }
 
 function Invoke-GIGuestWindowsUpdate {

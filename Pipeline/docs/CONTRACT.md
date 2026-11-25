@@ -351,9 +351,12 @@ when `-FromStep` is given. A snapshot revert task on the VM (vCenter event `Virt
 - `Initialize-GIMaintainSteps -Config -Run -Plan [-ResumeFrom]` returns the step work resumes at ('' when fresh).
 - `Set-GIStep -Config -Run -Id [-Status] [-Message]` updates one step and mirrors it into `run.progress`.
 - `Get-GIStepList -Run`, `Get-GIStep -Run -Id` read them; `Set-GIProgress` also writes its message to the running step.
-- Package steps call `Invoke-GIGuestAction -TimeoutMin <GoldenImage.ActionTimeoutMin>`, which runs the guest command
-  with `Invoke-VMScript -RunAsync` and polls it; on timeout it stops processes started from the guest `Install` folder
-  and `msiexec`, then fails the step.
+- Package steps call `Invoke-GIGuestAction -TimeoutMin <GoldenImage.ActionTimeoutMin>`. That writes a wrapper
+  `<GuestWorkDir>\run-<Action>.ps1` in the guest, starts it detached with `Start-Process`, and polls every 30 s with a
+  short guest call: wrapper alive, and `exit-<Action>.txt` written. Exit file present means done (its code is the
+  action's exit code); wrapper gone without it means the script crashed; 5 failed checks in a row lose contact. On
+  timeout it stops processes started from the guest `Install` folder and `msiexec`, waits 2 minutes, stops the
+  wrapper's process tree, and fails the step.
 
 ### Failed-run safety snapshots
 
