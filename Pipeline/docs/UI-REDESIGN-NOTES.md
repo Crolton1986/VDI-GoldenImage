@@ -27,4 +27,4 @@ What differs from the mockups and the prompts, what is not built, and what was o
 
 ## Tests
 
-The full Pester suite runs with `pwsh` 7.4 and Pester 5.7. On Linux 12 tests fail that also fail on the branch before this work (Setup modules, Horizon pool lookup, setup PowerCLI, one settings test). See the final report for the list.
+The full Pester suite runs with `pwsh` 7.4 and Pester 5.7: 817 passed, 0 failed on Linux. The Setup modules and PowerCLI tests now mock plain stubs, so they do not depend on the real `Install-Module` or PowerCLI. The stubs have not been run on Windows.

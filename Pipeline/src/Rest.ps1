@@ -164,7 +164,8 @@ function Get-GIHorizonPools {
     [CmdletBinding()]
     param()
     $versions = [System.Collections.Generic.List[string]]::new()
-    foreach ($v in @($script:GIHorizon.PoolApiVersion, $script:GIPoolApiVersion, 'v8', 'v7', 'v6')) {
+    $hzPin = Get-GIWatcherProp $script:GIHorizon 'PoolApiVersion'
+    foreach ($v in @($hzPin, $script:GIPoolApiVersion, 'v8', 'v7', 'v6')) {
         if ($v -and -not $versions.Contains([string]$v)) { $versions.Add([string]$v) }
     }
     $last = $null
@@ -186,7 +187,7 @@ function Get-GIHorizonPool {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Name)
     $pool = @(Get-GIHorizonPools) | ForEach-Object { $_ } |
-        Where-Object { $_.name -eq $Name -or $_.display_name -eq $Name } | Select-Object -First 1
+        Where-Object { (Get-GIWatcherProp $_ 'name') -eq $Name -or (Get-GIWatcherProp $_ 'display_name') -eq $Name } | Select-Object -First 1
     if (-not $pool) { throw "Horizon desktop pool '$Name' not found." }
     if (-not $pool.PSObject.Properties['id'] -or $pool.id -is [System.Array] -or [string]::IsNullOrWhiteSpace([string]$pool.id)) {
         throw "Horizon returned desktop pool '$Name' without a single id; check the Horizon version and the account's inventory rights."

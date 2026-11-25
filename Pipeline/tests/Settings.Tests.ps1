@@ -300,7 +300,7 @@ Describe 'Save-GISettingsSection' {
     }
 
     It 'does nothing (no write, no audit) when nothing changed' {
-        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = '2'; MaxChainDepth = '10'; ProtectAncestors = 'on'; ConsolidateTimeoutMin = '60'; MinFreeSpacePercent = '15' }).Values
+        $v = (ConvertFrom-GISettingsForm -Section Snapshots -Form @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = '2'; MaxChainDepth = '10'; ProtectAncestors = 'on'; ConsolidateTimeoutMin = '60'; MinFreeSpacePercent = '15'; CleanupFailedRuns = 'on' }).Values
         (Save-GISettingsSection -Config $cfg -Section Snapshots -Values $v).Changed.Count | Should -Be 0
         Test-Path $settingsFile | Should -BeFalse
     }

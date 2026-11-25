@@ -7,20 +7,9 @@ Import-Module Pester -RequiredVersion 5.7.1
 Invoke-Pester ./Pipeline/tests -Output Detailed
 ```
 
-Result at the end of the work: 805 passed, 12 failed. The same 12 fail on the branch before any redesign commit, so none of them was caused by this work.
+Result after step 1 of the hand-off: 817 passed, 0 failed (Linux, pwsh 7.4.6, Pester 5.7.1).
 
-## A. Failing tests (12, all existed before the redesign)
-
-| Test | Cause | Fix direction |
-|---|---|---|
-| `Invoke-GISetupModules` x7 (uses CurrentUser scope in Lab and AllUsers in Production, trusts PSGallery when untrusted, installs NuGet when missing, skips Install-Module for modules already installed, passes MaximumVersion for Pode and SkipPublisherCheck only for Pester, throws naming a failing required module and stops, continues after an optional failure and reports it) | On Linux, `Mock Install-Module` fails with "Cannot retrieve the dynamic parameters ... parameter 'Location' ... null or empty". The real `Install-Module` computes a dynamic `-Scope` parameter from a null install location. | Define a plain stub `Install-Module` (and `Install-PackageProvider`, `Get-PSRepository`, `Set-PSRepository`) in the test's BeforeAll so Pester mocks the stub, not the real cmdlet. Check they pass on Windows too. |
-| `Horizon desktop pool lookup` x2 (returns one pool with a string id when the API hands back the page as a single array object, throws a clear message when the pool is missing) | `Get-GIHorizonPool` reads `$script:GIHorizon.PoolApiVersion` under strict mode. The tests set `$script:GIHorizon` to a hashtable without that key. | Read it with a null safe helper (`Get-GIWatcherProp`) in `src/Rest.ps1` or add `PoolApiVersion = $null` to the test fixture. |
-| `Save-GISettingsSection` does nothing (no write, no audit) when nothing changed | The Snapshots section gained the field `CleanupFailedRuns`. The test form leaves it out, so it counts as changed. | Add `CleanupFailedRuns = 'on'` to the form in `tests/Settings.Tests.ps1`. |
-| `Invoke-GISetupPowerCLI` x2 (turns CEIP off and applies the chosen action, defaults to Warn when no option is set) | `Set-PowerCLIConfiguration` is not installed on Linux, so the module-scoped mock is never hit. | Stub the command in the test setup like the Install-Module stub above. |
-
-(The table lists 12 rows' worth: 7 + 2 + 1 + 2.)
-
-## B. Known gaps in the redesign (not covered by tests, or only partly built)
+## A. Known gaps in the redesign (not covered by tests, or only partly built)
 
 Task 02 backend
 1. The guest log script was parse-checked and its generated text is tested, but it has never run in a real Windows guest. DEM, Teams and OneDrive log paths are best guesses.
