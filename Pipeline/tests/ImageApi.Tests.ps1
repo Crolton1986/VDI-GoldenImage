@@ -419,3 +419,53 @@ Describe 'Overview data: retention preview, last pushed, resumed steps (gaps 6 a
         ($s | Where-Object id -eq 'OldRun').resumed | Should -BeTrue   # runs saved before the flag existed
     }
 }
+
+Describe 'Saving an image schedule moves its weekly task (per-image scheduled tasks)' {
+    BeforeEach { $script:root = New-Root }
+    AfterEach { Remove-Item $script:root -Recurse -Force -ErrorAction SilentlyContinue }
+    It 'API: changing the schedule calls the task update for that image and returns what happened' {
+        $got = @{}
+        $runner = { param($c, $id) $got.id = $id; @{ ok = $true; code = 'updated'; detail = 'Weekly run is now Friday at 03:15.' } }.GetNewClosure()
+        $r = Api POST '/api/images/w11-gi-01/settings/Promotion' @{ 'PipelineSchedule.Day' = 'Friday'; 'PipelineSchedule.Time' = '03:15' } -Options @{ ScheduleRunner = $runner }
+        $r.Code | Should -Be 200
+        $r.Body.changed | Should -Contain 'PipelineSchedule.Day'
+        $r.Body.scheduleTask.code | Should -Be 'updated'; $r.Body.scheduleTask.ok | Should -BeTrue
+        $got.id | Should -Be 'w11-gi-01'
+        $a = @(Get-GIAudit -Config (Cfg) | Where-Object action -eq 'schedule.task')[0]
+        $a.target | Should -Be 'VDI-GI-Pipeline-w11-gi-01'; $a.result | Should -Be 'OK'
+    }
+    It 'API: other changes, other sections and unchanged schedules do not touch the task' {
+        $called = @{ n = 0 }
+        $runner = { param($c, $id) $called.n++; @{ ok = $true; code = 'updated'; detail = '' } }.GetNewClosure()
+        $r = Api POST '/api/images/w11-gi-01/settings/Promotion' @{ AutoPromote = $false; 'PipelineSchedule.Day' = 'Tuesday'; 'PipelineSchedule.Time' = '20:00' } -Options @{ ScheduleRunner = $runner }
+        $r.Code | Should -Be 200
+        $r.Body.Keys | Should -Not -Contain 'scheduleTask'
+        $s = Api POST '/api/images/w11-gi-01/settings/Snapshots' @{ Keep = 3 } -Options @{ ScheduleRunner = $runner }
+        $s.Code | Should -Be 200; $s.Body.Keys | Should -Not -Contain 'scheduleTask'
+        $called.n | Should -Be 0
+    }
+    It 'API: the save succeeds and says so when the task is missing' {
+        $runner = { param($c, $id) @{ ok = $false; code = 'missing'; detail = 'no task yet' } }
+        $r = Api POST '/api/images/w11-gi-01/settings/Promotion' @{ 'PipelineSchedule.Day' = 'Monday' } -Options @{ ScheduleRunner = $runner }
+        $r.Code | Should -Be 200
+        $r.Body.scheduleTask.code | Should -Be 'missing'; $r.Body.scheduleTask.ok | Should -BeFalse
+        (Get-GIImageConfig -Config (Cfg) -ImageId 'w11-gi-01').Promotion.PipelineSchedule.Day | Should -Be 'Monday'
+    }
+    It 'a Viewer or Approver cannot change the schedule, so the task is not touched' {
+        $called = @{ n = 0 }
+        $runner = { param($c, $id) $called.n++; @{ ok = $true; code = 'updated'; detail = '' } }.GetNewClosure()
+        foreach ($role in 'Viewer', 'Approver') { (Api POST '/api/images/w11-gi-01/settings/Promotion' @{ 'PipelineSchedule.Day' = 'Monday' } -Role $role -Options @{ ScheduleRunner = $runner }).Code | Should -Be 403 }
+        $called.n | Should -Be 0
+    }
+    It 'the page notice says what happened to the task' {
+        . (Join-Path $PSScriptRoot '..' 'Web' 'Routes.ps1')
+        function script:Notice($q) { Get-GISectionNotice -WebEvent ([pscustomobject]@{ Query = $q }) }
+        Notice @{ r = 'saved'; t = 'updated' } | Should -Be 'Saved. Changes apply from the next run. The weekly scheduled task of this image was updated.'
+        Notice @{ r = 'saved'; t = 'missing' } | Should -Match 'Register-GIPipelineTasks\.ps1 as administrator'
+        Notice @{ r = 'saved'; t = 'failed' } | Should -Match 'audit log has the reason'
+        Notice @{ r = 'saved'; t = 'notwindows' } | Should -Match 'only available on Windows'
+        Notice @{ r = 'saved' } | Should -Be 'Saved. Changes apply from the next run.'
+        Notice @{ r = 'saved'; t = '<script>' } | Should -Be 'Saved. Changes apply from the next run.'   # unknown codes are ignored, never echoed
+        Notice @{} | Should -Be ''
+    }
+}

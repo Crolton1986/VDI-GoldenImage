@@ -3,7 +3,6 @@
 $script:GIRequestActions = @('All', 'FromStage', 'Stage', 'PostCheck', 'Rollback')
 $script:GIRunnableStages = @('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate')
 $script:GIRunnerTaskName = 'VDI-GI-Runner'
-$script:GIPipelineTaskName = 'VDI-GI-Pipeline'
 
 #----- Lock -----
 
@@ -292,24 +291,56 @@ function Start-GIQueuedRun {
 function Set-GIPipelineScheduleTask {
     <#
     .SYNOPSIS
-      Points the weekly VDI-GI-Pipeline task at Promotion.PipelineSchedule (Day, Time). Returns @{ ok; detail }.
+      Points one image's weekly task (VDI-GI-Pipeline-<id>) at its Promotion.PipelineSchedule (Day, Time).
+      -Config is the image's own config (Get-GIImageConfig), or the root config together with -ImageId.
+      Returns @{ ok; code; detail }, code being updated, missing (that image has no task yet), failed or notwindows.
+      It never creates a task: that needs the account's password (Register-GIPipelineTasks.ps1 or the Setup page).
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)] [hashtable] $Config)
+    param([Parameter(Mandatory)] [hashtable] $Config, [string] $ImageId)
+    if (-not $ImageId -and $Config.ContainsKey('ImageId')) { $ImageId = [string]$Config.ImageId }
+    if ($ImageId -and -not $Config.ContainsKey('ImageId')) { $Config = Get-GIImageConfig -Config $Config -ImageId $ImageId }
+    $name = Get-GIPipelineTaskName -ImageId $ImageId
     $day  = Get-GIConfigValue $Config 'Promotion.PipelineSchedule.Day' 'Tuesday'
     $time = Get-GIConfigValue $Config 'Promotion.PipelineSchedule.Time' '20:00'
-    if (-not $IsWindows) { return @{ ok = $false; detail = 'Scheduled tasks are only available on Windows; settings saved, task not changed.' } }
+    if (-not (Test-GIIsWindows)) { return @{ ok = $false; code = 'notwindows'; detail = 'Scheduled tasks are only available on Windows; settings saved, task not changed.' } }
     try {
-        $task = Get-ScheduledTask -TaskName $script:GIPipelineTaskName -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $task) {
+            return @{ ok = $false; code = 'missing'; detail = "Settings saved, but there is no scheduled task '$name' yet. Run Register-GIPipelineTasks.ps1 as administrator (or the Tasks step on the Setup page) to create it." }
+        }
         $at = [datetime]::ParseExact($time, 'HH:mm', [cultureinfo]::InvariantCulture)
         $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $day -At $at
         if ($PSCmdlet.ShouldProcess($task.TaskName, "Set weekly trigger $day $time")) {
             Set-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Trigger $trigger -ErrorAction Stop | Out-Null
         }
-        return @{ ok = $true; detail = "Weekly run now $day at $time." }
+        return @{ ok = $true; code = 'updated'; detail = "Weekly run of '$name' is now $day at $time." }
     } catch {
-        return @{ ok = $false; detail = "Settings saved, but the scheduled task wasn't updated: $($_.Exception.Message)" }
+        return @{ ok = $false; code = 'failed'; detail = "Settings saved, but the scheduled task wasn't updated: $($_.Exception.Message)" }
     }
+}
+
+function Update-GIImageScheduleTask {
+    <#
+    .SYNOPSIS
+      After an image's settings were saved: when its schedule (Day or Time) changed, moves its weekly task and writes
+      schedule.task to the audit log. Returns the Set-GIPipelineScheduleTask result, or $null when the schedule did not change.
+      -Runner (tests) replaces Set-GIPipelineScheduleTask; it gets the root config and the image id.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $ImageId,
+        [string[]] $Changed = @(),
+        [string] $User = 'unknown',
+        [string] $Role = 'Admin',
+        [scriptblock] $Runner
+    )
+    if (-not (@($Changed) | Where-Object { $_ -in 'PipelineSchedule.Day', 'PipelineSchedule.Time' })) { return $null }
+    $res = if ($Runner) { & $Runner $Config $ImageId } else { Set-GIPipelineScheduleTask -Config $Config -ImageId $ImageId }
+    Write-GIAudit -Config $Config -User $User -Role $Role -Action 'schedule.task' -Target (Get-GIPipelineTaskName -ImageId $ImageId) -Image $ImageId `
+        -Detail @{ image = $ImageId; code = [string]$res.code; message = [string]$res.detail } -Result $(if ($res.ok) { 'OK' } else { 'Failed' })
+    return $res
 }
 
 #----- Connection tests -----

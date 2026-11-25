@@ -10,15 +10,27 @@ function Test-GIIsWindows {
     return [bool]$IsWindows
 }
 
+function Get-GIPipelineTaskName {
+    <# Name of the weekly pipeline task of one golden image (VDI-GI-Pipeline-<id>); without an id the old single task. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$ImageId = '')
+    if ($ImageId) { return "VDI-GI-Pipeline-$ImageId" }
+    return 'VDI-GI-Pipeline'
+}
+
 function Get-GIPipelineTaskDefinition {
     <#
     .SYNOPSIS
-      Returns the four pipeline scheduled task definitions as plain data. Pure: no ScheduledTasks cmdlets.
+      Returns the pipeline scheduled task definitions as plain data. Pure: no ScheduledTasks cmdlets.
     .DESCRIPTION
       Each definition: Name, Description, Script (absolute path), Arguments (script arguments, incl.
       -ConfigPath "<path>" when given), Trigger = @{ Type = Weekly|Hourly|AtStartup|None; Day; Time },
       Settings = @{ ExecutionTimeLimitHours (0 = none); RestartCount; RestartIntervalMinutes }.
-      Schedule defaults: -Config Promotion.PipelineSchedule.Day/Time when -Config is passed, else Tuesday 20:00.
+      With -Config that lists golden images there is one weekly task per image, VDI-GI-Pipeline-<id> running
+      -Stage All -ImageId <id> at that image's Promotion.PipelineSchedule, plus the PostCheck, Dashboard and Runner tasks.
+      Without images (no -Config) it is the old single VDI-GI-Pipeline task for every image, Tuesday 20:00 unless
+      -PipelineDay / -PipelineTime say otherwise. -PipelineDay / -PipelineTime override the schedule of every image.
     #>
     [CmdletBinding()]
     param(
@@ -36,6 +48,8 @@ function Get-GIPipelineTaskDefinition {
         if (-not (Test-Path -LiteralPath $f)) { throw "Script not found: $f" }
     }
 
+    $entries = @()
+    if ($Config) { try { $entries = @(Get-GIImageEntries -Config $Config) } catch { $entries = @() } }
     $day = 'Tuesday'; $time = '20:00'
     if ($Config) {
         $day = [string](Get-GIConfigValue $Config 'Promotion.PipelineSchedule.Day' 'Tuesday')
@@ -62,10 +76,27 @@ function Get-GIPipelineTaskDefinition {
         }
     }
 
+    $pipelineLimits = @{ ExecutionTimeLimitHours = 12; RestartCount = 0; RestartIntervalMinutes = 0 }
+    $pipelineTasks = @(
+        if ($entries.Count) {
+            foreach ($e in $entries) {
+                $id = [string]$e.Id
+                if (-not (Test-GIImageId $id)) { throw "Golden image id '$id' can't be used in a task name." }
+                $eDay = [string](Get-GIConfigValue $e 'Promotion.PipelineSchedule.Day' 'Tuesday')
+                $eTime = [string](Get-GIConfigValue $e 'Promotion.PipelineSchedule.Time' '20:00')
+                if ($PSBoundParameters.ContainsKey('PipelineDay')) { $eDay = [string]$PipelineDay }
+                if ($PSBoundParameters.ContainsKey('PipelineTime')) { $eTime = $PipelineTime }
+                $eDay = [string][System.DayOfWeek]$eDay
+                (& $mk (Get-GIPipelineTaskName -ImageId $id) "Golden image pipeline for '$($e.Name)': maintain, snapshot, test push, validate, approval gate." `
+                    $pipelineScript "-Stage All -ImageId $id" @{ Type = 'Weekly'; Day = $eDay; Time = $eTime } $pipelineLimits)
+            }
+        } else {
+            (& $mk 'VDI-GI-Pipeline' 'Golden image pipeline: maintain, snapshot, test push, validate, approval gate.' `
+                $pipelineScript '-Stage All' @{ Type = 'Weekly'; Day = $day; Time = $time } $pipelineLimits)
+        }
+    )
     @(
-        (& $mk 'VDI-GI-Pipeline' 'Golden image pipeline: maintain, snapshot, test push, validate, approval gate.' `
-            $pipelineScript '-Stage All' @{ Type = 'Weekly'; Day = $day; Time = $time } `
-            @{ ExecutionTimeLimitHours = 12; RestartCount = 0; RestartIntervalMinutes = 0 })
+        $pipelineTasks
         (& $mk 'VDI-GI-PostCheck' 'Golden image pipeline: hourly production post-check (exit code 3 = not finished yet).' `
             $pipelineScript '-Stage PostCheck' @{ Type = 'Hourly'; Day = $null; Time = '00:00' } `
             @{ ExecutionTimeLimitHours = 1; RestartCount = 0; RestartIntervalMinutes = 0 })
@@ -135,6 +166,17 @@ function Register-GIPipelineTask {
             -Password $Credential.GetNetworkCredential().Password -Force | Out-Null
         $results.Add(@{ Name = $d.Name; Registered = $true })
     }
+    # With one task per image, the old single VDI-GI-Pipeline task (it would start every image again) and the tasks of
+    # images that are gone are removed. Only when per-image tasks are part of this registration.
+    if (@($Definitions | Where-Object { $_.Name -like 'VDI-GI-Pipeline-*' }).Count) {
+        $keep = @($Definitions | ForEach-Object { $_.Name })
+        foreach ($t in @(Get-ScheduledTask -TaskName 'VDI-GI-Pipeline*' -ErrorAction SilentlyContinue)) {
+            if ($t.TaskName -in $keep -or ($t.TaskName -ne 'VDI-GI-Pipeline' -and $t.TaskName -notlike 'VDI-GI-Pipeline-*')) { continue }
+            if (-not $PSCmdlet.ShouldProcess($t.TaskName, 'Unregister scheduled task (replaced by per-image tasks, or its image is gone)')) { continue }
+            Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false
+            $results.Add(@{ Name = $t.TaskName; Registered = $false; Removed = $true })
+        }
+    }
     return $results.ToArray()
 }
 
@@ -147,7 +189,8 @@ function Unregister-GIPipelineTask {
     param()
     if (-not (Test-GIIsWindows)) { throw 'Scheduled tasks can only be removed on Windows.' }
     $removed = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in $script:GITaskNames) {
+    $names = @($script:GITaskNames) + @(Get-ScheduledTask -TaskName 'VDI-GI-Pipeline-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+    foreach ($name in ($names | Select-Object -Unique)) {
         if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { continue }
         if ($PSCmdlet.ShouldProcess($name, 'Unregister scheduled task')) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
@@ -160,13 +203,19 @@ function Unregister-GIPipelineTask {
 function Test-GIPipelineTaskRegistered {
     <#
     .SYNOPSIS
-      Returns @{ <task name> = $true/$false }. All false off Windows.
+      Returns @{ <task name> = $true/$false }. All false off Windows. With -Config the per-image pipeline tasks are listed
+      too (and the old single VDI-GI-Pipeline only when no image has its own task yet).
     #>
     [CmdletBinding()]
-    param()
+    param([hashtable]$Config)
     $r = @{}
     $win = Test-GIIsWindows
-    foreach ($name in $script:GITaskNames) {
+    $names = @($script:GITaskNames)
+    if ($Config) {
+        $ids = @(try { Get-GIImageEntries -Config $Config | ForEach-Object { [string]$_.Id } } catch { @() })
+        if ($ids.Count) { $names = @($ids | ForEach-Object { Get-GIPipelineTaskName -ImageId $_ }) + @($script:GITaskNames | Where-Object { $_ -ne 'VDI-GI-Pipeline' }) }
+    }
+    foreach ($name in $names) {
         $r[$name] = $win -and [bool](Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)
     }
     return $r

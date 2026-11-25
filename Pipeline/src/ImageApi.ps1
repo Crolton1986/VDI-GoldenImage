@@ -473,7 +473,14 @@ function Save-GIApiImageSettings {
     try { $r = Save-GIImageSection -Config $Req.Config -ImageId $img.Id -Section $sec -Values $values -By $Req.User }
     catch { return (New-GIApiError 400 $_.Exception.Message) }
     Write-GIAudit -Config $Req.Config -User $Req.User -Role $Req.Role -Action 'settings.update' -Target $sec -Detail @{ image = $img.Id; section = $sec; keys = @($r.Changed) } -Result 'OK'
-    @{ Code = 200; Body = [ordered]@{ section = $sec; changed = @($r.Changed) } }
+    $body = [ordered]@{ section = $sec; changed = @($r.Changed) }
+    if ($sec -eq 'Promotion') {
+        $p = @{ Config = $Req.Config; ImageId = $img.Id; Changed = @($r.Changed); User = $Req.User; Role = $Req.Role }
+        if (Get-GIOpt $Req 'ScheduleRunner') { $p.Runner = Get-GIOpt $Req 'ScheduleRunner' }
+        $sched = Update-GIImageScheduleTask @p
+        if ($sched) { $body.scheduleTask = [ordered]@{ ok = [bool]$sched.ok; code = [string]$sched.code; detail = [string]$sched.detail } }
+    }
+    @{ Code = 200; Body = $body }
 }
 
 function Save-GIApiGlobalSettings {

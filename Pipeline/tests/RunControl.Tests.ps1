@@ -527,3 +527,74 @@ Describe 'Run requests with a Maintain step' {
         (New-GIRunRequest -Config $cfg -Action FromStage -Stage Maintain -RunId $runId -RequestedBy 'a').step | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Set-GIPipelineScheduleTask for one image' {
+    BeforeAll {
+        InModuleScope VDI-GIPipeline {
+            function script:Get-ScheduledTask { param($TaskName, $ErrorAction) }
+            function script:New-ScheduledTaskTrigger { param([switch]$Weekly, $DaysOfWeek, $At) [pscustomobject]@{ Days = $DaysOfWeek; At = $At } }
+            function script:Set-ScheduledTask { param($TaskName, $TaskPath, $Trigger, $ErrorAction) }
+        }
+    }
+    BeforeEach {
+        Mock -ModuleName VDI-GIPipeline Test-GIIsWindows { $true }
+        $script:img = New-TestConfig
+        $script:img.ImageId = 'w11-corp'
+        $script:img.Promotion = @{ PipelineSchedule = @{ Day = 'Friday'; Time = '03:15' } }
+    }
+    It 'sets the weekly trigger of that image''s own task' {
+        Mock -ModuleName VDI-GIPipeline Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName; TaskPath = '\' } }
+        Mock -ModuleName VDI-GIPipeline Set-ScheduledTask { }
+        $r = Set-GIPipelineScheduleTask -Config $img
+        $r.ok | Should -BeTrue; $r.code | Should -Be 'updated'; $r.detail | Should -Match "VDI-GI-Pipeline-w11-corp.* Friday at 03:15"
+        Should -Invoke -ModuleName VDI-GIPipeline Set-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'VDI-GI-Pipeline-w11-corp' -and $Trigger.Days -eq 'Friday' -and $Trigger.At.ToString('HH:mm') -eq '03:15' }
+    }
+    It 'never touches the task of another image or the old all-images task' {
+        Mock -ModuleName VDI-GIPipeline Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName; TaskPath = '\' } }
+        Mock -ModuleName VDI-GIPipeline Set-ScheduledTask { }
+        $null = Set-GIPipelineScheduleTask -Config $img
+        Should -Invoke -ModuleName VDI-GIPipeline Set-ScheduledTask -Times 0 -Exactly -ParameterFilter { $TaskName -ne 'VDI-GI-Pipeline-w11-corp' }
+    }
+    It 'says the task is missing (and creates nothing) when that image has none yet, even if the old task exists' {
+        Mock -ModuleName VDI-GIPipeline Get-ScheduledTask { if ($TaskName -eq 'VDI-GI-Pipeline') { [pscustomobject]@{ TaskName = $TaskName; TaskPath = '\' } } }
+        Mock -ModuleName VDI-GIPipeline Set-ScheduledTask { }
+        $r = Set-GIPipelineScheduleTask -Config $img
+        $r.ok | Should -BeFalse; $r.code | Should -Be 'missing'; $r.detail | Should -Match 'Register-GIPipelineTasks\.ps1'
+        Should -Invoke -ModuleName VDI-GIPipeline Set-ScheduledTask -Times 0 -Exactly
+    }
+    It 'reports failed with the reason when Task Scheduler refuses' {
+        Mock -ModuleName VDI-GIPipeline Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName; TaskPath = '\' } }
+        Mock -ModuleName VDI-GIPipeline Set-ScheduledTask { throw 'Access is denied' }
+        $r = Set-GIPipelineScheduleTask -Config $img
+        $r.ok | Should -BeFalse; $r.code | Should -Be 'failed'; $r.detail | Should -Match 'Access is denied'
+    }
+    It 'reports notwindows off Windows and -WhatIf changes nothing' {
+        Mock -ModuleName VDI-GIPipeline Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName; TaskPath = '\' } }
+        Mock -ModuleName VDI-GIPipeline Set-ScheduledTask { }
+        $null = Set-GIPipelineScheduleTask -Config $img -WhatIf
+        Should -Invoke -ModuleName VDI-GIPipeline Set-ScheduledTask -Times 0 -Exactly
+        Mock -ModuleName VDI-GIPipeline Test-GIIsWindows { $false }
+        $r = Set-GIPipelineScheduleTask -Config $img
+        $r.ok | Should -BeFalse; $r.code | Should -Be 'notwindows'; $r.detail | Should -Match 'only available on Windows'
+    }
+}
+
+Describe 'Update-GIImageScheduleTask' {
+    BeforeEach { $script:cfg = New-TestConfig }
+    It 'does nothing and returns $null unless Day or Time changed' {
+        $called = 0
+        $r = Update-GIImageScheduleTask -Config $cfg -ImageId 'a' -Changed @('AutoPromote', 'MaintenanceWindow.Days') -Runner { $script:called++ }
+        $r | Should -BeNullOrEmpty
+        @(Get-GIAudit -Config $cfg).Count | Should -Be 0
+    }
+    It 'runs the task update for the image and writes schedule.task with the outcome' {
+        $got = @{}
+        $runner = { param($c, $id) $got.id = $id; @{ ok = $false; code = 'missing'; detail = 'no task yet' } }.GetNewClosure()
+        $r = Update-GIImageScheduleTask -Config $cfg -ImageId 'w11-corp' -Changed @('PipelineSchedule.Time') -User 'LAB\admin1' -Runner $runner
+        $r.code | Should -Be 'missing'; $got.id | Should -Be 'w11-corp'
+        $e = @(Get-GIAudit -Config $cfg)[0]
+        $e.action | Should -Be 'schedule.task'; $e.target | Should -Be 'VDI-GI-Pipeline-w11-corp'; $e.user | Should -Be 'LAB\admin1'
+        $e.result | Should -Be 'Failed'; $e.image | Should -Be 'w11-corp'; $e.detail.code | Should -Be 'missing'
+        (Get-GIAuditCategory 'schedule.task') | Should -Be 'settings'
+    }
+}

@@ -128,7 +128,19 @@ function Send-GIFileRoute {
 
 #----- Settings -----
 
-function Get-GISectionNotice { param($WebEvent) switch ($WebEvent.Query['r']) { 'saved' { 'Saved. Changes apply from the next run.' } 'nochange' { 'Nothing changed.' } 'cred' { 'Credential stored.' } 'recheck' { 'Checked the installer folder again.' } default { '' } } }
+function Get-GISectionNotice {
+    param($WebEvent)
+    $n = switch ($WebEvent.Query['r']) { 'saved' { 'Saved. Changes apply from the next run.' } 'nochange' { 'Nothing changed.' } 'cred' { 'Credential stored.' } 'recheck' { 'Checked the installer folder again.' } default { '' } }
+    # t = what happened to this image's weekly scheduled task after a schedule change
+    $t = switch ($WebEvent.Query['t']) {
+        'updated' { ' The weekly scheduled task of this image was updated.' }
+        'missing' { ' This image has no scheduled task yet. Run Register-GIPipelineTasks.ps1 as administrator to create it.' }
+        'notwindows' { ' Scheduled tasks are only available on Windows, so the task was not changed.' }
+        'failed' { ' The scheduled task could not be updated. The audit log has the reason.' }
+        default { '' }
+    }
+    return "$n$t".Trim()
+}
 
 function Get-GIImageSettingsBody {
     # Body HTML for one per-image section (also used to re-render with errors).
@@ -210,7 +222,9 @@ function Receive-GIImageSettingsRoute {
     }
     $r = if (@($res.Changed).Count) { 'saved' } else { 'nochange' }
     Write-GIAudit -Config $d.ImageConfig -User $user -Role 'Admin' -Action 'settings.update' -Target $section -Detail @{ image = $d.Id; section = $section; keys = @($res.Changed) } -Result 'OK'
-    Move-PodeResponseUrl -Url "/images/$($d.Id)/settings/$($section)?r=$r"
+    $sched = if ($section -eq 'Promotion') { Update-GIImageScheduleTask -Config $d.Config -ImageId $d.Id -Changed @($res.Changed) -User $user -Role 'Admin' } else { $null }
+    $t = if ($sched) { "&t=$($sched.code)" } else { '' }
+    Move-PodeResponseUrl -Url "/images/$($d.Id)/settings/$($section)?r=$r$t"
 }
 
 function Receive-GIImageCredentialRoute {

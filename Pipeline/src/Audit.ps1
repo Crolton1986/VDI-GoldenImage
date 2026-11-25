@@ -82,7 +82,7 @@ function Get-GIAuditCategory {
     switch -Wildcard ($Action) {
         'approval.*' { 'approval' } 'run.*' { 'run' } 'rollback.*' { 'run' }
         'vm.*' { 'poolvm' } 'pool.*' { 'poolvm' }
-        'settings.*' { 'settings' } 'image.*' { 'settings' } 'credential.*' { 'settings' } 'connection.*' { 'settings' } 'setup.*' { 'settings' }
+        'settings.*' { 'settings' } 'schedule.*' { 'settings' } 'image.*' { 'settings' } 'credential.*' { 'settings' } 'connection.*' { 'settings' } 'setup.*' { 'settings' }
         'auth.signin*' { 'signin' }
         default { 'other' }
     }

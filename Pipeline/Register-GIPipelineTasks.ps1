@@ -3,11 +3,13 @@
 .SYNOPSIS
   Registers (or removes) the Windows scheduled tasks that run the golden image pipeline.
 .DESCRIPTION
-  Creates four tasks on the management server. All run pwsh.exe under the account passed in
+  Creates one pipeline task per golden image plus three shared tasks on the management server. All run pwsh.exe under the account passed in
   -Credential (default: prompts for the CURRENT user), whether or not the user is logged on, with
   highest privileges. The task definitions live in src/Tasks.ps1 and are shared with the /setup page.
 
-    VDI-GI-Pipeline   Invoke-GIPipeline.ps1 -Stage All, weekly (-PipelineDay / -PipelineTime)
+    VDI-GI-Pipeline-<id>  one task per golden image: Invoke-GIPipeline.ps1 -Stage All -ImageId <id>, weekly at that
+                      image's Promotion.PipelineSchedule (-PipelineDay / -PipelineTime override it for every image).
+                      The old single VDI-GI-Pipeline task, and the tasks of images that no longer exist, are removed.
     VDI-GI-PostCheck  Invoke-GIPipeline.ps1 -Stage PostCheck, every hour. Exit code 3 means
                       "not finished yet", which is expected until the push completes.
     VDI-GI-Dashboard  Web\Start-GIDashboard.ps1 at system startup, restarted on failure
@@ -16,7 +18,8 @@
                       request and starts this task (Go, retry, single stage, PostCheck, rollback).
 
   The dashboard runs as the same account, so it can start VDI-GI-Runner and update the weekly
-  trigger of VDI-GI-Pipeline from the Schedule settings page.
+  trigger of each VDI-GI-Pipeline-<id> task when an image's schedule is saved. It can't create the task of a new
+  golden image (that needs the password): re-run this script after adding an image.
 
   Re-running the script updates existing tasks. Needs Windows, PowerShell 7 and an elevated session.
 .PARAMETER Credential
@@ -26,9 +29,9 @@
 .PARAMETER ConfigPath
   Optional pipeline config file, passed to every task.
 .PARAMETER PipelineDay
-  Day of the week for the full pipeline run (default Tuesday).
+  Day of the week for the full pipeline run of every image. Without it each image uses its own Promotion.PipelineSchedule.
 .PARAMETER PipelineTime
-  Time of day (HH:mm) for the full pipeline run (default 20:00).
+  Time of day (HH:mm) for the full pipeline run of every image. Without it each image uses its own Promotion.PipelineSchedule.
 .PARAMETER Unregister
   Removes the four tasks instead of registering them.
 .EXAMPLE
@@ -46,11 +49,11 @@ param(
     [string] $ConfigPath,
 
     [Parameter(ParameterSetName = 'Register')]
-    [System.DayOfWeek] $PipelineDay = 'Tuesday',
+    [System.DayOfWeek] $PipelineDay,
 
     [Parameter(ParameterSetName = 'Register')]
     [ValidatePattern('^([01]?\d|2[0-3]):[0-5]\d$')]
-    [string] $PipelineTime = '20:00',
+    [string] $PipelineTime,
 
     [Parameter(Mandatory, ParameterSetName = 'Unregister')]
     [switch] $Unregister
@@ -76,10 +79,14 @@ if (-not $Credential) {
     if (-not $Credential) { throw 'A credential is required.' }
 }
 
-$defArgs = @{ Root = $PSScriptRoot; PipelineDay = $PipelineDay; PipelineTime = $PipelineTime }
+$cfgArgs = @{}; if ($ConfigPath) { $cfgArgs.Path = $ConfigPath }
+$defArgs = @{ Root = $PSScriptRoot; Config = (Get-GIConfig @cfgArgs) }
+if ($PSBoundParameters.ContainsKey('PipelineDay')) { $defArgs.PipelineDay = $PipelineDay }
+if ($PSBoundParameters.ContainsKey('PipelineTime')) { $defArgs.PipelineTime = $PipelineTime }
 if ($ConfigPath) { $defArgs.ConfigPath = $ConfigPath }
 $definitions = Get-GIPipelineTaskDefinition @defArgs
 
 foreach ($r in (Register-GIPipelineTask -Definitions $definitions -Credential $Credential -WhatIf:$WhatIfPreference)) {
-    Write-Host "Registered task $($r.Name)."
+    if ($r.ContainsKey('Removed') -and $r.Removed) { Write-Host "Removed task $($r.Name) (replaced by per-image tasks, or its image is gone)." }
+    else { Write-Host "Registered task $($r.Name)." }
 }

@@ -474,8 +474,12 @@ function Invoke-GISetupTasks {
     $defArgs = @{ Root = $Config.Root; Config = $Config }
     if ($ConfigPath) { $defArgs.ConfigPath = $ConfigPath }
     $defs = Get-GIPipelineTaskDefinition @defArgs
-    $result = @(Register-GIPipelineTask -Definitions $defs -Credential $Credential)
-    @{ Message = "Registered $($result.Count) scheduled tasks as $me."; Data = @{ tasks = @($result | ForEach-Object { $_.Name }) } }
+    $all = @(Register-GIPipelineTask -Definitions $defs -Credential $Credential)
+    $result = @($all | Where-Object { -not (Get-GIWatcherProp $_ 'Removed' $false) })
+    $removed = @($all | Where-Object { Get-GIWatcherProp $_ 'Removed' $false } | ForEach-Object { $_.Name })
+    $msg = "Registered $($result.Count) scheduled tasks as $me."
+    if ($removed.Count) { $msg += " Removed $($removed -join ', ') (replaced by one task per golden image, or its image is gone)." }
+    @{ Message = $msg; Data = @{ tasks = @($result | ForEach-Object { $_.Name }); removed = $removed } }
 }
 
 #----- Step: Finish (in request) -----
