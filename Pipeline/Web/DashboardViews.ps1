@@ -185,6 +185,7 @@ a{color:var(--link)}
 .chip.warn,.badge.st-wait,.badge.st-warn{background:var(--warn-bg);color:var(--warn-fg)}
 .chip.run,.badge.st-running,.badge.st-sched{background:var(--run-bg);color:var(--run-fg)}
 .chip.bad,.badge.st-bad{background:var(--bad-bg);color:var(--bad-fg)}
+.stale{opacity:.6;filter:grayscale(1)}
 .chip.idle,.badge.st-skip,.badge.st-pending{background:var(--idle-bg);color:var(--idle-fg)}
 .icon{font-weight:700;margin-right:4px}
 .icon.st-ok{color:var(--ok-fg)}.icon.st-bad{color:var(--bad-fg)}.icon.st-running{color:var(--run-fg)}.icon.st-pending,.icon.st-skip{color:var(--mut)}
