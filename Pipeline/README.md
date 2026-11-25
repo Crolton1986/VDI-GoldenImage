@@ -67,7 +67,11 @@ Preflight -> Maintain -> Snapshot -> TestPush -> Validate -> Approval -> Promote
 ```
 
 1. Preflight checks that the golden VM is powered off, that every ticked package has an installer on the host (when an installer folder is set) and that no pool has a push pending, then takes a safety snapshot named `pre-maint-<RunId>`.
-2. Maintain powers the VM on and runs Windows Update passes and `VDI-GoldenImage.ps1 -Unattended` actions inside the guest through VMware Tools, then runs the finalize action and waits for power off. It's split into sub-steps (revert failed run, safety snapshot, remove failed-run snapshots, power on, copy script, copy installers, enable updates, Windows Update, one step per package, reboot, read versions, finalize, power off), and the run page shows each one's status, start time, duration and latest message. Each package install has a timeout (Settings → Packages, `GoldenImage.ActionTimeoutMin`, default 60 minutes). When it runs out, the installer processes in the guest are stopped and the step fails, so a stuck installer can't block the run.
+2. Maintain powers the VM on, patches it and installs the packages inside the guest, then runs the finalize action and waits for power off. The sub-steps are RevertFailedRun, SafetySnapshot, RemoveFailedRunSnapshots, PowerOn, CopyScript, CopyInstallers, StartWatcher, EnableUpdates, WindowsUpdate, one `Pkg:<Action>` per package, Reboot, Manifest, CleanupGuest, Finalize and PowerOff. The run page shows each one's status, start time, duration and latest message.
+
+   StartWatcher copies a small watcher into the guest and starts it as a one-shot scheduled task running as SYSTEM. The watcher runs EnableUpdates, WindowsUpdate and the packages in order and writes one status file per step. The host reads those files and the watcher log over VMware Tools and mirrors them into the run. On the run page, expand a guest step to see its live log. The watcher never reboots the guest itself. When a step needs a reboot (Windows Update, an installer or a fix), the watcher asks and the host does it, then starts the watcher again where it left off.
+
+   `GoldenImage.ActionTimeoutMin` (Settings → Packages, default 60 minutes) applies per attempt of a step. When it runs out, the host stops the watcher and the installer processes in the guest and fails the step. If a step fails with an error a fix script knows, the watcher applies the fix and retries; see "Adding a fix script". CleanupGuest removes everything from `GoldenImage.GuestWorkDir` before Finalize, so clones don't inherit it. The guest log is kept as `logs/<RunId>.watcher.guest.log`; the host's live copy is `logs/<RunId>.watcher.log`.
 3. Snapshot creates `GI-<RunId>` with a manifest of the installed agent versions, then applies the retention policy.
 4. TestPush pushes the snapshot to the test pool.
 5. Validate checks Horizon (machine state), the guest (required services on a sample of machines) and App Volumes (test packages attached).
@@ -165,7 +169,7 @@ Changes made in the dashboard are saved to `config/settings.json`, which is laye
 | vCenter | Server, CredentialSecret | Used for snapshots, power operations and guest operations. |
 | Horizon | Server, CredentialSecret, Domain, SkipCertificateCheck | Connection Server REST API. Leave the certificate check on in production. |
 | AppVolumes | Server, CredentialSecret, SkipCertificateCheck, TestPackages, Endpoints | TestPackages are the packages assigned to the test pool's computers. Endpoints are the REST paths and differ between releases. |
-| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update; edit them and InstallerSourceDir under Settings → Packages, which saves them in catalog order. WindowsUpdate has Enabled and MaxPasses. |
+| GoldenImage | VmName, GuestCredentialSecret, ScriptPathInGuest, InstallerSourceDir, Actions, WindowsUpdate, FinalizeAction, PowerOffTimeoutMin | Actions run in order with `-Unattended` after Windows Update; edit them and InstallerSourceDir under Settings → Packages, which saves them in catalog order. WindowsUpdate has Enabled and MaxPasses. GuestWorkDir is the pipeline-owned folder in the guest, ActionTimeoutMin is the per-attempt step timeout, and Watcher holds the polling, relaunch and retry limits (full list in `docs/CONTRACT.md`). |
 | Pools | Test, Production, PushTimeoutMin | Test is one pool, Production is a list. Each pool has Name and LogoffPolicy (FORCE_LOGOFF or WAIT_FOR_LOGOFF). |
 | Validation | GuestSampleCount, RequiredServices, MachineReadyTimeoutMin | Services are checked on that many test machines. |
 | Snapshots | NamePrefix, Mode, Keep, MaxChainDepth, Prune, ProtectAncestors, ConsolidateTimeoutMin, MinFreeSpacePercent | Naming and retention. See Safety behavior. |
@@ -206,7 +210,7 @@ Run from the Pipeline folder on the management server.
 
 `-FromStage` accepts Preflight, Maintain, Snapshot, TestPush or Validate. It runs that stage and every stage after it up to Validate, and it needs `-RunId`.
 
-Retrying Maintain after it failed or was interrupted resumes at the first unfinished sub-step. The safety snapshot, enabling updates, Windows Update and packages that already succeeded are skipped. Power on, the file copies and everything from the reboot onward always run again. `-FromStep <id>` (with `-FromStage Maintain` or `-Stage Maintain`) picks the step to resume from instead, and `-FromStep SafetySnapshot` restarts Maintain completely. If the golden VM was reverted to a snapshot since the earlier attempt started (the pipeline checks vCenter's events for a revert task), the earlier work is gone, so Maintain restarts from the beginning no matter what you asked for. When it can't read the events, it restarts as well, to be safe. After a revert to the run's own `pre-maint-<RunId>` snapshot, that snapshot is reused; after a revert to any other snapshot, a new `pre-maint-<RunId>-<time>` is taken.
+Retrying Maintain after it failed or was interrupted resumes at the first unfinished sub-step. The safety snapshot, enabling updates, Windows Update and packages that already succeeded are skipped. Power on, the file copies, starting the watcher and everything from the reboot onward always run again. A guest step that was halfway through is started over as a new attempt. `-FromStep <id>` (with `-FromStage Maintain` or `-Stage Maintain`) picks the step to resume from instead, and `-FromStep SafetySnapshot` restarts Maintain completely. If the golden VM was reverted to a snapshot since the earlier attempt started (the pipeline checks vCenter's events for a revert task), the earlier work is gone, so Maintain restarts from the beginning no matter what you asked for. When it can't read the events, it restarts as well, to be safe. After a revert to the run's own `pre-maint-<RunId>` snapshot, that snapshot is reused; after a revert to any other snapshot, a new `pre-maint-<RunId>-<time>` is taken.
 
 A run that fails leaves the golden VM in whatever state it failed in, plus its `pre-maint-<RunId>` snapshot. When the next run's Maintain starts and the VM still sits on such a snapshot (the run is Failed, Rejected or RolledBack, or its run file is gone), Maintain first reverts to the oldest one in that chain, which is the state before the failed run touched the VM. Then it takes its own safety snapshot and removes the failed runs' `pre-maint` snapshots, oldest first, with disk consolidation after each. Nothing is removed while a push is pending or Horizon can't be reached, and a run's own snapshot or one still in use is never touched. Turn this off with Settings → Snapshots → Clean up after failed runs (`Snapshots.CleanupFailedRuns`); Maintain then only reports what it would revert and remove. Every invocation except `-Stage Status` takes the pipeline lock (`state/pipeline.lock`), so scheduled, command-line and dashboard runs never overlap.
 
@@ -347,6 +351,84 @@ There's no stop button. A stage can be partway through a snapshot, a guest opera
 * Promotion schedules the pools one after another. If one fails, the pools already scheduled in that promotion are cancelled.
 * `Promotion.AutoPromote` is `$false` by default, so a person has to approve every run.
 
+## Adding a fix script
+
+A fix is for a known failure that the watcher can recognize and remedy without anyone editing `VDI-GoldenImage.ps1` or the watcher. It runs after an attempt of a guest step fails. The watcher picks the first matching fix (lowest `Priority`, then file name), runs it, and retries the step. A fix is used at most `MaxAttempts` times per step, and the step as a whole stops at `GoldenImage.Watcher.MaxStepAttempts`. If no fix matches, or its attempts are used up, the step fails with the original error.
+
+A fix is one file, `Pipeline/guest/fixes/<Id>.ps1`: a `$GIFix` block and an `Invoke-GIFix` function. This is the shipped `RegistryKeyMarkedForDeletion`, abridged:
+
+```powershell
+$GIFix = @{
+    Id                = 'RegistryKeyMarkedForDeletion'
+    Description       = 'Registry key marked for deletion (stale hive): stop leftover installers, wait for MSI idle, retry; reboot on the second time'
+    Priority          = 100
+    Actions           = @('*')
+    MaxAttempts       = 2
+    RebootFromAttempt = 2
+    Match             = @{
+        ExitCodes = @(1)
+        Patterns  = @('registry\s+key\s+that\s+has\s+been\s+marked\s+for\s+deletion')
+        Sources   = @('Errors', 'Output', 'Log')
+    }
+}
+
+function Invoke-GIFix {
+    param([Parameter(Mandatory)] $Context)
+    try {
+        if ([string]$Context.Phase -eq 'AfterReboot') {
+            # log the boot time and return
+            return @{ Ok = $true; Message = 'After reboot' }
+        }
+        $stopped = @(Stop-GIAllowedProcess -InstallDirOnly)
+        $idle = [bool](Wait-GIMsiIdle -TimeoutSec 60)
+        if (-not $idle) {
+            $stopped += @(Stop-GIAllowedProcess -Name 'msiexec')
+            $idle = [bool](Wait-GIMsiIdle -TimeoutSec 240)
+        }
+        return @{ Ok = $idle; Message = "Stopped $(@($stopped).Count) process(es)" }
+    } catch {
+        return @{ Ok = $false; Message = "Fix could not complete: $($_.Exception.Message)" }
+    }
+}
+```
+
+The watcher reads the `$GIFix` block without running the file, so it has to be literal values only.
+
+| Key | Meaning |
+|---|---|
+| `Id` | Must equal the file name without `.ps1`. Letters and digits, starting with a letter. |
+| `Description` | One line, shown in the log and the dashboard. |
+| `Priority` | Lower runs first. Ties go by file name. |
+| `Actions` | Which steps the fix applies to: action names such as `Horizon` or `VmTools`, `WindowsUpdate`, or `*` for all. |
+| `MaxAttempts` | How many times the fix may be used per step in one Maintain attempt, 1 to 5. |
+| `RebootFromAttempt` | 0 means never reboot. From the n-th use on, the host reboots the guest before the retry. |
+| `Match.ExitCodes` | Exit codes of the failed attempt that qualify. Empty means any non-zero code. |
+| `Match.Patterns` | Regular expressions, case-insensitive. At least one is required, and one match is enough. |
+| `Match.Sources` | Where to search: `Errors` (the result file), `Output` (last 200 lines of the step's output) and `Log` (the newest install log). Default is all three. |
+
+`Invoke-GIFix` runs in its own child process and gets a `$Context` with the step id, action, phase (`BeforeRetry` or `AfterReboot`), exit code, the error text, the attempt numbers and the guest paths (`WorkDir`, `InstallDir`, `LogDir`). It also has three helpers:
+
+| Helper | What it does |
+|---|---|
+| `Stop-GIAllowedProcess -Name <name>` or `-InstallDirOnly` | Stops `msiexec` or processes running from `InstallDir`. It never stops the watcher or its parents. |
+| `Wait-GIMsiIdle -TimeoutSec <n>` | Waits until the Windows Installer is free. Returns `$true` or `$false`. |
+| `Write-GIFixLog -Message <text>` | Writes a line to the step's log. |
+
+Return `@{ Ok = $true/$false; Message = '...' }`. A throw counts as a failed fix, and the step retries anyway until the attempt cap.
+
+A fix must never touch the watcher or reboot on its own. `tests/Fixes.Tests.ps1` scans every fix and fails on `Stop-Process`, `taskkill`, `Restart-Computer`, `Stop-Computer`, `shutdown`, `Unregister-ScheduledTask`, `Stop-ScheduledTask`, `Invoke-Expression` (and `iex`), `wmic`, `.Kill()`, `Remove-Item` on `WorkDir`, PowerShell 7 only syntax, and any top-level code besides `$GIFix` and functions. If a fix needs a reboot, set `RebootFromAttempt` and the host does it at a safe point.
+
+To add one:
+
+1. Copy `Pipeline/guest/fixes/RegistryKeyMarkedForDeletion.ps1` to `Pipeline/guest/fixes/<Id>.ps1` and set `Id` to the file name.
+2. Copy `Pipeline/tests/fixes/RegistryKeyMarkedForDeletion.Tests.ps1` to `Pipeline/tests/fixes/<Id>.Tests.ps1` and feed the exact error text from the failed run into `Select-GIFix`. Check that it's selected for that text and not for others.
+3. Run the Pester commands under Tests below.
+4. That's it. The next run picks it up, because StartWatcher copies the fixes folder into the guest every time. No other file changes.
+
+To see that a fix worked, expand the step on the run page and read its log. The step's `fixApplied` list records each use, and the step message ends with "fixed by <id>" once it succeeds.
+
+The registry-key example exists because of one specific error. "Illegal operation attempted on a registry key that has been marked for deletion" comes from `Start-Process` when the profile hive of the launching session was unloaded. That happened with the old detached launch from a VMware Tools guest operation. The watcher now runs as SYSTEM, so it should be rare, and the fix is a safety net. The first time, a fresh process is enough, since it gets a fresh token and hive. The second time the fix asks for a reboot, because that's the only reliable way to clear a stale hive, but it costs several minutes, so it's not the first move.
+
 ## Confirm before first use
 
 The Horizon and App Volumes calls were written from the documented APIs and haven't been run against your environment. Check these first.
@@ -391,4 +473,10 @@ Invoke-Pester -Path Pipeline/tests -Output Detailed
 Invoke-ScriptAnalyzer -Path Pipeline -Recurse -Settings Pipeline/PSScriptAnalyzerSettings.psd1
 ```
 
-The tests don't need vCenter, Horizon or Windows.
+For the guest watcher and the fix scripts only:
+
+```powershell
+Invoke-Pester -Path Pipeline/tests/GuestWatcher.Tests.ps1, Pipeline/tests/Fixes.Tests.ps1, Pipeline/tests/fixes -Output Detailed
+```
+
+The tests don't need vCenter, Horizon or Windows. The guest code targets Windows PowerShell 5.1, but the tests run on PowerShell 7.

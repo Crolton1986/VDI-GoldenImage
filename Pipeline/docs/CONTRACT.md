@@ -593,7 +593,8 @@ function Invoke-GIFix {
   - `Write-GIFixLog -Message` : appends a line to watcher.log under the step id.
 - Rules every fix follows (enforced by `Fixes.Tests.ps1` with an AST scan): no calls to `Stop-Process`,
   `taskkill`, `Restart-Computer`, `Stop-Computer`, `shutdown`, `Unregister-ScheduledTask`, `Stop-ScheduledTask`,
-  `Remove-Item` on `WorkDir`/`$Context.WorkDir`; no `Invoke-Expression`; reboots are requested only through
+  `Remove-Item` on `WorkDir`/`$Context.WorkDir`; no `Invoke-Expression`/`iex`, `wmic` or `.Kill()`; no PowerShell 7-only
+  syntax (`??`, `?.`); only the `$GIFix` assignment and function definitions at top level; reboots are requested only through
   `RebootFromAttempt`. Adding a fix = one file in `guest/fixes` plus one test in `tests/fixes`. No edit to the
   watcher, the host or `VDI-GoldenImage.ps1`.
 
@@ -601,7 +602,8 @@ function Invoke-GIFix {
 
 Matches any action, exit code 1, pattern `registry key that has been marked for deletion` in Errors/Output/Log.
 `MaxAttempts = 2`, `RebootFromAttempt = 2`. Fix attempt 1 (Phase BeforeRetry): stop leftover installer processes
-from InstallDir and msiexec through `Stop-GIAllowedProcess`, wait up to 300 s for `Wait-GIMsiIdle`, then the step
+from InstallDir through `Stop-GIAllowedProcess`, wait up to 60 s for `Wait-GIMsiIdle`; if still busy, stop msiexec
+and wait up to 240 s more (Ok = false when it stays busy), then the step
 retries in a fresh child process (fresh token and hive). Fix attempt 2: same cleanup, then the host reboots (unloads
 every stale hive), Phase AfterReboot logs the boot time and returns, the step retries. A third failure fails the
 step with the original error. Since the watcher runs as SYSTEM (no roaming user hive), the error should be rare;
