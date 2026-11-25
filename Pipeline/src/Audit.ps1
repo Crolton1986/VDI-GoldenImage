@@ -1,6 +1,8 @@
 function Get-GIAuditPath {
     param([Parameter(Mandatory)][hashtable]$Config)
-    Join-Path $Config.Paths.State 'audit.jsonl'
+    # One audit log for everything, even when the config is scoped to one image
+    $dir = if ($Config.Paths.ContainsKey('RootState') -and $Config.Paths.RootState) { $Config.Paths.RootState } else { $Config.Paths.State }
+    Join-Path $dir 'audit.jsonl'
 }
 
 function Write-GIAudit {
@@ -14,7 +16,10 @@ function Write-GIAudit {
         [string]$User = 'unknown',
         [Parameter(Mandatory)][string]$Action,
         [string]$Target = '',
-        [hashtable]$Detail = @{}
+        [hashtable]$Detail = @{},
+        [string]$Role = '',
+        [string]$Image = '',
+        [string]$Result = ''
     )
     try {
         $entry = [ordered]@{
@@ -24,6 +29,15 @@ function Write-GIAudit {
             target = $Target
             detail = $Detail
         }
+        # Optional fields (role, image, result); image falls back to the config's image, then the detail
+        $img = $Image
+        if (-not $img -and $Config.ContainsKey('ImageId')) { $img = [string]$Config.ImageId }
+        if (-not $img -and $Detail.ContainsKey('image')) { $img = [string]$Detail.image }
+        $res = $Result
+        if (-not $res -and $Detail.ContainsKey('result')) { $res = [string]$Detail.result }
+        if ($Role) { $entry.role = $Role }
+        if ($img) { $entry.image = $img }
+        if ($res) { $entry.result = $res }
         $line = ($entry | ConvertTo-Json -Depth 10 -Compress) + [Environment]::NewLine
         $path = Get-GIAuditPath -Config $Config
         $dir = Split-Path -Parent $path

@@ -372,19 +372,21 @@ function Invoke-GIConnectionTest {
     param(
         [string] $ConfigPath,
         [Parameter(Mandatory)] [ValidateSet('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Pools', 'Email')] [string] $System,
-        [int] $TimeoutSeconds = 120
+        [int] $TimeoutSeconds = 120,
+        [hashtable] $Overrides = @{}   # unsaved form values merged over the config for this test only
     )
     $manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'VDI-GIPipeline.psd1'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $job = $null
     try {
-        $job = Start-Job -ArgumentList $manifest, $ConfigPath, $System -ScriptBlock {
-            param($m, $cp, $sys)
+        $job = Start-Job -ArgumentList $manifest, $ConfigPath, $System, $Overrides -ScriptBlock {
+            param($m, $cp, $sys, $ov)
             $ProgressPreference = 'SilentlyContinue'
             Import-Module $m -Force -ErrorAction Stop
             $a = @{}
             if ($cp) { $a.Path = $cp }
             $cfg = Get-GIConfig @a
+            if ($ov -and $ov.Count) { $cfg = Merge-GIHashtable -Base $cfg -Overlay $ov }
             $r = Test-GIConnection -Config $cfg -System $sys
             [pscustomobject]@{ ok = [bool]$r.ok; detail = [string]$r.detail }
         }

@@ -51,6 +51,7 @@ Import-Module Pode -MaximumVersion 2.99.99 -ErrorAction Stop
 $configArgs = @{}
 if ($ConfigPath) { $configArgs.Path = $ConfigPath }
 $config = Get-GIConfig @configArgs
+if ((Invoke-GIConfigMigration -Config $config).Migrated) { $config = Get-GIConfig @configArgs }
 $dash = $config.Dashboard
 if (-not $dash) { $dash = @{} }
 if (-not $PSBoundParameters.ContainsKey('Port')) { $Port = if ($dash.Port) { [int]$dash.Port } else { 8443 } }
@@ -611,5 +612,11 @@ Start-PodeServer -Quiet -Threads 4 {
             return
         }
         Write-PodeJsonResponse -Value (ConvertTo-Json -InputObject (Get-GIRun -Config (Get-GIDashboardConfig $c) -RunId $id) -Depth 10)
+    }
+
+    # Image API (see docs/CONTRACT.md): GET/POST/DELETE under /api; /api/runs stays as the legacy read endpoint
+    Add-PodeRoute -Method Get, Post, Delete -Path '/api/*' @auth -ScriptBlock {
+        $c = (Get-PodeState -Name 'GIContext')
+        Invoke-GIApiRoute -Context $c -WebEvent $WebEvent
     }
 }

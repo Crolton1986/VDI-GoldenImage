@@ -64,6 +64,7 @@ function New-GIRun {
     $table = [ordered]@{
         schemaVersion  = 1
         runId          = $RunId
+        imageId        = $(if ($Config.ContainsKey('ImageId')) { [string]$Config.ImageId } else { '' })
         goldenVm       = $Config.GoldenImage.VmName
         createdAt      = $now.ToString('o')
         updatedAt      = $now.ToString('o')

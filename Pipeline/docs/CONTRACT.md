@@ -694,3 +694,43 @@ Maintain wiring (src/Stages.ps1):
 - Run page: each Maintain step for which `Test-GIWatcherStep` is true gets a `<details class="steplog">` row with the
   step's lines rendered server-side (last 200). While open and the step is Running, inline JS fetches the route every
   `LogPollSec` (10 s) from the last offset and appends. Works without JS (lines on reload).
+
+
+## Multi-image model (UI redesign)
+
+See `ADR-0001-multi-image.md`. `Get-GIImageEntries`, `Get-GIImageConfig`, `Test-GIImageConstraints`, `Invoke-GIConfigMigration`, `New-GIImageFromPayload`, `Save-GIImageSection`, `Set-GIImagePaused`, `Remove-GIImageEntry` live in `src/Images.ps1`. Run state has `imageId`. `Invoke-GIPipeline.ps1 -ImageId <id>` picks the image; without it one image is used, or All, PostCheck, Status and -FromRequest go through every image.
+
+## Image API
+
+All under `/api`, JSON. Errors: `{ "error": "text", "errorId": "8 hex chars" }` (errorId only for 500). Writes need the `X-GI-Token` header (or `token` in the body) and a same-origin request. Roles: Viewer (read), Approver (approve, reject), Admin (everything). A forbidden call returns 403 and writes an `auth.denied` audit entry. Implemented by `Invoke-GIApiRequest` in `src/ImageApi.ps1`.
+
+| Method and path | Role | Result |
+|---|---|---|
+| `GET /images` | any | `{ images: [ { id, name, description, os, paused, vm, testPool, productionPools, packages, autoPromote, schedule, maintenanceWindow, lastRun, activeRun, lastKnownGood } ] }`. No live calls. |
+| `GET /images/{id}/live` | any | `{ checkedAt, vm: { name, power, snapshots, latestSnapshot } or null, pools: [ { pool, snapshot, pending, state, matchesLatest } ], lastKnownGood, errors: [ "vCenter did not answer within 15 seconds" ] }` |
+| `GET /images/{id}/runs?status=&page=` | any | `{ runs, page, pageSize, total }`, newest first, 20 per page |
+| `GET /images/{id}/runs/{runId}` | any | `{ run, imageId, steps: [ { id, label, status, startedAt, endedAt, message, logLines, fixApplied } ], approval: { decision, by, at, validation, poolsToUpdate, nextWindow }, logBundleUrl }` |
+| `GET /images/{id}/runs/{runId}/steps/{stepId}/log?tail=N` | any | `{ lines, running, total }` |
+| `GET /images/{id}/packages` | any | installer status per package: id, name, selected, state (Found, Download, Missing, NoFolder), file, version, sizeMB, modified |
+| `GET /fixes` | any | the fix catalog from `guest/fixes` (id, description, priority, actions, maxAttempts, rebootFromAttempt, match, lastUsedRunId). Never runs a fix. |
+| `GET /runs/{runId}/logs.zip`, `GET /images/{id}/runs/{runId}/logs.zip` | any | log bundle, named `<imageName>-<RunId>-logs.zip` |
+| `GET /images/{id}/settings/{section}`, `GET /settings/{section}` | any | `{ section, values }`; secret fields show names and status only |
+| `POST /images` | Admin | 201 `{ id, name }`; validated with the settings rules and the constraints; starts no run |
+| `POST /images/{id}/settings/{section}` | Admin | sections: General, GoldenImage, Pools, Validation, Snapshots, Promotion, AppVolumes (test packages) |
+| `POST /settings/{section}` | Admin | vCenter, Horizon, AppVolumes, Email |
+| `POST /settings/{section}/test` | Admin | tests the posted (unsaved) values; `{ ok, detail, seconds }` |
+| `POST /images/{id}/pause`, `/resume` | Admin | |
+| `DELETE /images/{id}` | Admin | removes the image from the config only; 409 while a run is active |
+| `POST /images/{id}/runs` | Admin | 202; 409 when paused or a run is active |
+| `POST /images/{id}/runs/{runId}/retry` | Admin | retry from the failed stage (optional `step`); 409 unless the run is Failed |
+| `POST /images/{id}/runs/{runId}/approve` | Approver, Admin | optional `startTime`, `comment`; 409 "Already approved by X at HH:mm" |
+| `POST /images/{id}/runs/{runId}/reject` | Approver, Admin | `comment` required |
+| `POST /images/{id}/vm/power` | Admin | `{ action: "on" or "off" }`; 409 while a run is active |
+| `POST /images/{id}/vm/revert` | Admin | `{ snapshot }`; 409 while a run is active |
+| `POST /images/{id}/pools/{pool}/rollback` | Admin | `{ snapshot?, logoffPolicy, startTime?, runId? }`; marks the run RolledBack |
+
+Audit entries (each has time, user, role, image, action, details, result): `image.create`, `image.update`, `image.pause`, `image.resume`, `image.delete`, `image.migrate`, `vm.power`, `vm.revert`, `pool.rollback`, `settings.update` (section and changed keys, never values of secrets), `run.start`, `run.retry`, `approval.approve`, `approval.reject`, `connection.test`, `auth.denied`, `api.error`. Sign-in entries (`auth.signin`, `auth.signin.failed`) are written by the dashboard authentication hook (task 12).
+
+## Guest logs
+
+Maintain has a step `CollectGuestLogs` ("Collect guest logs") right before `CleanupGuest`, and any failing Maintain step (or a failing guest step) triggers the same collection first, while the guest is still on. It runs a guest script (`Get-GIGuestLogScript`) that gathers the watcher log and step files, the guest script and installer logs, Windows Update, CBS and DISM logs, `Get-WindowsUpdateLog` output, `MSI*.LOG`, Horizon, DEM, App Volumes, FSLogix, Teams, OneDrive and VMware Tools logs, and an event log extract (errors and warnings, installer and update providers, from the run start). Each file is capped at 20 MB (last part kept, noted in `_collection-notes.txt`); files with credential-like names are skipped. The result is zipped in the guest, copied once and expanded to `<Logs>/<RunId>/guest/`. An unreachable guest marks the step Skipped with the reason; collection never fails a run. The bundle (`New-GILogBundle`) streams a zip with `host/`, `run.json`, `report.html`, `guest/` and a `README.txt` that lists what is inside and anything missing or truncated.

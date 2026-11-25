@@ -584,7 +584,7 @@ Describe 'Invoke-GIStageMaintain' {
     It 'runs every step in order on a fresh run and records them' {
         $r = Invoke-GIStageMaintain -Config $cfg -Run $run
         @($global:GITestCtx.Calls) | Should -Be @('Start', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Exit', 'Cleanup', 'Finalize')
-        (Steps).id | Should -Be @('RevertFailedRun', 'SafetySnapshot', 'RemoveFailedRunSnapshots', 'PowerOn', 'CopyScript', 'CopyInstallers', 'StartWatcher', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Manifest', 'CleanupGuest', 'Finalize', 'PowerOff')
+        (Steps).id | Should -Be @('RevertFailedRun', 'SafetySnapshot', 'RemoveFailedRunSnapshots', 'PowerOn', 'CopyScript', 'CopyInstallers', 'StartWatcher', 'EnableUpdates', 'WindowsUpdate', 'Pkg:VmTools', 'Pkg:Horizon', 'Reboot', 'Manifest', 'CollectGuestLogs', 'CleanupGuest', 'Finalize', 'PowerOff')
         @(Steps | Where-Object { $_.status -notin 'Succeeded', 'Skipped' }) | Should -BeNullOrEmpty
         StepStatus 'CopyScript' | Should -Be 'Skipped'
         (Steps | Where-Object id -eq 'Pkg:Horizon').message | Should -Be 'Installed version 1.0'

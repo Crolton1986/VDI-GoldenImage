@@ -69,12 +69,12 @@ function Get-GIConfig {
         $config = Merge-GIHashtable -Base $config -Overlay $overlay
     }
 
-    $required = @(
-        'Paths.State', 'Paths.Reports', 'Paths.Logs',
-        'vCenter.Server', 'Horizon.Server', 'GoldenImage.VmName',
-        'Pools.Test.Name', 'Pools.Production', 'Snapshots.Keep',
-        'Promotion.MaintenanceWindow'
-    )
+    $required = @('Paths.State', 'Paths.Reports', 'Paths.Logs', 'vCenter.Server', 'Horizon.Server')
+    # Old single-image shape: the per-image blocks are required at the top level. With a GoldenImages list they are validated per image.
+    $multi = $config.ContainsKey('GoldenImages') -and $null -ne $config['GoldenImages']
+    if (-not $multi) {
+        $required += @('GoldenImage.VmName', 'Pools.Test.Name', 'Pools.Production', 'Snapshots.Keep', 'Promotion.MaintenanceWindow')
+    }
     $missing = foreach ($key in $required) {
         $node = $config
         $found = $true
@@ -91,6 +91,11 @@ function Get-GIConfig {
     }
     if ($missing) {
         throw "Config '$Path' is missing required keys: $(@($missing) -join ', ')"
+    }
+
+    if ($multi) {
+        $bad = @(@($config['GoldenImages']) | ForEach-Object -Begin { $i = 0 } -Process { $i++; if ($_ -isnot [System.Collections.IDictionary] -or -not $_['Id'] -or -not $_['GoldenImage'] -or -not $_['GoldenImage']['VmName']) { "#$i" } })
+        if ($bad) { throw "Config '$Path': GoldenImages entries $($bad -join ', ') need an Id and GoldenImage.VmName." }
     }
 
     # Root = folder containing the config file (the Pipeline folder for the default config)

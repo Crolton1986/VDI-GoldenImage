@@ -285,6 +285,7 @@ function Get-GIMaintainStepPlan {
     }
     & $add 'Reboot' 'Reboot after installs' $false ($actions.Count -gt 0) 'No packages selected'
     & $add 'Manifest' 'Read installed versions' $false
+    & $add 'CollectGuestLogs' 'Collect guest logs' $false
     & $add 'CleanupGuest' 'Clean up guest' $false
     & $add 'Finalize' "Finalize (-Action $($gi.FinalizeAction))" $false
     & $add 'PowerOff' 'Wait for power off' $false
@@ -347,7 +348,7 @@ function Invoke-GIStageMaintain {
     $gi   = $Config.GoldenImage
     $cred = Get-GISecretCredential -Name $gi.GuestCredentialSecret
     # Scriptblocks below run in a child scope, so shared state lives in this table
-    $ctx  = @{ vm = (Get-VM -Name $gi.VmName -ErrorAction Stop); data = @{}; reverted = $false }
+    $ctx  = @{ vm = (Get-VM -Name $gi.VmName -ErrorAction Stop); data = @{}; reverted = $false; logsSkipped = $false; logsCollectedOnFailure = $false }
 
     # A revert since the earlier attempt started throws away its work: resume isn't safe
     $prev = @(Get-GIStepList -Run $Run)
@@ -377,7 +378,17 @@ function Invoke-GIStageMaintain {
     $plan = Get-GIMaintainStepPlan -Config $Config
     $startAt = Initialize-GIMaintainSteps -Config $Config -Run $Run -Plan $plan -ResumeFrom $resumeFrom
     if ($startAt) { Write-GILog -Config $Config -RunId $Run.runId -Message "Maintain resuming at step '$((Get-GIStep -Run $Run -Id $startAt).label)'" }
-    $step = { param($Id, $Body) Invoke-GIMaintainStep -Config $Config -Run $Run -Id $Id -Action $Body }
+    # When any step fails, pull the guest logs while the guest is still on and untouched (best effort, never throws)
+    $collectOnFailure = {
+        if ($ctx.logsCollectedOnFailure) { return }
+        $ctx.logsCollectedOnFailure = $true
+        $null = Invoke-GIGuestLogCollection -Config $Config -Run $Run -VM $ctx.vm -Credential $cred -Reason 'after a failure'
+    }
+    $step = {
+        param($Id, $Body)
+        try { Invoke-GIMaintainStep -Config $Config -Run $Run -Id $Id -Action $Body }
+        catch { if ($Id -notin 'CollectGuestLogs', 'CleanupGuest') { & $collectOnFailure }; throw }
+    }
 
     $cleanup = [bool](Get-GIConfigValue $Config 'Snapshots.CleanupFailedRuns' $true)
 
@@ -473,7 +484,8 @@ function Invoke-GIStageMaintain {
                 logOffset = $(if ($fresh) { 0 } else { $old.logOffset }); launchId = $l.LaunchId; attemptId = $attemptId; bootTime = $l.BootTime; relaunches = 0 }
             "Watcher started for $($guestIds.Count) step(s)"
         }
-        $done = @(Wait-GIGuestWatcher -Config $Config -Run $Run -VM $ctx.vm -Credential $cred -AttemptId $attemptId)
+        try { $done = @(Wait-GIGuestWatcher -Config $Config -Run $Run -VM $ctx.vm -Credential $cred -AttemptId $attemptId) }
+        catch { & $collectOnFailure; throw }
         $wuStep = $done | Where-Object { $_ -and $_.id -ceq 'WindowsUpdate' } | Select-Object -First 1
         if ($wuStep) {
             $passes = Get-GIWatcherProp (Get-GIWatcherProp $wuStep 'data') 'passes'
@@ -503,6 +515,14 @@ function Invoke-GIStageMaintain {
         $ctx.data.manifest = $manifest
         ($manifest.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name) $($_.Value)" }) -join ', '
     }
+
+    & $step 'CollectGuestLogs' {
+        # Never fails the run: an unreachable guest marks the step Skipped
+        $r = Invoke-GIGuestLogCollection -Config $Config -Run $Run -VM $ctx.vm -Credential $cred -Reason 'end of Maintain'
+        $ctx.logsSkipped = [bool]$r.Skipped
+        $r.Message
+    }
+    if ($ctx.logsSkipped) { Set-GIStep -Config $Config -Run $Run -Id 'CollectGuestLogs' -Status Skipped -Message (Get-GIStep -Run $Run -Id 'CollectGuestLogs').message }
 
     & $step 'CleanupGuest' {
         Remove-GIGuestWatcher -Config $Config -Run $Run -VM $ctx.vm -Credential $cred

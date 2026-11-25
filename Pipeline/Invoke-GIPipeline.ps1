@@ -10,7 +10,9 @@
   -FromStage <name> continue an existing run (-RunId) from that stage through Validate
   -FromStep <id>    with -FromStage Maintain or -Stage Maintain: resume Maintain at that sub-step (e.g. Pkg:Horizon;
                     SafetySnapshot restarts it). Without it, a failed Maintain resumes at its first unfinished step.
-  -FromRequest      run the request queued by the dashboard (state/run-request.json); used by the VDI-GI-Runner task
+  -FromRequest      run the request queued by the dashboard (state/<imageId>/run-request.json); used by the VDI-GI-Runner task
+  -ImageId <id>     the golden image to work on. Without it: one image = that image; several images = All, PostCheck, Status
+                    and -FromRequest go through every image in turn (paused images are skipped for All), other stages need -ImageId.
   Every invocation except Status holds state/pipeline.lock, so scheduled, CLI and dashboard runs never overlap.
 .EXAMPLE
   PS> .\Invoke-GIPipeline.ps1 -FromStage TestPush -RunId 20261124-213005
@@ -36,11 +38,35 @@ param(
     [switch] $ForceLogoff,
     [ValidateSet('Preflight', 'Maintain', 'Snapshot', 'TestPush', 'Validate')] [string] $FromStage,
     [ValidatePattern('^[A-Za-z]+(:[A-Za-z]+)?$')] [string] $FromStep,
-    [switch] $FromRequest
+    [switch] $FromRequest,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]*$')] [string] $ImageId
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'VDI-GIPipeline.psd1') -Force
-$config = if ($ConfigPath) { Get-GIConfig -Path $ConfigPath } else { Get-GIConfig }
+$rootArgs = @{}; if ($ConfigPath) { $rootArgs.Path = $ConfigPath }
+$rootConfig = Get-GIConfig @rootArgs
+# The dashboard migrates a single-image config at startup; until then the legacy layout (state in the root folders) still works
+$images = @(Get-GIImageEntries -Config $rootConfig)
+if (-not $ImageId) {
+    if ($images.Count -eq 1) { $ImageId = $images[0].Id }
+    elseif ($images.Count -eq 0) { throw 'No golden images are configured.' }
+    elseif ($Stage -in 'All', 'PostCheck', 'Status' -or $FromRequest) {
+        # Several images: run each in turn in its own process so locks and state stay per image
+        $worst = 0
+        foreach ($img in $images) {
+            if ($Stage -eq 'All' -and -not $FromRequest -and $img.Paused) { Write-Host "Skipping paused image '$($img.Id)'."; continue }
+            $argList = @{}
+            foreach ($k in $PSBoundParameters.Keys) { $argList[$k] = $PSBoundParameters[$k] }
+            $argList.ImageId = $img.Id
+            & $PSCommandPath @argList
+            if ($LASTEXITCODE -gt $worst) { $worst = $LASTEXITCODE }
+        }
+        exit $worst
+    }
+    else { throw "More than one golden image is configured; pass -ImageId ($(($images | ForEach-Object { $_.Id }) -join ', '))." }
+}
+$config = Get-GIImageConfig -Config $rootConfig -ImageId $ImageId
+if ($config.ImagePaused -and $Stage -eq 'All' -and -not $FromRequest -and -not $FromStage) { Write-Warning "Golden image '$ImageId' is paused."; exit 0 }
 
 if ($Stage -eq 'Status') {
     Get-GIRunList -Config $config -Last 10 |
