@@ -276,7 +276,7 @@ function New-GIRunPage {
             $stepIdx = if ($f) { [array]::IndexOf($steps, $f) + 1 } else { 1 }
             $btnHtml = "<div class=""btnrow"">$(New-GIButton -Label 'Retry from this step' -Variant dangerline -OpensDialog 'dlg-retry')$(New-GIButton -Label 'Start a new run' -OpensDialog "dlg-start-$($Summary.id)")</div><p class=""muted small"">A new run first reverts the VM to the safety snapshot taken at the start of this run.</p>"
             $stepInput = if ($f) { "<input type=""hidden"" name=""step"" value=""$(ConvertTo-GIHtml $f.id)"">" } else { '' }
-            $dialogs += New-GIModal -Id 'dlg-retry' -Title "Retry from $label?" -BodyHtml "<p>The run continues from step $stepIdx. Steps that already succeeded keep their results and do not run again.</p>$stepInput" -ConfirmLabel 'Retry from this step' -Api "POST /api/images/$id/runs/$rid/retry"
+            $dialogs += New-GIModal -Id 'dlg-retry' -Title "Retry from ${label}?" -BodyHtml "<p>The run continues from $(if ($f) { "step $stepIdx" } else { ConvertTo-GIHtml $label }). Steps that already succeeded keep their results and do not run again.</p>$stepInput" -ConfirmLabel 'Retry from this step' -Api "POST /api/images/$id/runs/$rid/retry"
             $dialogs += New-GIStartRunDialog -Summary $Summary
         }
         $alert = "<div class=""alert"" role=""alert"" data-region=""alert""><strong>Failed at $(ConvertTo-GIHtml $label)</strong> $(Format-GIDate $run.updatedAt). <a href=""#failed"">Jump to log</a><p>The installer exited with an error. The guest VM is still powered on with the installer files in place.$fixLine</p>$btnHtml</div>"

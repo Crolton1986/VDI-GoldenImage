@@ -346,7 +346,7 @@ if(r.ok){var t=f.getAttribute('data-then')||'reload';
 if(t==='inline'){var bd=f.closest('.modal-backdrop');if(bd){closeDlg(bd)}f.reset();if(btn){btn.disabled=false;btn.textContent=btn.getAttribute('data-label')||'Confirm'}if(window.GI.gate&&f.querySelector('[data-confirm]')){window.GI.gate(f)}
 var so=d.getElementById('gi-action-status'),dn=f.getAttribute('data-done')||'Done.';if(so){so.textContent=dn}live(dn);d.dispatchEvent(new CustomEvent('gi:changed'));return}
 var loc=t;if(r.data&&r.data.redirect){loc=r.data.redirect}if(loc==='reload'){location.reload()}else{location.href=loc}return}
-if(r.status===409){var c=f.getAttribute('data-conflict');if(err){err.textContent=r.error}if(c==='reload'){setTimeout(function(){location.reload()},1500)}}
+if(r.status===409){var c=f.getAttribute('data-conflict');if(err){err.textContent=r.error}if(c==='reload'){var bd2=f.closest('.modal-backdrop');if(bd2){new MutationObserver(function(){if(bd2.hidden){location.reload()}}).observe(bd2,{attributes:true,attributeFilter:['hidden']})}else{setTimeout(function(){location.reload()},1500)}}}
 else if(err){err.textContent=r.error}else{alert(r.error)}
 if(btn){btn.disabled=false;btn.textContent=btn.getAttribute('data-label')||'Confirm'}
 var dlg=f.closest('.modal');if(dlg&&err){err.focus&&err.focus()}})});

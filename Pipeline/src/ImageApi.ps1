@@ -562,9 +562,17 @@ function Invoke-GIApiRetry {
     $step = [string](Get-GIBodyValue $Req.Body 'step' '')
     $p = @{ Config = $img.Config; Action = 'FromStage'; Stage = $stage; RunId = $runId; RequestedBy = $Req.User }
     if ($step) { $p.Step = $step }
+    # A request nobody is working on (no live runner) would block this one forever: replace it
+    $old = Get-GIPendingRunRequest -Config $img.Config
+    if ($old) {
+        $lk = Get-GIPipelineLock -Config $img.Config
+        if (-not $lk -or $lk.stale) { Remove-GIRunRequest -Config $img.Config -By $Req.User | Out-Null }
+    }
     try { $r = New-GIRunRequest @p } catch { return (New-GIApiError 409 $_.Exception.Message) }
+    $notice = 'queued'
+    if (Get-GIOpt $Req 'StartRunner') { $notice = & (Get-GIOpt $Req 'StartRunner') $img.Config }
     Write-GIApiAudit -Req $Req -Action 'run.retry' -Target $runId -Detail @{ image = $img.Id; stage = $stage; step = $step } -ImageConfig $img.Config
-    @{ Code = 202; Body = [ordered]@{ requestId = $r.id; stage = $stage } }
+    @{ Code = 202; Body = [ordered]@{ requestId = $r.id; stage = $stage; notice = $notice } }
 }
 
 function Invoke-GIApiStopRun {
