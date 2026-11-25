@@ -153,10 +153,11 @@ Writes are atomic: write `<file>.tmp` then `Move-Item -Force` over the target.
   Promotion = @{
     AutoPromote = $false
     MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }   # next window used when no -StartTime given
-    PipelineSchedule  = @{ Day = 'Tuesday'; Time = '20:00' }               # weekly start of the pipeline scheduled task
+    PipelineSchedule  = @{ Day = 'Tuesday'; Time = '20:00' }               # weekly start of this image's scheduled task (VDI-GI-Pipeline-<id>)
   }
   Email = @{ Enabled = $false; SmtpServer = 'smtp.domain.local'; Port = 25; From = 'vdi-pipeline@domain.local'; To = @('vdi-team@domain.local'); UseSsl = $false }
   Dashboard = @{ Port = 8443; CertificateThumbprint = ''; ViewerGroup = 'DOMAIN\VDI-Pipeline-Viewers'; ApproverGroup = 'DOMAIN\VDI-Pipeline-Approvers'; AdminGroup = 'DOMAIN\VDI-Pipeline-Admins'; RefreshSeconds = 20 }
+  # Optional Dashboard keys: AdDomain = 'corp.example.com' (default: the machine's domain), LegacyAdAuth = $true (Pode's own AD auth, no failed sign-in entries)
 }
 ```
 
@@ -226,7 +227,13 @@ vCenter = @{
     editable in the UI. Password is never rendered back. Blank password = keep existing.
   - `table`: array of hashtables, `Columns = @( <field defs of type string|enum|int|bool> )`, add/remove rows.
 - Optional on any field: `Help`, `Required`, `Warning` (shown next to the field, e.g. ProtectAncestors),
-  `Confirm` (bool fields: turning it on needs a confirmation checkbox, e.g. AutoPromote).
+  `Confirm` (bool fields: a change needs confirmation, e.g. AutoPromote. The page asks in a dialog and the dialog ticks the
+  `confirm_<Key>` checkbox, which stays in the page for browsers without JavaScript; the server still refuses the change without
+  it), `Group = 'Advanced'` (the field goes into one collapsed "Advanced" block at the end of the form, opened when one of its
+  fields has an error), `Inventory = 'vms'|'pools'` (string fields and table columns: a select filled from `GET /inventory` sits
+  next to the text input; items used by another golden image are disabled; the text input stays the field, so typing always works).
+- The Packages field shows `Check again` (a link to the same page, which reads the installer folder on every load) and a live line
+  "Ticking X adds 1 step (Install X)". One ticked package is one Maintain step.
 
 Settings API:
 
@@ -241,7 +248,7 @@ Settings API:
 ## Audit log: `state/audit.jsonl`
 
 One JSON object per line: `{ "at": "<o>", "user": "DOMAIN\\x", "action": "...", "target": "...", "detail": {...} }`.
-Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `run.request.cancel`, `approval.approve`, `approval.reject`, `rollback.request`.
+Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `run.request.cancel`, `approval.approve`, `approval.reject`, `rollback.request`, `schedule.task`, `auth.signin`, `auth.signin.failed`.
 `Write-GIAudit -Config -User -Action -Target [-Detail <hashtable>]` (never throws; Write-Warning on failure),
 `Get-GIAudit -Config [-Last 200]` newest first.
 
@@ -278,6 +285,25 @@ Actions: `settings.save`, `credential.set`, `connection.test`, `run.request`, `r
 `Dashboard.AdminGroup`: settings, credentials, Test connection, run controls. `ApproverGroup`: approve/reject.
 `ViewerGroup`: read. Login accepts all three. `-NoAuth`: read-only. `-LocalAdmin`: binds 127.0.0.1, no auth,
 caller is admin + approver (lab/smoke tests only).
+
+### Sign-in (`src/Auth.ps1`, `Web/AuthSetup.ps1`)
+
+Authentication is a custom Pode scheme. `Add-GIDashboardAuth` registers the method `AD`: the scheme parses the Basic header
+(`ConvertFrom-GIBasicAuthHeader`, ISO-8859-1 like Pode's own scheme; no header = 401 challenge, malformed = 400) and hands user and
+password to the validator `Invoke-GIDashboardSignIn`, which calls `Test-GIAdSignIn` and, in Windows only, `Invoke-GIAdBind`
+(`System.DirectoryServices.AccountManagement`: `ValidateCredentials`, nested groups through `GetAuthorizationGroups`).
+The user needs one of the three dashboard groups. The user object has Pode's AD shape (`Username`, `Name`, `Domain` = first label of the
+domain, `Groups` = short names), so the role checks are unchanged. The domain is `Dashboard.AdDomain` (optional), else
+`USERDNSDOMAIN`, else the machine's domain.
+
+A failed sign-in writes `auth.signin.failed` (result `Failed`): `user` is the attempted name as typed (control characters removed, 128
+characters at most), `detail` is `{ reason, source }`, reason being `badCredentials`, `notAuthorised` (valid password, no dashboard group) or
+`directoryError` (the domain could not be asked; the response is 503). `source` is the client address. The password is never written to the
+audit log, to a log, to an exception message or to a return value; `Write-GISignInFailed` has no parameter that could take it. At most one
+entry per user and source per minute, and 30 per source per minute. A request without credentials, or with a malformed header, is not a
+failed sign-in and is not written. Successful sign-ins stay `auth.signin`, once per user per 8 hours.
+
+`Dashboard.LegacyAdAuth = $true` in `pipeline.config.psd1` goes back to Pode's own Windows AD authentication (no failed sign-in entries).
 
 ---
 
@@ -707,18 +733,21 @@ All under `/api`, JSON. Errors: `{ "error": "text", "errorId": "8 hex chars" }` 
 | Method and path | Role | Result |
 |---|---|---|
 | `GET /images` | any | `{ images: [ { id, name, description, os, paused, vm, testPool, productionPools, packages, autoPromote, schedule, maintenanceWindow, lastRun, activeRun, lastKnownGood } ] }`. No live calls. |
-| `GET /images/{id}/live` | any | `{ checkedAt, vm: { name, power, snapshots, latestSnapshot } or null, pools: [ { pool, snapshot, pending, state, matchesLatest } ], lastKnownGood, errors: [ "vCenter did not answer within 15 seconds" ] }` |
+| `GET /images/{id}/live` | any | `{ checkedAt, vm: { name, power, snapshots: [ { name, created, isCurrent } ], latestSnapshot, outsideRetention: [ { name, reason } ] or null } or null, pools: [ { pool, snapshot, pending, state, matchesLatest } ], lastKnownGood, errors: [ "vCenter did not answer within 15 seconds" ] }` |
 | `GET /images/{id}/runs?status=&page=` | any | `{ runs, page, pageSize, total }`, newest first, 20 per page |
 | `GET /images/{id}/runs/{runId}` | any | `{ run, imageId, steps: [ { id, label, status, startedAt, endedAt, message, logLines, fixApplied } ], approval: { decision, by, at, validation, poolsToUpdate, nextWindow }, logBundleUrl }` |
 | `GET /images/{id}/runs/{runId}/steps/{stepId}/log?tail=N` | any | `{ lines, running, total }` |
 | `GET /images/{id}/packages` | any | installer status per package: id, name, selected, state (Found, Download, Missing, NoFolder), file, version, sizeMB, modified |
+| `GET /packages?folder=<path>` | Admin | installer status (same shape as `/images/{id}/packages`, without `selected`) for a folder on the pipeline host; the wizard uses it before the image exists. Read only. |
 | `GET /fixes` | any | the fix catalog from `guest/fixes` (id, description, priority, actions, maxAttempts, rebootFromAttempt, match, lastUsedRunId). Never runs a fix. |
 | `GET /runs/{runId}/logs.zip`, `GET /images/{id}/runs/{runId}/logs.zip` | any | log bundle, named `<imageName>-<RunId>-logs.zip` |
 | `GET /images/{id}/settings/{section}`, `GET /settings/{section}` | any | `{ section, values }`; secret fields show names and status only |
 | `POST /images` | Admin | 201 `{ id, name }`; validated with the settings rules and the constraints; starts no run |
-| `POST /images/{id}/settings/{section}` | Admin | sections: General, GoldenImage, Pools, Validation, Snapshots, Promotion, AppVolumes (test packages) |
+| `POST /images?dryRun=1[&step=N]` | Admin | validates only, saves nothing. `step` 1 to 4 reports only the problems of that wizard step (1 Basics: name; 2 Guest VM and pools: VM, pools, constraints against other images; 3 Windows Update and packages; 4 Schedule and promotion); without `step` every problem. 200 `{ valid, step }` or 400 `{ error }`. The wizard calls it on every Next and on Review. |
+| `POST /images/{id}/settings/{section}` | Admin | sections: General, GoldenImage, Pools, Validation, Snapshots, Promotion, AppVolumes (test packages). Saving Promotion with a changed `PipelineSchedule.Day` or `.Time` also moves the image's weekly task and adds `scheduleTask: { ok, code, detail }` (code: `updated`, `missing`, `failed`, `notwindows`) to the answer. The save itself succeeds either way. |
+| `POST /images/{id}/settings/{section}/test` | Admin | GoldenImage or Pools only. Body: the page's form fields (`VmName`, `Test.Name`, `Production[0].Name` ...), unsaved values included, secrets ignored. Nothing is saved. `{ ok, detail, seconds }`; 400 with the field errors when the values are invalid. |
 | `POST /settings/{section}` | Admin | vCenter, Horizon, AppVolumes, Email |
-| `POST /settings/{section}/test` | Admin | tests the posted (unsaved) values; `{ ok, detail, seconds }` |
+| `POST /settings/{section}/test` | Admin | tests the posted (unsaved) values; `{ ok, detail, seconds }`. The result and time (never the detail) are remembered per section in `state/connection-tests.json` and shown as a Connected / Failed / Not tested chip; saving the section or its credential resets it to Not tested. |
 | `POST /images/{id}/pause`, `/resume` | Admin | |
 | `DELETE /images/{id}` | Admin | removes the image from the config only; 409 while a run is active |
 | `POST /images/{id}/runs` | Admin | 202; 409 when paused or a run is active |
@@ -729,7 +758,15 @@ All under `/api`, JSON. Errors: `{ "error": "text", "errorId": "8 hex chars" }` 
 | `POST /images/{id}/vm/revert` | Admin | `{ snapshot }`; 409 while a run is active |
 | `POST /images/{id}/pools/{pool}/rollback` | Admin | `{ snapshot?, logoffPolicy, startTime?, runId? }`; marks the run RolledBack |
 
-Audit entries (each has time, user, role, image, action, details, result): `image.create`, `image.update`, `image.pause`, `image.resume`, `image.delete`, `image.migrate`, `vm.power`, `vm.revert`, `pool.rollback`, `settings.update` (section and changed keys, never values of secrets), `run.start`, `run.retry`, `approval.approve`, `approval.reject`, `connection.test`, `auth.denied`, `api.error`. Sign-in entries (`auth.signin`, `auth.signin.failed`) are written by the dashboard authentication hook (task 12).
+Audit entries (each has time, user, role, image, action, details, result): `image.create`, `image.update`, `image.pause`, `image.resume`, `image.delete`, `image.migrate`, `vm.power`, `vm.revert`, `pool.rollback`, `settings.update` (section and changed keys, never values of secrets), `run.start`, `run.retry`, `approval.approve`, `approval.reject`, `connection.test`, `schedule.task` (target = the task name, details = outcome code and message), `auth.denied`, `api.error`, and the sign-in entries `auth.signin` and `auth.signin.failed` (see Sign-in above).
+
+Run steps in `GET /images/{id}/runs/{runId}` carry `resumed` (true when the step was kept from an earlier attempt; runs saved before the flag existed are recognised by the `(earlier attempt)` suffix of the message). `Get-GIPoolLastPushed` (src/Images.ps1) derives when each pool last received an image from the run history (TestPush for the test pool, a Succeeded promotion entry for production pools); rollbacks are not runs and are not counted.
+
+## Scheduled tasks
+
+`Get-GIPipelineTaskDefinition -Root -Config` returns one weekly task per golden image, `VDI-GI-Pipeline-<id>` running `Invoke-GIPipeline.ps1 -Stage All -ImageId <id>` at that image's `Promotion.PipelineSchedule` (`-PipelineDay` and `-PipelineTime` override every image), plus the shared `VDI-GI-PostCheck` (every image, hourly), `VDI-GI-Dashboard` and `VDI-GI-Runner`. Without a config that lists images it returns the old single `VDI-GI-Pipeline` (-Stage All, every image). `Register-GIPipelineTask` removes the old single task and the task of an image that no longer exists when it registers per-image tasks (results carry `Removed = $true` for those); `Unregister-GIPipelineTask` removes every `VDI-GI-Pipeline-*` task too. A paused image keeps its task; the script skips it.
+
+`Set-GIPipelineScheduleTask -Config <image config> | -Config <root> -ImageId` sets the weekly trigger of that image's task and returns `@{ ok; code; detail }`. It never creates a task (that needs the account password): a new image has no task until `Register-GIPipelineTasks.ps1` runs again, and the Promotion page says so. `Update-GIImageScheduleTask` is the call the page and the API make after a save; it does nothing unless the day or time changed and writes `schedule.task`.
 
 ## Guest logs
 

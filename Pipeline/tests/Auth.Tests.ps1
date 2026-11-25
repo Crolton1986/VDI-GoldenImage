@@ -2,6 +2,8 @@ BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..' 'VDI-GIPipeline.psd1') -Force
     . (Join-Path $PSScriptRoot '..' 'Web' 'DashboardViews.ps1')
     . (Join-Path $PSScriptRoot '..' 'Web' 'AuthSetup.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'Components.ps1')
+    . (Join-Path $PSScriptRoot '..' 'Web' 'AdminViews.ps1')
     function script:New-AuthCfg {
         $root = Join-Path ([IO.Path]::GetTempPath()) ("gi-auth-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory $root | Out-Null
@@ -71,6 +73,12 @@ Describe 'Write-GISignInFailed' {
         (Write-GISignInFailed -Config $cfg -User 'a' -Reason badCredentials -Source '1.1.1.1' -ThrottleSeconds 0) | Should -BeTrue
         @(Get-GIAudit -Config $cfg).Count | Should -Be 4
     }
+    It 'stops after 30 entries per source and minute even when every user name is different, but not for another source' {
+        1..30 | ForEach-Object { Write-GISignInFailed -Config $cfg -User "user$_" -Reason badCredentials -Source '5.5.5.5' | Should -BeTrue }
+        (Write-GISignInFailed -Config $cfg -User 'user31' -Reason badCredentials -Source '5.5.5.5') | Should -BeFalse
+        (Write-GISignInFailed -Config $cfg -User 'user31' -Reason badCredentials -Source '6.6.6.6') | Should -BeTrue
+        (Write-GISignInFailed -Config $cfg -User 'user31' -Reason badCredentials -Source '5.5.5.5' -MaxPerSource 100 -ThrottleSeconds 0) | Should -BeTrue
+    }
     It 'has no parameter that could take a password' {
         (Get-Command Write-GISignInFailed).Parameters.Keys | Should -Not -Contain 'Password'
         (Get-Command Write-GISignInFailed).Parameters.Keys | Where-Object { $_ -match 'pass|secret|cred' } | Should -BeNullOrEmpty
@@ -82,6 +90,19 @@ Describe 'Write-GISignInFailed' {
         $s.Total | Should -Be 2
         (ConvertTo-GIAuditCsv -Entries $s.Entries) | Should -Match '"\x27=cmd\|x"'   # formula guard
         (ConvertTo-GIAuditCsv -Entries $s.Entries) | Should -Match 'notAuthorised'
+    }
+}
+
+Describe 'Failed sign-ins on the audit page' {
+    It 'escapes a hostile user name and keeps the password out of the page' {
+        $cfg = New-AuthCfg
+        $null = Write-GISignInFailed -Config $cfg -User '<img src=x onerror=alert(1)>' -Reason badCredentials -Source '10.0.0.9'
+        $s = Search-GIAudit -Config $cfg -Category signin
+        $h = New-GIAuditLogPage -Entries @($s.Entries) -Total $s.Total
+        $h | Should -Not -Match '<img src=x'
+        $h | Should -Match '&lt;img src=x onerror=alert\(1\)&gt;'
+        $h | Should -Match 'badCredentials'
+        $h | Should -Match 'chip bad">Failed'
     }
 }
 

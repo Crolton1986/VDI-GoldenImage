@@ -57,8 +57,8 @@ function Write-GISignInFailed {
     <#
     .SYNOPSIS
       Records auth.signin.failed with the attempted user name, the reason and where the request came from. Never takes a
-      password. At most one entry per user and source per minute, so a script hammering the dashboard can't flood the log.
-      Returns $true when written.
+      password. At most one entry per user and source per minute, and at most -MaxPerSource entries per source per minute
+      (a script trying many names can't flood the log either). Returns $true when written.
     .PARAMETER Reason
       badCredentials (wrong user or password, locked or disabled account), notAuthorised (right password, no dashboard
       group) or directoryError (Active Directory could not be asked).
@@ -70,15 +70,16 @@ function Write-GISignInFailed {
         [Parameter(Mandatory)][AllowEmptyString()][string]$User,
         [Parameter(Mandatory)][ValidateSet('badCredentials', 'notAuthorised', 'directoryError')][string]$Reason,
         [string]$Source = '',
-        [int]$ThrottleSeconds = 60
+        [int]$ThrottleSeconds = 60,
+        [int]$MaxPerSource = 30
     )
     $name = Get-GIAuditUserName -Name $User
     $src = (([string]$Source) -replace '[^0-9A-Za-z:.%\-]', '')
     if ($src.Length -gt 64) { $src = $src.Substring(0, 64) }
-    $recent = @(Get-GIAudit -Config $Config -Last 50 | Where-Object {
-            $_.action -eq 'auth.signin.failed' -and $_.user -ceq $name -and $_.detail -and ([string]$_.detail.source) -ceq $src -and (((Get-Date) - [datetime]$_.at).TotalSeconds -lt $ThrottleSeconds)
-        } | Select-Object -First 1)
-    if ($recent.Count) { return $false }
+    $window = @(Get-GIAudit -Config $Config -Last 300 | Where-Object {
+            $_.action -eq 'auth.signin.failed' -and $_.detail -and ([string]$_.detail.source) -ceq $src -and (((Get-Date) - [datetime]$_.at).TotalSeconds -lt $ThrottleSeconds)
+        })
+    if (@($window | Where-Object { $_.user -ceq $name }).Count -or $window.Count -ge $MaxPerSource) { return $false }
     Write-GIAudit -Config $Config -User $name -Action 'auth.signin.failed' -Target '' -Detail @{ reason = $Reason; source = $src } -Result 'Failed'
     return $true
 }

@@ -31,7 +31,7 @@ Running from a OneDrive folder, or any path with spaces, works. For production, 
 | PowerCLI | Turns off the customer experience program and sets how PowerCLI treats invalid vCenter certificates. | Yes | Yes |
 | Vault | Creates the SecretStore vault and sets it to open without a password for the Windows user running setup. | Yes | Yes |
 | Dashboard access | Sets the https port, the certificate (pick one from the machine store or create a self-signed one) and the AD groups for viewers, approvers and admins. | Skipped | Yes |
-| Tasks | Asks for your Windows password and registers the four scheduled tasks (listed under Manual setup, Scheduling). A Skip button leaves Task Scheduler untouched. | Skipped | Yes |
+| Tasks | Asks for your Windows password and registers the scheduled tasks (one weekly task per golden image plus three shared ones, listed under Manual setup, Scheduling). A Skip button leaves Task Scheduler untouched. | Skipped | Yes |
 | Finish | Marks setup complete. | Yes | Yes |
 
 A few things to know before you start:
@@ -136,26 +136,26 @@ Set-Secret -Name GI-GuestAdmin -Secret (Get-Credential -Message 'Golden VM local
 
 ### Scheduling
 
-`Register-GIPipelineTasks.ps1` creates four scheduled tasks. Run it from an elevated PowerShell 7 session. The setup page does this in its Tasks step.
+`Register-GIPipelineTasks.ps1` creates one weekly pipeline task per golden image plus three shared tasks. Run it from an elevated PowerShell 7 session. The setup page does this in its Tasks step.
 
 ```powershell
 $cred = Get-Credential DOMAIN\svc-vdi-gi
 .\Register-GIPipelineTasks.ps1 -Credential $cred -WhatIf
-.\Register-GIPipelineTasks.ps1 -Credential $cred -PipelineDay Tuesday -PipelineTime 20:00
+.\Register-GIPipelineTasks.ps1 -Credential $cred -PipelineDay Tuesday -PipelineTime 20:00   # same day and time for every image
 .\Register-GIPipelineTasks.ps1 -Credential $cred -ConfigPath D:\GI\prod.config.psd1
 .\Register-GIPipelineTasks.ps1 -Unregister
 ```
 
 | Task | Runs | When |
 |---|---|---|
-| VDI-GI-Pipeline | `Invoke-GIPipeline.ps1 -Stage All` | Weekly, Tuesday 20:00 by default |
-| VDI-GI-PostCheck | `Invoke-GIPipeline.ps1 -Stage PostCheck` | Every hour |
+| VDI-GI-Pipeline-`<id>` (one per golden image) | `Invoke-GIPipeline.ps1 -Stage All -ImageId <id>` | Weekly, at that image's *Schedule and promotion* day and time (Tuesday 20:00 by default). `-PipelineDay` / `-PipelineTime` override every image |
+| VDI-GI-PostCheck | `Invoke-GIPipeline.ps1 -Stage PostCheck` | Every hour, for every image |
 | VDI-GI-Dashboard | `Web\Start-GIDashboard.ps1` | At startup, restarted up to 3 times, 1 minute apart |
 | VDI-GI-Runner | `Invoke-GIPipeline.ps1 -FromRequest` | No trigger. The dashboard starts it when you queue a run |
 
-The tasks run whether or not the account is logged on, with highest privileges. Running the script again updates the tasks in place. PostCheck exits with 3 while a push is still running, and the task history shows that as a failure. That's expected. The account needs the "Log on as a batch job" right.
+The tasks run whether or not the account is logged on, with highest privileges. Running the script again updates the tasks in place, removes the old single `VDI-GI-Pipeline` task (it would start every image a second time) and removes the task of an image that no longer exists. A new image has no task until you run the script again: the dashboard can move the trigger of an existing task but can't create one, because that needs the account's password. The Schedule and promotion page tells you when an image has no task yet. PostCheck exits with 3 while a push is still running, and the task history shows that as a failure. That's expected. The account needs the "Log on as a batch job" right.
 
-The dashboard runs as the same account, and that account needs permission to start `VDI-GI-Runner` and to change the trigger of `VDI-GI-Pipeline`. If the dashboard reports that it couldn't start the runner or update the schedule, check the permissions on those tasks in Task Scheduler. `-Unregister` removes all four tasks.
+The dashboard runs as the same account, and that account needs permission to start `VDI-GI-Runner` and to change the trigger of each `VDI-GI-Pipeline-<id>` task. Saving an image's schedule moves its own task and writes `schedule.task` to the audit log. If the dashboard reports that it couldn't start the runner or update the schedule, check the permissions on those tasks in Task Scheduler. `-Unregister` removes every task.
 
 ## Configuration
 
@@ -210,7 +210,7 @@ Run from the Pipeline folder on the management server.
 
 `-FromStage` accepts Preflight, Maintain, Snapshot, TestPush or Validate. It runs that stage and every stage after it up to Validate, and it needs `-RunId`.
 
-Retrying Maintain after it failed or was interrupted resumes at the first unfinished sub-step. The safety snapshot, enabling updates, Windows Update and packages that already succeeded are skipped. Power on, the file copies, starting the watcher and everything from the reboot onward always run again. A guest step that was halfway through is started over as a new attempt. `-FromStep <id>` (with `-FromStage Maintain` or `-Stage Maintain`) picks the step to resume from instead, and `-FromStep SafetySnapshot` restarts Maintain completely. If the golden VM was reverted to a snapshot since the earlier attempt started (the pipeline checks vCenter's events for a revert task), the earlier work is gone, so Maintain restarts from the beginning no matter what you asked for. When it can't read the events, it restarts as well, to be safe. After a revert to the run's own `pre-maint-<RunId>` snapshot, that snapshot is reused; after a revert to any other snapshot, a new `pre-maint-<RunId>-<time>` is taken.
+Retrying Maintain after it failed or was interrupted resumes at the first unfinished sub-step. The safety snapshot, enabling updates, Windows Update and packages that already succeeded are skipped. Power on, the file copies, starting the watcher and everything from the reboot onward always run again. A guest step that was halfway through is started over as a new attempt. `-FromStep <id>` (with `-FromStage Maintain` or `-Stage Maintain`) picks the step to resume from instead, and `-FromStep SafetySnapshot` restarts Maintain completely. Steps kept from an earlier attempt show a *Resumed* tag on the run page. The Result block of a finished run says whether the test pool received the snapshot and how many production pools were updated, are still scheduled or failed. If the golden VM was reverted to a snapshot since the earlier attempt started (the pipeline checks vCenter's events for a revert task), the earlier work is gone, so Maintain restarts from the beginning no matter what you asked for. When it can't read the events, it restarts as well, to be safe. After a revert to the run's own `pre-maint-<RunId>` snapshot, that snapshot is reused; after a revert to any other snapshot, a new `pre-maint-<RunId>-<time>` is taken.
 
 A run that fails leaves the golden VM in whatever state it failed in, plus its `pre-maint-<RunId>` snapshot. When the next run's Maintain starts and the VM still sits on such a snapshot (the run is Failed, Rejected or RolledBack, or its run file is gone), Maintain first reverts to the oldest one in that chain, which is the state before the failed run touched the VM. Then it takes its own safety snapshot and removes the failed runs' `pre-maint` snapshots, oldest first, with disk consolidation after each. Nothing is removed while a push is pending or Horizon can't be reached, and a run's own snapshot or one still in use is never touched. Turn this off with Settings → Snapshots → Clean up after failed runs (`Snapshots.CleanupFailedRuns`); Maintain then only reports what it would revert and remove. Every invocation except `-Stage Status` takes the pipeline lock (`state/pipeline.lock`), so scheduled, command-line and dashboard runs never overlap.
 
@@ -282,16 +282,21 @@ Roles on top of the table above: Viewer sees everything and changes nothing, App
 
 * **Per image** (`/images/{id}/settings`, open to every role, editable by Admins only): General (name, description, pause, remove), Guest VM, Pools, Windows Update, Packages, App Volumes tests, Validation, Snapshots, Schedule and promotion. Saving changes only that image.
 * **Global** (`/settings`): vCenter, Horizon, App Volumes (connection and endpoints), Email, Dashboard and sign-in (read only: edit `pipeline.config.psd1` and restart), Fixes (read only list of `Pipeline/guest/fixes`).
-* **Packages** are a fixed catalog built into the pipeline. You tick which ones an image maintains; you can't add free-form packages. The installer folder on the host can be shared by several images.
+* **Packages** are a fixed catalog built into the pipeline. You tick which ones an image maintains; you can't add free-form packages. The installer folder on the host can be shared by several images. The page shows each installer's status (Found, Downloads automatically, Missing), says how many Maintain steps your ticks add ("Ticking Horizon Agent adds 1 step") and has a Check again link that reads the folder again (unsaved changes are lost).
+* **Guest VM** and **Pools** offer the VMs and pools from vCenter and Horizon in a list next to the text field. Items used by another golden image are disabled. If vCenter or Horizon doesn't answer, type the name. Both sections have a Test connection button that tests the form values, unsaved ones included, without saving.
 * Saving writes the changed keys to `config/settings.json`, layered over `pipeline.config.psd1`. Changes apply from the next run. Every save writes `settings.update` to the audit log with the section and changed keys, never secret values.
-* Test connection (vCenter, Horizon, App Volumes, Email) tests the values in the form, unsaved ones included, in a separate PowerShell process with a 120 second limit. Passwords are write-only and stored in the SecretManagement vault.
-* Turning on `AutoPromote` asks for a confirmation.
+* Test connection (vCenter, Horizon, App Volumes, Email) tests the values in the form, unsaved ones included, in a separate PowerShell process with a 120 second limit. Passwords are write-only and stored in the SecretManagement vault. Each global section shows Connected, Failed or Not tested beside its title, with the time of the last test. Saving the section or its credential resets it to Not tested. Only the result and the time are kept, never the test's details. The App Volumes endpoints sit in a collapsed Advanced block.
+* Changing `AutoPromote` asks for confirmation in a dialog. Saving the schedule of an image also moves that image's weekly task.
 
 ### Adding, pausing and removing images
 
-**Add golden image** (`/images/new`, Admin) is a five step wizard: Basics, Guest VM and pools (loaded live from vCenter and Horizon; a VM or pool used by another image is disabled), Windows Update and packages, Schedule and promotion, Review. It creates the image and starts no run. Set the guest administrator password afterwards under Settings, Guest VM. **Pause image** keeps history but skips scheduled runs and blocks Start run. **Remove** takes the image out of the dashboard only: vCenter, Horizon, snapshots, pools, run history and logs are not touched. It is refused while a run is active.
+**Add golden image** (`/images/new`, Admin) is a five step wizard: Basics, Guest VM and pools (loaded live from vCenter and Horizon; a VM or pool used by another image is disabled), Windows Update and packages, Schedule and promotion, Review. Every Next asks the server to check that step (`POST /api/images?dryRun=1&step=N`); the packages table shows each installer's status for the installer folder you type, with a Check again button; Create golden image with automatic promotion asks for confirmation in a dialog. It creates the image and starts no run. It doesn't create the image's weekly scheduled task: run `Register-GIPipelineTasks.ps1` again. Set the guest administrator password afterwards under Settings, Guest VM. **Pause image** keeps history but skips scheduled runs and blocks Start run. **Remove** takes the image out of the dashboard only: vCenter, Horizon, snapshots, pools, run history and logs are not touched. It is refused while a run is active.
 
 Config and state are per image: `GoldenImages` in `config/settings.json`, and `state/<imageId>/`, `logs/<imageId>/`, `reports/<imageId>/`. An older single-image config is migrated automatically when the dashboard starts (backup in `config/migration-backup-<timestamp>/`, never deleted). See `docs/ADR-0001-multi-image.md`.
+
+### Overview tab details
+
+The pool table's *Last pushed* column comes from the run history (the test pool when TestPush succeeded, a production pool when its promotion succeeded). A pool nobody has pushed to through a run shows "None recorded"; rollbacks are not runs and are not counted. A snapshot gets the tag *Outside retention* when the next retention pass would remove it, decided by the same function retention uses and only shown when both vCenter and Horizon answered (Horizon says which snapshots the pools use). With `Snapshots.Prune` off nothing is removed anyway, and the page says so. Power on/off, Revert VM and Roll back answer in a status line on the page and refresh the live values; they no longer reload it. When vCenter or Horizon doesn't answer, the cards and the Overview show the last values this browser saw, greyed, with "Last known state as of HH:MM" (kept in the tab's session storage, per image).
 
 ### Runs, approval and rollback
 
@@ -312,7 +317,7 @@ Dashboard errors and every request are logged to `logs/dashboard_errors_*.log` a
 
 ### Audit
 
-`/audit` is visible to every role (read only): newest first, 50 per page, filterable by image, action type, user and dates, with Export CSV for the current filter. It records settings saves (section and changed keys, never secrets), credential changes, connection tests, run requests and decisions, VM power and revert, pool rollbacks, image create, update, pause, resume and delete, denied attempts, and sign-ins (once per user per 8 hours, because sign-in is stateless basic authentication). Failed sign-ins are not recorded yet: Pode checks the password before the dashboard sees the request.
+`/audit` is visible to every role (read only): newest first, 50 per page, filterable by image, action type, user and dates, with Export CSV for the current filter. It records settings saves (section and changed keys, never secrets), credential changes, connection tests, run requests and decisions, VM power and revert, pool rollbacks, image create, update, pause, resume and delete, denied attempts, scheduled task updates (`schedule.task`), and sign-ins. A successful sign-in is recorded once per user per 8 hours, because sign-in is stateless basic authentication. A failed one (`auth.signin.failed`, result Failed) records the user name as typed, the reason (wrong user or password, no dashboard group, or Active Directory not reachable) and the client address, never the password. A script that keeps guessing is recorded at most once per user and address per minute, and 30 times per address per minute. Dashboard sign-in is checked by the pipeline's own Pode scheme (`src/Auth.ps1`). If it misbehaves on your domain, set `Dashboard.LegacyAdAuth = $true` in `pipeline.config.psd1` to use Pode's built-in Windows AD authentication again (then failed sign-ins are not recorded). `Dashboard.AdDomain` sets the domain to sign in against when the server's own domain is not the right one.
 
 ### Lab mode
 

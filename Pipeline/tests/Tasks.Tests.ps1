@@ -235,6 +235,10 @@ Describe 'One weekly task per golden image' {
         ($d | Where-Object Name -eq 'VDI-GI-Pipeline-w11-corp').Arguments | Should -Be "-Stage All -ImageId w11-corp -ConfigPath `"$script:cfgFile`""
         foreach ($n in 'VDI-GI-Pipeline-w11-corp', 'VDI-GI-Pipeline-win10-lab') { $t = ($d | Where-Object Name -eq $n).Trigger; $t.Day | Should -Be 'Wednesday'; $t.Time | Should -Be '22:30' }
     }
+    It 'refuses an image id that could not be a safe task name or argument' {
+        Mock -ModuleName VDI-GIPipeline Get-GIImageEntries { @(@{ Id = 'a"; calc; "'; Name = 'Evil'; Promotion = @{ PipelineSchedule = @{ Day = 'Friday'; Time = '03:15' } } }) }
+        { Get-GIPipelineTaskDefinition -Root $script:root -Config @{} } | Should -Throw "*can't be used in a task name*"
+    }
     It 'keeps a paused image''s task (the pipeline script skips it)' {
         $cfg = New-ImgCfg @('only-one')
         @(Get-GIPipelineTaskDefinition -Root $script:root -Config $cfg | Where-Object Name -like 'VDI-GI-Pipeline-*').Count | Should -Be 1
