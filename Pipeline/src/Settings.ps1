@@ -44,6 +44,7 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'Server'; Label = 'Manager (FQDN)'; Type = 'string'; Required = $true }
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
+            @{ Key = 'Managers'; Label = 'Managers for the golden image agent'; Type = 'list'; Help = 'One Manager FQDN per line. The first is set at agent install, the rest are added as failover Managers. Written to the golden image on each run. Leave empty to keep the script defaults.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
             @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'API paths differ between App Volumes releases. Must start with /. Default: /app_volumes/sessions. Test connection tries the other known path on a 404 and tells you which one worked.' }
             @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'Default: /app_volumes/online_entities' }
