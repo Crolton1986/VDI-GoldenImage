@@ -56,7 +56,8 @@ function Get-GIImageDefaults {
             Watcher = @{ LogPollSec = 10; IdlePollSec = 60; StatusPollSec = 60; WatchingWindowSec = 30; StaleHeartbeatSec = 180; MaxRelaunches = 3; MaxStepAttempts = 4; FixTimeoutSec = 600 }
         }
         Pools = @{ Test = @{ Name = ''; LogoffPolicy = 'FORCE_LOGOFF' }; Production = @(); PushTimeoutMin = 120 }
-        Validation = @{ GuestSampleCount = 2; RequiredServices = @('wsnm', 'svservice', 'frxsvc'); MachineReadyTimeoutMin = 60 }
+        Validation = @{ GuestSampleCount = 2; RequiredServices = @('wsnm', 'svservice', 'frxsvc'); MachineReadyTimeoutMin = 60
+                        StuckMachineGraceMin = 10; AutoRecreateStuckMachines = $true; MaxRecreateAttempts = 2 }
         Snapshots = @{ NamePrefix = 'Baseline'; Mode = 'Chain'; Keep = 2; MaxChainDepth = 10; Prune = $false; ProtectAncestors = $true; ConsolidateTimeoutMin = 60; MinFreeSpacePercent = 15; CleanupFailedRuns = $true }
         Promotion = @{ AutoPromote = $false; MaintenanceWindow = @{ Days = @('Saturday'); StartTime = '22:00' }; PipelineSchedule = @{ Day = 'Tuesday'; Time = '20:00' } }
         AppVolumes = @{ TestPackages = @() }
