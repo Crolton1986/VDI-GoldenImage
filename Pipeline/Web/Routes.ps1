@@ -216,7 +216,7 @@ function Receive-GIImageSettingsRoute {
         }
     } catch { $errors['_'] = $_.Exception.Message }
     if ($errors.Count) {
-        $body = Get-GIImageSettingsBody -Context $Context -WebEvent $WebEvent -D $d -Section $section -Errors $errors -Values $values -Notice 'Not saved: fix the highlighted fields.'
+        $body = Get-GIImageSettingsBody -Context $Context -WebEvent $WebEvent -D $d -Section $section -Errors $errors -Values $values -Notice $(if (@($errors.Keys) -ne '_') { 'Not saved: fix the highlighted fields.' } else { 'Not saved.' })
         Send-GIHtml (New-GIImageSettingsPage -Summary $d.Summary -Ctx (Get-GIViewContext) -Section $section -BodyHtml $body) 400
         return
     }
@@ -312,7 +312,7 @@ function Receive-GIGlobalSettingsRoute {
         try { $res = Save-GISettingsSection -Config $cfg -Section $sk -Values $values -By $user } catch { $errors['_'] = $_.Exception.Message }
     }
     if ($errors.Count) {
-        $body = Get-GIGlobalSettingsBody -Context $Context -WebEvent $WebEvent -Section $sk -Errors $errors -Values $values -Notice 'Not saved: fix the highlighted fields.'
+        $body = Get-GIGlobalSettingsBody -Context $Context -WebEvent $WebEvent -Section $sk -Errors $errors -Values $values -Notice $(if (@($errors.Keys) -ne '_') { 'Not saved: fix the highlighted fields.' } else { 'Not saved.' })
         Send-GIHtml (New-GIGlobalSettingsPage -Ctx (Get-GIViewContext) -Section $sk -BodyHtml $body) 400
         return
     }

@@ -107,3 +107,16 @@ Describe 'Golden image list and migration' {
         (Get-GIImageEntry -Config (Load $script:root) -Id 'w11-gi-01').Promotion.AutoPromote | Should -BeTrue
     }
 }
+
+Describe 'Saving one image section' {
+    It 'does not fail because another section of the image is invalid' {
+        $e = @{ Validation = @{ GuestSampleCount = 2; RequiredServices = @('wsnm'); MachineReadyTimeoutMin = 60 }
+                Pools = @{ Test = @{ Name = '' }; Production = @() } }
+        $p = @(Get-GIImageEntryProblems -Entry $e -OnlySections @() -SkipConstraints)
+        $p.Count | Should -Be 0
+    }
+    It 'still reports problems in the sections it is asked to check' {
+        $e = @{ Pools = @{ Test = @{ Name = '' }; Production = @() } }
+        @(Get-GIImageEntryProblems -Entry $e -OnlySections @('Pools') -SkipConstraints).Count | Should -BeGreaterThan 0
+    }
+}

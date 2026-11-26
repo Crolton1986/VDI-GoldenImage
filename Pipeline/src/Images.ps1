@@ -213,11 +213,14 @@ function Get-GIImageEntryProblems {
         for the per-image sections, plus the constraints against the other images.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @())
+    param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @(),
+        [string[]]$OnlySections,      # limit the schema checks to these blocks (a section save checks only itself)
+        [switch]$SkipConstraints)     # skip the checks against the other images
     $problems = [System.Collections.Generic.List[object]]::new()
     $merged = Merge-GIHashtable -Base (Get-GIImageDefaults) -Overlay $Entry
     foreach ($section in 'GoldenImage', 'Pools', 'Validation', 'Snapshots', 'Promotion') {
         if (-not $Entry.ContainsKey($section)) { continue }
+        if ($PSBoundParameters.ContainsKey('OnlySections') -and $section -notin $OnlySections) { continue }
         try { $def = Get-GISettingsSectionDef $section } catch { continue }
         if ($def.ReadOnly) { continue }
         $form = @{}
@@ -232,6 +235,7 @@ function Get-GIImageEntryProblems {
             $problems.Add([pscustomobject]@{ Step = $step; Message = "${section}.${k}: $($errs[$k])" })
         }
     }
+    if ($SkipConstraints) { return $problems.ToArray() }
     foreach ($m in (Test-GIImageConstraints -Entries (@($Others) + @($merged)))) {
         $step = if ($m -match "invalid id|has no name|name '.*' is used twice|id '.*' is used twice") { 1 } else { 2 }
         $problems.Add([pscustomobject]@{ Step = $step; Message = $m })
@@ -241,8 +245,8 @@ function Get-GIImageEntryProblems {
 
 function Assert-GIImageEntryValid {
     # Throws one message listing every problem, using the same rules as the settings schema for the per-image sections.
-    param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @())
-    $problems = @(Get-GIImageEntryProblems -Entry $Entry -Others $Others | ForEach-Object { $_.Message })
+    param([Parameter(Mandatory)][hashtable]$Entry, [object[]]$Others = @(), [hashtable]$Scope = @{})
+    $problems = @(Get-GIImageEntryProblems -Entry $Entry -Others $Others @Scope | ForEach-Object { $_.Message })
     if ($problems.Count) { throw "Image not saved, $($problems.Count) problem(s): $($problems -join '; ')" }
 }
 
@@ -306,7 +310,11 @@ function Save-GIImageSection {
     }
     if ($changed.Count -eq 0) { return @{ Section = $Section; Changed = @() } }
     $others = @(Get-GIImageEntries -Config $Config | Where-Object { $_.Id -cne $ImageId })
-    Assert-GIImageEntryValid -Entry $entry -Others $others
+    # The section was validated above. Don't re-check the rest of the image here: a problem on another page must not block this save.
+    # Only identity sections can clash with the other images (names, VM, pools).
+    $scope = @{ OnlySections = @() }
+    if ($Section -notin 'General', 'GoldenImage', 'Pools') { $scope.SkipConstraints = $true }
+    Assert-GIImageEntryValid -Entry $entry -Others $others -Scope $scope
     $list[$idx] = $entry
     Write-GIImageOverlayList -Config $Config -List $list
     Write-GIAudit -Config $Config -User $By -Action 'image.update' -Target $ImageId -Detail @{ image = $ImageId; section = $Section; keys = @($changed); result = 'OK' }
