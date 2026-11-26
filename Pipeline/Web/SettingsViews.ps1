@@ -437,6 +437,12 @@ function New-GISettingsSectionPage {
         if ($needInv -and -not $Disabled) { $h += '<p class="help" id="inv-status" role="status" aria-live="polite"></p>' + (Get-GIInventoryScript) }
     }
 
+    if ($SectionKey -eq 'GuestScript') {
+        $pv = @(Get-GIValue $SectionData 'Preview' @())
+        $body = if ($pv.Count) { ($pv | ForEach-Object { ConvertTo-GIHtml ([string]$_) }) -join "`n" } else { '(nothing set: the script uses its built-in defaults)' }
+        $h += "<h3>Written to the golden image on the next run</h3><p class=""help"">The saved settings, as they will appear in <code>VDI-GoldenImage.ps1.config</code> next to the guest script.</p><pre class=""preview"" aria-label=""Guest config preview"">$body</pre>"
+    }
+
     if ((Get-GIValue $section 'Test' $null) -and -not $Disabled -and -not $FormAction -and -not $BodyOnly) {
         $h += "<h2>Test connection</h2><form method=""post"" action=""/settings/$sk/test"" class=""formbox"">$(Get-GITokenInput $Token)<button type=""submit"" class=""sec"">Test connection</button></form>"
         if ($null -ne $TestResult) {

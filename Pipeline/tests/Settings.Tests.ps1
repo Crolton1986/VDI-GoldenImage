@@ -376,7 +376,7 @@ Describe 'Schema vs pipeline.config.psd1' {
         @($problems) | Should -BeNullOrEmpty
     }
     It 'defines the documented sections and read-only Dashboard' {
-        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Packages', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
+        (Get-GISettingsSchema).Keys | Should -Be @('vCenter', 'Horizon', 'AppVolumes', 'GoldenImage', 'Packages', 'GuestScript', 'WindowsUpdate', 'Pools', 'Validation', 'Snapshots', 'Promotion', 'Email', 'Dashboard')
         (Get-GISettingsSchema).Dashboard.ReadOnly | Should -BeTrue
         (Get-GISettingsSchema).Promotion.Title | Should -Be 'Schedule & promotion'
     }
@@ -423,5 +423,32 @@ Describe 'Packages section' {
         $d.Installers | Should -Not -BeNullOrEmpty
         @($d.Installers.Packages).Count | Should -Be 9
         (Get-GISettingsSection -Config (Get-GIConfig -Path (New-SettingsConfig)) -Section vCenter).ContainsKey('Installers') | Should -BeFalse
+    }
+}
+
+Describe 'Guest script settings' {
+    It 'writes nothing when no guest script settings are set' {
+        @(Get-GIGuestScriptConfigLines -Config @{ GoldenImage = @{ VmName = 'x' } }).Count | Should -Be 0
+    }
+    It 'builds config lines in the format the guest script parses' {
+        $c = @{ GoldenImage = @{ GuestScript = @{
+            AppVolManager = @('avm1.example.com', ' avm2.example.com ')
+            AppVolEnforceSSLVal = $false
+            AppVolMaxDelayTimeOutS = 30
+            DemConfigPath = '\\fs.example.com\dem$\general'
+        } } }
+        $l = @(Get-GIGuestScriptConfigLines -Config $c)
+        $l | Should -Contain 'AppVolManager = @("avm1.example.com", "avm2.example.com")'
+        $l | Should -Contain 'AppVolEnforceSSLVal = $false'
+        $l | Should -Contain 'AppVolMaxDelayTimeOutS = 30'
+        $l | Should -Contain 'DemConfigPath = "\\fs.example.com\dem$\general"'
+    }
+    It 'skips empty lists and blank strings so script defaults apply' {
+        $c = @{ GoldenImage = @{ GuestScript = @{ AppVolManager = @(); DemConfigPath = '  ' } } }
+        @(Get-GIGuestScriptConfigLines -Config $c).Count | Should -Be 0
+    }
+    It 'only emits keys the guest script knows' {
+        $script = Get-Content -Raw (Join-Path $PSScriptRoot '..' '..' 'VDI-GoldenImage.ps1')
+        foreach ($f in (Get-GISettingsSchema).GuestScript.Fields) { $script | Should -Match "(?m)^\s*$([regex]::Escape($f.Key))\s*=" }
     }
 }

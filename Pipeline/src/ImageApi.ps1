@@ -242,7 +242,7 @@ function Get-GIApiImageSettings {
         return @{ Code = 200; Body = [ordered]@{ section = 'General'; values = [ordered]@{ Name = $e.Name; Description = $e.Description; Os = $e.Os } } }
     }
     if ($sec -eq 'AppVolumes') { return @{ Code = 200; Body = [ordered]@{ section = 'AppVolumes'; values = [ordered]@{ TestPackages = @($img.Config.AppVolumes.TestPackages) } } } }
-    if ($sec -notin $script:GIImageBlocks -and $sec -notin 'Packages', 'WindowsUpdate') { return (New-GIApiError 404 'Unknown section') }
+    if ($sec -notin $script:GIImageBlocks -and $sec -notin 'Packages', 'WindowsUpdate', 'GuestScript') { return (New-GIApiError 404 'Unknown section') }
     $s = Get-GISettingsSection -Config $img.Config -Section $sec
     @{ Code = 200; Body = [ordered]@{ section = $sec; values = $s.Values } }
 }

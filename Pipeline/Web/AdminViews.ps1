@@ -13,6 +13,7 @@ function Get-GIImageSettingsSections {
         @{ Key = 'Pools'; Label = 'Pools' }
         @{ Key = 'WindowsUpdate'; Label = 'Windows Update' }
         @{ Key = 'Packages'; Label = 'Packages' }
+        @{ Key = 'GuestScript'; Label = 'Guest script' }
         @{ Key = 'AppVolumes'; Label = 'App Volumes tests' }
         @{ Key = 'Validation'; Label = 'Validation' }
         @{ Key = 'Snapshots'; Label = 'Snapshots' }

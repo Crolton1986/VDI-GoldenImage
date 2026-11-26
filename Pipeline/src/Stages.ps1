@@ -457,18 +457,18 @@ function Invoke-GIStageMaintain {
         $dir = Split-Path $gi.ScriptPathInGuest -Parent
         Invoke-GIGuestScript -VM $ctx.vm -Credential $cred -ScriptText "New-Item -ItemType Directory -Path '$dir' -Force | Out-Null" | Out-Null
         Copy-VMGuestFile -Source $local -Destination "$dir\" -VM $ctx.vm -LocalToGuest -GuestCredential $cred -Force -ErrorAction Stop
-        # Environment values come from the Settings page, never from files in the repo. The script reads its
-        # overrides from '<script>.config' next to it, so write that file in the guest from the pipeline settings.
-        $lines = [System.Collections.Generic.List[string]]::new()
-        $mgrs = @(Get-GIConfigValue $Config 'AppVolumes.Managers' @()) | Where-Object { $_ }
-        if ($mgrs) { $lines.Add('AppVolManager = @(' + (($mgrs | ForEach-Object { '"' + ([string]$_).Trim().Replace('"', '') + '"' }) -join ', ') + ')') }
+        # Environment values come from the Settings page (Guest script), never from files in the repo. The script
+        # reads its overrides from '<script>.config' next to it, so write that file in the guest.
+        $lines = @(Get-GIGuestScriptConfigLines -Config $Config)
+        $cfgPath = ($gi.ScriptPathInGuest -replace '\.ps1$', '.ps1.config')
         if ($lines.Count) {
-            $cfgPath = ($gi.ScriptPathInGuest -replace '\.ps1$', '.ps1.config')
             $text = ($lines -join "`r`n").Replace("'", "''")
             Invoke-GIGuestScript -VM $ctx.vm -Credential $cred -ScriptText "Set-Content -LiteralPath '$cfgPath' -Value '$text' -Encoding UTF8" | Out-Null
-            return "Copied script to $dir; wrote $($lines.Count) setting(s) to $(Split-Path $cfgPath -Leaf) from the Settings page"
+            return "Copied script to $dir; wrote $($lines.Count) setting(s) to $(Split-Path $cfgPath -Leaf)"
         }
-        "Copied to $dir (no guest overrides set on the Settings page, so the script's built-in defaults apply)"
+        # Nothing set: remove a config left by an earlier run so the script's own defaults apply
+        Invoke-GIGuestScript -VM $ctx.vm -Credential $cred -ScriptText "Remove-Item -LiteralPath '$cfgPath' -Force -ErrorAction SilentlyContinue" | Out-Null
+        "Copied to $dir (no Guest script settings, so the script's built-in defaults apply)"
     }
 
     & $step 'CopyInstallers' {

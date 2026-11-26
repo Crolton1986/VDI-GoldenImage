@@ -44,7 +44,6 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'Server'; Label = 'Manager (FQDN)'; Type = 'string'; Required = $true }
             @{ Key = 'CredentialSecret'; Label = 'Credential'; Type = 'secret' }
             @{ Key = 'SkipCertificateCheck'; Label = 'Skip certificate check'; Type = 'bool'; Warning = 'Disables TLS certificate validation for this server.' }
-            @{ Key = 'Managers'; Label = 'Managers for the golden image agent'; Type = 'list'; Help = 'One Manager FQDN per line. The first is set at agent install, the rest are added as failover Managers. Written to the golden image on each run. Leave empty to keep the script defaults.' }
             @{ Key = 'TestPackages'; Label = 'Test packages'; Type = 'list'; Help = 'One package name per line; assigned to the test pool computer OU.' }
             @{ Key = 'Endpoints.Session'; Label = 'Session endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'API paths differ between App Volumes releases. Must start with /. Default: /app_volumes/sessions. Test connection tries the other known path on a 404 and tells you which one worked.' }
             @{ Key = 'Endpoints.OnlineEntities'; Label = 'Online entities endpoint'; Type = 'string'; Pattern = '^/'; Group = 'Advanced'; Help = 'Default: /app_volumes/online_entities' }
@@ -74,6 +73,27 @@ $script:GISettingsSchema = [ordered]@{
             @{ Key = 'Actions'; Label = 'Maintained packages'; Type = 'packages'; ItemValues = $script:GIGuestActions }
             @{ Key = 'ActionTimeoutMin'; Label = 'Package timeout (min)'; Type = 'int'; Min = 5; Max = 600; Default = 60; Required = $true
                Help = 'A package install still running after this long is stopped and its Maintain step fails, instead of blocking the run.' }
+        )
+    }
+    GuestScript = @{
+        Title = 'Guest script'; ConfigPath = 'GoldenImage.GuestScript'; Test = $null; ReadOnly = $false
+        Description = 'Values the guest script uses when it installs the agents. They are written to the golden image on every run, so nothing environment-specific lives in the script or the repo. A blank field keeps the script default.'
+        Fields = @(
+            @{ Key = 'AppVolManager'; Label = 'App Volumes Managers'; Type = 'list'; ItemPattern = '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'; ItemMessage = 'Use a host name or IP address, without https:// or a port'
+               Help = 'One Manager per line. The first is set when the agent is installed; the others are added as failover Managers.' }
+            @{ Key = 'AppVolEnforceSSLVal'; Label = 'Enforce Manager certificate validation'; Type = 'bool'; Default = $false
+               Help = 'Leave off until the golden image trusts the Manager certificate.' }
+            @{ Key = 'AppVolDisableSpoolerRestart'; Label = 'Stop App Volumes restarting the print spooler'; Type = 'bool'; Default = $true }
+            @{ Key = 'AppVolMaxDelayTimeOutS'; Label = 'Manager response timeout (s)'; Type = 'int'; Min = 0; Max = 3600; Default = 30
+               Help = '0 waits forever; the agent default is 300.' }
+            @{ Key = 'DemConfigPath'; Label = 'DEM configuration share'; Type = 'string'; Help = 'UNC path of the Dynamic Environment Manager config share, e.g. \\server\share\general. Blank installs DEM without one.' }
+            @{ Key = 'HorizonAgentExecScriptTimeout'; Label = 'ClonePrep script timeout (ms)'; Type = 'int'; Min = 2000; Max = 600000; Default = 90000
+               Help = 'How long instant-clone customization scripts may run. The agent default is 2000.' }
+            @{ Key = 'HorizonAgentAddLocal'; Label = 'Horizon Agent features to install'; Type = 'string'; Default = 'ALL'; Group = 'Advanced'
+               Help = 'ADDLOCAL value: ALL or a comma-separated feature list.' }
+            @{ Key = 'HorizonAgentRemove'; Label = 'Horizon Agent features to remove'; Type = 'string'; Group = 'Advanced'
+               Help = 'REMOVE value, used with ALL. Comma-separated, no spaces.' }
+            @{ Key = 'DelPerfTrackerDesktopIcon'; Label = 'Remove the Performance Tracker desktop icon'; Type = 'bool'; Default = $true; Group = 'Advanced' }
         )
     }
     WindowsUpdate = @{
@@ -275,6 +295,37 @@ function Get-GISettingsEffective {
     return $values
 }
 
+function Get-GIGuestScriptConfigLines {
+    <#
+    .SYNOPSIS
+        Lines for the guest script's '<script>.config' file, built from the Guest script settings.
+        Only values that were set on the Settings page are written; everything else keeps the script default.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([Parameter(Mandatory)][hashtable]$Config)
+    $def = Get-GISettingsSectionDef 'GuestScript'
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $def.Fields) {
+        $n = Get-GISettingsNode $Config (Get-GISettingsFieldPath $def $f)
+        if (-not $n.Found -or $null -eq $n.Value) { continue }
+        $key = [string]$f.Key
+        switch ($f.Type) {
+            'list' {
+                $items = @(@($n.Value) | ForEach-Object { ([string]$_).Trim().Replace('"', '') } | Where-Object { $_ })
+                if ($items.Count) { $lines.Add("$key = @($(($items | ForEach-Object { '"' + $_ + '"' }) -join ', '))") }
+            }
+            'bool' { $lines.Add("$key = " + $(if ([bool]$n.Value) { '$true' } else { '$false' })) }
+            'int' { $lines.Add("$key = $([int]$n.Value)") }
+            default {
+                $v = ([string]$n.Value).Trim().Replace('"', '')
+                if ($v) { $lines.Add("$key = `"$v`"") }
+            }
+        }
+    }
+    return , $lines.ToArray()
+}
+
 function Get-GISettingsSection {
     <#
     .SYNOPSIS
@@ -301,6 +352,8 @@ function Get-GISettingsSection {
     $result = @{ Section = $Section; Values = $values }
     # The Packages page shows which installers are in the host folder (a local directory read)
     if ($Section -eq 'Packages') { $result.Installers = Get-GIInstallerStatus -Config $Config }
+    # The Guest script page previews the file written to the guest
+    if ($Section -eq 'GuestScript') { $result.Preview = Get-GIGuestScriptConfigLines -Config $Config }
     return $result
 }
 
